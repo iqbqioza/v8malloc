@@ -69,6 +69,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `is_empty` / `is_full` read the atomic `used_count` so remote
   observers can pick empty pages without synchronizing with the
   owner thread.
+- Small slab page (`v8m_slab_small_init/alloc/free`): intrusive
+  free-list layout for size classes 8..31 (80 B – 4 KiB objects).
+  Free slots thread a singly-linked list through their own first
+  `sizeof(void *)` bytes; alloc pops from the head, free pushes to
+  the head, both O(1) with no scan. `v8m_slab_small_data_offset`
+  bumps the data area up to `object_size` for classes whose object
+  exceeds the 2 KiB header reservation (today only class 31, 4 KiB)
+  so returned pointers honour the class's natural alignment.
+  Tiny and Small share a unified `V8M_SLAB_HEADER_SIZE` constant in
+  `v8m_internal.h`.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.

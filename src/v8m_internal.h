@@ -30,4 +30,15 @@
 #define V8M_PAGE_SIZE ((size_t)1 << V8M_PAGE_SHIFT)
 #define V8M_PAGE_MASK (~(uintptr_t)(V8M_PAGE_SIZE - 1U))
 
+/*
+ * Slab-page header reservation. Every Tiny and Small slab places its
+ * metadata in the first V8M_SLAB_HEADER_SIZE bytes of a 64 KiB page;
+ * the data area starts at this offset. Sized so the largest Tiny
+ * object (64 B) aligns naturally and the v8m_tiny_page_meta bitmap
+ * (1024 B) fits comfortably. Classes whose object size exceeds this
+ * value (Small class 31, 4 KiB) round the header up to the object
+ * size so returned pointers still honour the class's alignment.
+ */
+#define V8M_SLAB_HEADER_SIZE 2048
+
 #endif /* V8M_INTERNAL_H */

@@ -17,10 +17,10 @@
 #include "v8m_size_class.h"
 #include "v8m_slab_tiny.h"
 
-static_assert(V8M_TINY_HEADER_SIZE >= sizeof(struct v8m_tiny_page_meta),
-	      "V8M_TINY_HEADER_SIZE too small for v8m_tiny_page_meta");
-static_assert(V8M_TINY_HEADER_SIZE % 64 == 0,
-	      "V8M_TINY_HEADER_SIZE must be a multiple of the max Tiny "
+static_assert(V8M_SLAB_HEADER_SIZE >= sizeof(struct v8m_tiny_page_meta),
+	      "V8M_SLAB_HEADER_SIZE too small for v8m_tiny_page_meta");
+static_assert(V8M_SLAB_HEADER_SIZE % 64 == 0,
+	      "V8M_SLAB_HEADER_SIZE must be a multiple of the max Tiny "
 	      "object size so each slot's natural alignment holds");
 
 enum {
@@ -42,7 +42,7 @@ tiny_of_const(const struct v8m_page_meta *meta)
 
 static unsigned char *slab_data(struct v8m_page_meta *meta)
 {
-	return (unsigned char *)meta + V8M_TINY_HEADER_SIZE;
+	return (unsigned char *)meta + V8M_SLAB_HEADER_SIZE;
 }
 
 uint32_t v8m_slab_tiny_capacity_for(uint16_t object_size)
@@ -50,7 +50,7 @@ uint32_t v8m_slab_tiny_capacity_for(uint16_t object_size)
 	if (object_size == 0) {
 		return 0;
 	}
-	size_t data_area = V8M_PAGE_SIZE - V8M_TINY_HEADER_SIZE;
+	size_t data_area = V8M_PAGE_SIZE - V8M_SLAB_HEADER_SIZE;
 	size_t capacity = data_area / object_size;
 	if (capacity > BITMAP_CAPACITY_BITS) {
 		capacity = BITMAP_CAPACITY_BITS;

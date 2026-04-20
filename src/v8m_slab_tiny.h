@@ -31,17 +31,10 @@
 #include "v8m_page.h"
 
 /*
- * Fixed header reservation. Sized so the allocator never has to
- * recompute where the data area starts on the hot path. Also kept
- * aligned to the maximum Tiny object size (64 B), so every slot's
- * starting address respects its natural alignment.
- */
-#define V8M_TINY_HEADER_SIZE 2048
-
-/*
  * Format a freshly-mapped 64 KiB page as a Tiny slab for
  * `size_class` (must be 0..7). `page_base` must be V8M_PAGE_SIZE-
- * aligned and writable.
+ * aligned and writable. The data area begins at
+ * V8M_SLAB_HEADER_SIZE (see v8m_internal.h).
  */
 void v8m_slab_tiny_init(void *page_base, uint32_t size_class,
 			uint64_t owner_thread);
