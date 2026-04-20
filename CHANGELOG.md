@@ -32,6 +32,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   page-size power-of-two invariants. Exhaustive `test_page_meta`
   walks every byte offset in a pair of 64 KiB pages to verify the
   reverse-lookup contract.
+- Bootstrap allocator (`v8m_bootstrap_alloc`, `v8m_ptr_is_bootstrap`):
+  lock-free bump-pointer allocator over a 64 KiB page-aligned static
+  buffer, satisfying `malloc()` calls that arrive before the main
+  allocator has finished initializing. Pointers are 16-byte aligned
+  to match `max_align_t`; aborts on buffer exhaustion by design. The
+  range-check predicate is the first gate the free-path will consult
+  so pre-init pointers are recognized before the page-metadata
+  machinery runs. Test suite covers sequential ordering, alignment,
+  foreign-pointer rejection, and an 8-thread × 32-allocation race
+  that verifies no two allocations overlap.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
