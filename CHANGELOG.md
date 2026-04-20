@@ -50,6 +50,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   Verified by a stress test with 8 producer threads × 1024 pushes
   each running concurrently with a draining consumer; every node is
   observed exactly once and the queue ends up empty.
+- Page heap (L4) primitives: `v8m_page_heap_alloc` reserves
+  mmap-backed virtual regions of arbitrary power-of-two alignment
+  (≥ 64 KiB) using the over-allocate-and-trim pattern; companion
+  `v8m_page_heap_free` and `v8m_page_heap_advise_dont_need` wrap
+  munmap and `madvise(MADV_DONTNEED)`. Lifetime counters
+  (mmap/munmap/advise calls, bytes mapped/unmapped) are exposed via
+  `v8m_page_heap_get_stats`. Region tracking for foreign-pointer
+  detection is deferred; it lands in a dedicated cycle alongside
+  the init/fini machinery.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
