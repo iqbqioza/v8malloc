@@ -1,0 +1,77 @@
+# Build
+build/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Object files
+*.o
+*.obj
+*.a
+*.so
+*.out
+
+# Debug
+*.dSYM/
+core
+
+# Tags
+tags
+TAGS
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+
+# Environment
+.env
+
+# Dependencies
+*.d
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+
+# Logs
+*.log
+
+# AI
+.claude/
+.cursorrules
+.cursorignore
+.cursor/
+.aider*
+.github/copilot-*
+.copilot/
+.codeium/
+.continue/
+.windsurf/
+.bolt/
+.v0/
+.tabnine/
+.sourcery/
+.cody/
+.supermaven/
+.devai/
+.idx/
+.replit/
+.amazonq/
+.aws/amazonq/
+.codex/
+.gemini/
+.codesandbox/
+.devin/
+.mentat/
+.sweep/
+.plandex/
+.double/
+.smol/
+.grit/
+.codegen/

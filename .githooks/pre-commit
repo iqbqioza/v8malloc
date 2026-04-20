@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# Pre-commit hook: check clang-format on staged C files
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.c' '*.h')
+
+if [ -z "$staged_files" ]; then
+    exit 0
+fi
+
+if ! command -v clang-format >/dev/null 2>&1; then
+    echo "error: clang-format not found"
+    exit 1
+fi
+
+unformatted=""
+for file in $staged_files; do
+    if ! clang-format --dry-run --Werror "$file" >/dev/null 2>&1; then
+        unformatted="$unformatted $file"
+    fi
+done
+
+if [ -n "$unformatted" ]; then
+    echo "error: the following files need formatting:"
+    for file in $unformatted; do
+        echo "  $file"
+    done
+    echo ""
+    echo "Run: clang-format -i$unformatted"
+    exit 1
+fi

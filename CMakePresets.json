@@ -1,0 +1,80 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Development (Clang)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/dev",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_C_STANDARD": "11",
+        "CMAKE_C_STANDARD_REQUIRED": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release Dynamic (GCC)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_C_STANDARD": "11",
+        "CMAKE_C_STANDARD_REQUIRED": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS_RELEASE": "-Os -DNDEBUG",
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE": "-s"
+      }
+    },
+    {
+      "name": "release-static",
+      "displayName": "Release Static (GCC)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/release-static",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_C_STANDARD": "11",
+        "CMAKE_C_STANDARD_REQUIRED": "ON",
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS_RELEASE": "-Os -DNDEBUG",
+        "CMAKE_EXE_LINKER_FLAGS_RELEASE": "-s -static"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "release-static",
+      "configurePreset": "release-static"
+    },
+    {
+      "name": "format",
+      "configurePreset": "dev",
+      "targets": ["format"]
+    },
+    {
+      "name": "format-check",
+      "configurePreset": "dev",
+      "targets": ["format-check"]
+    },
+    {
+      "name": "tidy",
+      "configurePreset": "dev",
+      "targets": ["tidy"]
+    },
+    {
+      "name": "cppcheck",
+      "configurePreset": "dev",
+      "targets": ["cppcheck"]
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+#!/bin/sh
+
+# Commit-msg hook: enforce Conventional Commits format and commit message style
+# https://www.conventionalcommits.org/
+# https://cbea.ms/git-commit/
+
+commit_msg_file="$1"
+
+# Strip comment lines (lines starting with #) for validation
+commit_msg=$(sed '/^#/d' "$commit_msg_file")
+subject=$(echo "$commit_msg" | head -1)
+
+errors=""
+
+# --- Rule: Conventional Commits format ---
+pattern="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+"
+
+if ! echo "$subject" | grep -Eq "$pattern"; then
+    errors="${errors}  - Subject must follow Conventional Commits format\n"
+    errors="${errors}    Format: <type>[optional scope][!]: <description>\n"
+    errors="${errors}    Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert\n"
+fi
+
+# --- Rule 2: Limit the subject line to 50 characters ---
+subject_len=$(printf '%s' "$subject" | wc -c)
+if [ "$subject_len" -gt 50 ]; then
+    errors="${errors}  - Subject line is ${subject_len} chars; limit is 50\n"
+fi
+
+# --- Rule 3: Capitalize the description (first letter after "type(scope): ") ---
+description=$(echo "$subject" | sed 's/^[a-z]*\([^)]*\)\?!*: //')
+first_char=$(printf '%s' "$description" | cut -c1)
+if echo "$first_char" | grep -q '[a-z]'; then
+    errors="${errors}  - Capitalize the description: '${description}'\n"
+fi
+
+# --- Rule 4: Do not end the subject line with a period ---
+if echo "$subject" | grep -Eq '\.$'; then
+    errors="${errors}  - Do not end the subject line with a period\n"
+fi
+
+# --- Rule 1: Separate subject from body with a blank line ---
+line_count=$(echo "$commit_msg" | wc -l)
+if [ "$line_count" -gt 1 ]; then
+    second_line=$(echo "$commit_msg" | sed -n '2p')
+    if [ -n "$second_line" ]; then
+        errors="${errors}  - Separate subject from body with a blank line\n"
+    fi
+
+    # --- Rule 6: Wrap the body at 72 characters ---
+    body=$(echo "$commit_msg" | tail -n +3)
+    long_lines=$(echo "$body" | awk 'length > 72 { print NR": "$0 }')
+    if [ -n "$long_lines" ]; then
+        errors="${errors}  - Wrap body at 72 characters. Offending lines:\n"
+        errors="${errors}$(echo "$long_lines" | sed 's/^/    /')\n"
+    fi
+fi
+
+if [ -n "$errors" ]; then
+    echo "error: commit message does not follow the project conventions"
+    echo ""
+    printf '%b' "$errors"
+    echo ""
+    echo "Rules: https://cbea.ms/git-commit/"
+    echo ""
+    echo "Examples:"
+    echo "  feat: Add user authentication"
+    echo "  fix(parser): Handle empty input"
+    echo ""
+    echo "  feat!: Drop support for legacy API"
+    echo ""
+    echo "  The old API had security issues that could not"
+    echo "  be patched without a full rewrite."
+    exit 1
+fi

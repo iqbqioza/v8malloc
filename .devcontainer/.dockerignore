@@ -1,0 +1,14 @@
+.git/
+build/
+*.o
+*.obj
+*.a
+*.so
+*.out
+*.gcno
+*.gcda
+*.gcov
+*.log
+*.d
+tags
+TAGS
