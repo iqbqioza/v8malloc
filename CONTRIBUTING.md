@@ -45,8 +45,7 @@ Every patch must pass `make lint` and `make test` before review.
   variables, `UPPER_SNAKE_CASE` for macros, `v8m_` prefix on every
   internal symbol, `V8M_` prefix on every macro. Public headers add the
   `V8M_EXPORT` visibility attribute.
-- No object headers; metadata lives in per-page structures (see
-  `.claude/docs/architecture.md` §4).
+- No object headers; metadata lives in per-page structures
 - Don't write comments that describe **what** the code does; describe
   **why** when it isn't obvious. The design docs are the canonical
   reference for the **what**.

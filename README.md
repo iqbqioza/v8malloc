@@ -5,8 +5,7 @@ jemalloc, mimalloc, and tcmalloc on multithreaded and NUMA workloads.
 
 > **Status**: in active development. The build system, public API
 > surface, and project layout are in place; most allocator internals are
-> being implemented now. See `.claude/TODO.md` for the implementation
-> plan.
+> being implemented now.
 
 ## Design highlights
 
@@ -21,8 +20,6 @@ jemalloc, mimalloc, and tcmalloc on multithreaded and NUMA workloads.
 - Branchless size-class lookup, 41 size classes from 8B to 2MB
 - Linux-only; supports x86_64, aarch64, riscv64, ppc64le, s390x,
   loongarch64
-
-The full design is documented under `.claude/docs/`.
 
 ## Requirements
 
