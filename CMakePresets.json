@@ -3,43 +3,26 @@
   "configurePresets": [
     {
       "name": "dev",
-      "displayName": "Development (Clang)",
+      "displayName": "Development (Clang, Debug)",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/dev",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
-        "CMAKE_C_STANDARD": "23",
-        "CMAKE_C_STANDARD_REQUIRED": "ON",
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "V8MALLOC_BUILD_TESTS": "ON"
       }
     },
     {
       "name": "release",
-      "displayName": "Release Dynamic (GCC)",
+      "displayName": "Release (GCC)",
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_C_STANDARD": "23",
-        "CMAKE_C_STANDARD_REQUIRED": "ON",
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS_RELEASE": "-Os -DNDEBUG",
-        "CMAKE_EXE_LINKER_FLAGS_RELEASE": "-s"
-      }
-    },
-    {
-      "name": "release-static",
-      "displayName": "Release Static (GCC)",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/release-static",
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_C_STANDARD": "23",
-        "CMAKE_C_STANDARD_REQUIRED": "ON",
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_FLAGS_RELEASE": "-Os -DNDEBUG",
-        "CMAKE_EXE_LINKER_FLAGS_RELEASE": "-s -static"
+        "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
+        "V8MALLOC_BUILD_TESTS": "OFF"
       }
     }
   ],
@@ -51,10 +34,6 @@
     {
       "name": "release",
       "configurePreset": "release"
-    },
-    {
-      "name": "release-static",
-      "configurePreset": "release-static"
     },
     {
       "name": "format",
@@ -75,6 +54,15 @@
       "name": "cppcheck",
       "configurePreset": "dev",
       "targets": ["cppcheck"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

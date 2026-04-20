@@ -1,0 +1,110 @@
+.\" SPDX-License-Identifier: Apache-2.0
+.TH V8MALLOC 3 "2026" "v8malloc 0.1.0" "v8malloc Library Functions"
+.SH NAME
+v8malloc \- high-performance memory allocator for Linux
+.SH SYNOPSIS
+.nf
+.B #include <v8malloc/v8malloc.h>
+.PP
+.BI "const char *v8m_version(void);"
+.BI "int v8m_version_major(void);"
+.BI "int v8m_version_minor(void);"
+.BI "int v8m_version_patch(void);"
+.fi
+.PP
+Link with
+.BR \-lv8malloc " or preload " libv8malloc.so .
+.SH DESCRIPTION
+The
+.B v8malloc
+library is a drop-in replacement for the C runtime's
+.BR malloc (3)
+family, implementing a lock-free thread-local fast path, a
+NUMA-aware tiered heap, explicit HugePage management, and a header-less
+per-page metadata layout.
+.PP
+Once loaded, v8malloc services every standard allocation call
+.RB ( malloc (3),
+.BR free (3),
+.BR calloc (3),
+.BR realloc (3),
+.BR posix_memalign (3),
+.BR aligned_alloc (3), ...)
+with behavior conformant to POSIX.1-2024. This manual page documents
+only the v8malloc-specific extensions; see the referenced manual pages
+for the base semantics.
+.SH VERSION FUNCTIONS
+The functions listed in
+.B SYNOPSIS
+report the library's runtime version.
+.B v8m_version()
+returns a pointer to a static string of the form
+.RI "\(dq" MAJOR . MINOR . PATCH \(dq ,
+identical to the
+.B V8M_VERSION_STRING
+macro the caller was compiled against. The numeric accessors return the
+corresponding integer components.
+.SH USAGE
+.SS LD_PRELOAD
+.PP
+.nf
+LD_PRELOAD=/usr/lib/libv8malloc.so ./your-program
+.fi
+.SS Direct linking
+.PP
+.nf
+cc -o myapp myapp.c -lv8malloc -lpthread -ldl
+.fi
+.SS CMake
+.PP
+.nf
+find_package(v8malloc REQUIRED)
+target_link_libraries(myapp PRIVATE v8malloc::v8malloc)
+.fi
+.SH ENVIRONMENT
+v8malloc reads the following variables at library initialization:
+.TP
+.B V8M_VERBOSE
+When set to
+.B 1 ,
+emit allocator statistics to stderr at shutdown.
+.TP
+.B V8M_PURGE_INTERVAL
+Background memory-return interval, in seconds. Default: 10.
+.TP
+.B V8M_THREAD_CACHE_MAX
+Maximum number of objects held per size-class in the thread cache.
+.TP
+.B V8M_HUGE_PAGES
+When
+.B 0 ,
+disables explicit HugePage allocation.
+.TP
+.B V8M_NUMA_AWARE
+When
+.B 0 ,
+disables NUMA-aware placement and binding.
+.TP
+.B V8M_DEBUG
+When
+.B 1 ,
+enables guard pages, red-zone checking, double-free detection, and
+leak reporting. Incurs significant runtime cost.
+.TP
+.B V8M_PROFILE
+When
+.B 1 ,
+enables profiling-mode output.
+.SH BUGS
+Report defects via the GitHub issue tracker referenced in
+.BR README.md ;
+security-sensitive issues should follow
+.BR SECURITY.md .
+.SH SEE ALSO
+.BR malloc (3),
+.BR posix_memalign (3),
+.BR mallopt (3),
+.BR mmap (2),
+.BR madvise (2),
+.BR mbind (2),
+.BR ld.so (8)

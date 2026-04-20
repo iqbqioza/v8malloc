@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Linker version script for libv8malloc.so. A single SONAME-aligned
+# version node holds every exported symbol; new symbols are added to
+# the same node within a major release. A new node (V8MALLOC_2.0, etc.)
+# is introduced only on a major bump.
+
+V8MALLOC_1.0 {
+	global:
+		v8m_version;
+		v8m_version_major;
+		v8m_version_minor;
+		v8m_version_patch;
+	local:
+		*;
+};

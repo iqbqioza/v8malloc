@@ -1,4 +1,4 @@
-.PHONY: all dev release release-static format format-check tidy cppcheck lint clean
+.PHONY: all dev release test format format-check tidy cppcheck lint clean
 
 all: dev
 
@@ -10,9 +10,8 @@ release:
 	cmake --preset release
 	cmake --build --preset release
 
-release-static:
-	cmake --preset release-static
-	cmake --build --preset release-static
+test: dev
+	ctest --preset dev
 
 format:
 	cmake --preset dev
@@ -24,6 +23,7 @@ format-check:
 
 tidy:
 	cmake --preset dev
+	cmake --build --preset dev
 	cmake --build --preset tidy
 
 cppcheck:
