@@ -59,6 +59,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `v8m_page_heap_get_stats`. Region tracking for foreign-pointer
   detection is deferred; it lands in a dedicated cycle alongside
   the init/fini machinery.
+- Tiny slab page (`v8m_slab_tiny_init/alloc/free`): bitmap-managed
+  layout for size classes 0..7 (8 B–64 B objects), with a fixed
+  2 KiB header reservation so the data area is aligned to the
+  largest Tiny object size and the allocator hot path needs no
+  bounds check. `alloc` is O(1) amortized via `search_hint` +
+  `__builtin_ctzll`; `free` is O(1) direct bit-clear. Slots beyond
+  page capacity are pre-marked used so the scan ignores them.
+  `is_empty` / `is_full` read the atomic `used_count` so remote
+  observers can pick empty pages without synchronizing with the
+  owner thread.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
