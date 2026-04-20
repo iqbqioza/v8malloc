@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(c11-dev C)
+project(c23-dev C)
 
 file(GLOB_RECURSE SOURCES src/*.c)
 file(GLOB_RECURSE HEADERS src/*.h)
@@ -26,7 +26,7 @@ add_custom_target(tidy
 )
 
 add_custom_target(cppcheck
-    COMMAND cppcheck --std=c11 --enable=all --quiet --suppress=missingIncludeSystem ${SOURCES}
+    COMMAND cppcheck --std=c23 --enable=all --quiet --suppress=missingIncludeSystem ${SOURCES}
     COMMENT "Running cppcheck"
     VERBATIM
 )

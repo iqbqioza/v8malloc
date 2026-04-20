@@ -13,18 +13,18 @@ subject=$(echo "$commit_msg" | head -1)
 errors=""
 
 # --- Rule: Conventional Commits format ---
-pattern="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+"
+pattern="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|security)(\(.+\))?(!)?: .+"
 
 if ! echo "$subject" | grep -Eq "$pattern"; then
     errors="${errors}  - Subject must follow Conventional Commits format\n"
     errors="${errors}    Format: <type>[optional scope][!]: <description>\n"
-    errors="${errors}    Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert\n"
+    errors="${errors}    Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, security\n"
 fi
 
-# --- Rule 2: Limit the subject line to 50 characters ---
+# --- Rule 2: Limit the subject line to 72 characters ---
 subject_len=$(printf '%s' "$subject" | wc -c)
-if [ "$subject_len" -gt 50 ]; then
-    errors="${errors}  - Subject line is ${subject_len} chars; limit is 50\n"
+if [ "$subject_len" -gt 72 ]; then
+    errors="${errors}  - Subject line is ${subject_len} chars; limit is 72\n"
 fi
 
 # --- Rule 3: Capitalize the description (first letter after "type(scope): ") ---
@@ -66,6 +66,7 @@ if [ -n "$errors" ]; then
     echo "Examples:"
     echo "  feat: Add user authentication"
     echo "  fix(parser): Handle empty input"
+    echo "  security: Fix vulnerability in authentication"
     echo ""
     echo "  feat!: Drop support for legacy API"
     echo ""

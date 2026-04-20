@@ -1,6 +1,6 @@
-# C11 Dev Environment
+# C23 Dev Environment
 
-A devcontainer-based development environment for C11 projects.
+A devcontainer-based development environment for C23 projects.
 
 ## Prerequisites
 
