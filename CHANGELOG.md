@@ -79,6 +79,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   so returned pointers honour the class's natural alignment.
   Tiny and Small share a unified `V8M_SLAB_HEADER_SIZE` constant in
   `v8m_internal.h`.
+- Direct-mmap path for Large (256 KiB – 2 MiB) and Huge (> 2 MiB)
+  allocations (`v8m_large_alloc/free/usable_size`): one page-heap
+  region per request, with a `v8m_large_page_meta` header at offset
+  0 (extends `v8m_page_meta` with `mmap_size`) and the user's
+  pointer returned at offset `V8M_SLAB_HEADER_SIZE` so the shared
+  ptr-to-meta mask recovers the header. Huge requests keep a
+  `UINT16_MAX` sentinel in the `size_class` field so a later cycle's
+  `MAP_HUGETLB` optimization can specialize without breaking the
+  common-prefix layout.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
