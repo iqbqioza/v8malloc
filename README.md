@@ -1,3 +1,5 @@
+![v8malloc logo](./docs/v8malloc.png)
+
 # v8malloc
 
 A high-performance memory allocator for Linux, designed to outperform
