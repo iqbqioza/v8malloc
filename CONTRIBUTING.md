@@ -10,8 +10,6 @@ benchmark runs on architectures we don't yet have CI for, and code.
   every interaction in the project's spaces.
 - Security issues do **not** belong in public GitHub issues. See
   [SECURITY.md](SECURITY.md) for the disclosure path.
-- The design specification lives under `.claude/docs/`. If your change
-  contradicts a design doc, update the doc in the same change.
 
 ## Development environment
 
