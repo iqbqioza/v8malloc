@@ -60,6 +60,7 @@ endif()
 # --- Sources ------------------------------------------------------------------
 
 set(V8MALLOC_SOURCES
+	src/v8m_page.c
 	src/v8m_size_class.c
 	src/v8m_version.c
 )
@@ -249,10 +250,13 @@ add_custom_target(tidy
 add_custom_target(cppcheck
 	COMMAND cppcheck
 		--std=c23
+		--platform=unix64
 		--enable=warning,style,performance,portability,unusedFunction
 		--quiet
 		--inline-suppr
 		--error-exitcode=1
+		-D__linux__=1
+		-D__x86_64__=1
 		--suppress=missingIncludeSystem
 		--suppress=unusedFunction
 		--suppress=unmatchedSuppression

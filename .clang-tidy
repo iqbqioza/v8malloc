@@ -9,7 +9,8 @@ Checks: >
   performance-*,
   portability-*,
   readability-*,
-  -readability-magic-numbers
+  -readability-magic-numbers,
+  -readability-implicit-bool-conversion
 
 WarningsAsErrors: ''
 

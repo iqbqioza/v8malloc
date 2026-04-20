@@ -23,3 +23,4 @@ endfunction()
 
 v8malloc_add_test(test_version)
 v8malloc_add_test(test_size_class)
+v8malloc_add_test(test_page_meta)

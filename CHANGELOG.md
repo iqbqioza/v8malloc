@@ -21,6 +21,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   / Large) or the `V8M_CLASS_HUGE` sentinel, plus the pinned
   `v8m_class_to_size[]` reverse-lookup table. Round-trip-verified
   exhaustively over every size in [0, 2 MiB].
+- Architecture-abstraction-layer skeleton (`src/v8m_arch.h`): per-arch
+  detection gate, `V8M_CACHE_LINE_SIZE`, alignment / branch-hint /
+  visibility macros. Rejects non-Linux and unsupported architectures
+  at compile time.
+- Page-metadata machinery: `v8m_page_meta` and `v8m_tiny_page_meta`
+  headers with pinned common-prefix offsets, the `V8M_MAGIC` sentinel
+  (the ASCII bytes of "v8malloc"), branchless `v8m_ptr_to_meta()` /
+  `v8m_page_meta_valid()`, and static asserts on struct sizes and
+  page-size power-of-two invariants. Exhaustive `test_page_meta`
+  walks every byte offset in a pair of 64 KiB pages to verify the
+  reverse-lookup contract.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
