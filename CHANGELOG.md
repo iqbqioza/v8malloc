@@ -42,6 +42,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   machinery runs. Test suite covers sequential ordering, alignment,
   foreign-pointer rejection, and an 8-thread × 32-allocation race
   that verifies no two allocations overlap.
+- MPSC lock-free queue for cross-thread frees
+  (`v8m_mpsc_init/push/drain`): single-CAS-loop push from any
+  thread, single-`atomic_exchange` drain on the owner thread,
+  release/acquire ordering only — no `seq_cst` on the hot path.
+  Intrusive: freed objects reuse their first word as the queue link.
+  Verified by a stress test with 8 producer threads × 1024 pushes
+  each running concurrently with a draining consumer; every node is
+  observed exactly once and the queue ends up empty.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
