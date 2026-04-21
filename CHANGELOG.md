@@ -110,6 +110,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Sanitizer build variants. New `V8MALLOC_BUILD_UBSAN` and
+  `V8MALLOC_BUILD_TSAN` CMake options propagate `-fsanitize=...`
+  to both library and tests. UBSan is the supported configuration
+  (full ctest passes with `-fno-sanitize-recover=undefined`); TSan
+  builds but fails the test suite due to its shadow-memory scheme
+  clashing with our early constructor mmaps and is documented as
+  experimental in README. AddressSanitizer is intentionally
+  unsupported — its malloc interceptor takes precedence at load
+  time, so an ASan-instrumented binary bypasses v8malloc entirely.
+  README §Sanitizers explains the tradeoffs.
+
+  Bringing UBSan up shook out two bugs:
+  * The bootstrap allocator's 64 KiB BSS buffer overflowed during
+    UBSan's runtime init (its constructor chain runs ahead of
+    ours). Bumped to 256 KiB so sanitizer runtimes fit alongside
+    the existing dlsym / pthread_atfork constructor-chain
+    allocations.
+  * test_api's `posix_memalign(NULL, ...)` check tripped UBSan's
+    nonnull-attribute runtime check (the volatile-pointer trick
+    only dodges the compile-time diagnostic). Switched the test
+    to call `v8m_posix_memalign` directly — our function doesn't
+    carry glibc's `__nonnull` attribute, so UBSan no longer
+    flags the deliberate NULL pass.
+
+- Thread-churn stress test (`tests/test_thread_churn.c`,
+  benchmarks.md §4 ST-04). 100 batches × 100 threads = 10 000
+  thread creations total, each worker doing a short
+  allocate / free run across every backend. After the run the
+  test snapshots `v8m_get_stats` and asserts `live_regions` did
+  not grow beyond a tight cap (32) — a pool bug that leaked one
+  page per thread would surface as a 10 000-region increase. Runs
+  in ~5 seconds.
+
 - Rounded out the public v8m_* API surface. Six new exports land
   under V8MALLOC_1.0:
 

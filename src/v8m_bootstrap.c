@@ -16,14 +16,16 @@
 #include "v8m_internal.h"
 
 /*
- * The buffer is sized to match v8malloc's internal page granularity
- * so the bootstrap allocator occupies exactly one 64 KiB page, and
- * the matching alignment lets any bootstrap pointer round down to
- * the buffer base under V8M_PAGE_MASK. Callers never rely on that
- * second property — v8m_ptr_is_bootstrap() is a range check — but it
- * keeps the invariants of the free() fast path simple.
- */
-#define V8M_BOOTSTRAP_SIZE V8M_PAGE_SIZE
+ * Four 64 KiB pages of BSS carry the bootstrap allocator. 64 KiB
+ * was enough for the bare libc-plus-dlsym boot path, but sanitizer
+ * runtimes (UBSan, TSan) run their own constructor-chain init
+ * ahead of ours and can comfortably eat 128-192 KiB before we
+ * switch to the real allocator. 256 KiB is a cheap way to buy
+ * headroom without touching the range-check predicate — the buffer
+ * is still page-aligned BSS, `v8m_ptr_is_bootstrap` is a plain
+ * address-range check, and the extra pages only materialize at
+ * runtime if the constructor chain actually consumes them. */
+#define V8M_BOOTSTRAP_SIZE (V8M_PAGE_SIZE * 4U)
 
 static alignas(
     V8M_PAGE_SIZE) unsigned char v8m_bootstrap_buffer[V8M_BOOTSTRAP_SIZE];

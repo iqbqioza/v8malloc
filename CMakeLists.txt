@@ -41,9 +41,39 @@ option(V8MALLOC_BUILD_STATIC "Build the static library (libv8malloc.a)" ON)
 option(V8MALLOC_BUILD_TESTS "Build unit tests" ON)
 option(V8MALLOC_BUILD_BENCH "Build benchmark harness" OFF)
 
+# Sanitizer build variants. AddressSanitizer is intentionally
+# omitted: its malloc interceptor takes precedence at load time,
+# which means ASan-instrumented binaries bypass v8malloc entirely
+# (making the sanitizer run invalid for our purposes). UBSan and
+# TSan both coexist with a custom allocator and cover distinct
+# bug classes (undefined behaviour, data races).
+option(V8MALLOC_BUILD_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
+option(V8MALLOC_BUILD_TSAN "Build with ThreadSanitizer" OFF)
+
 if(NOT V8MALLOC_BUILD_SHARED AND NOT V8MALLOC_BUILD_STATIC)
 	message(FATAL_ERROR
 		"At least one of V8MALLOC_BUILD_SHARED / V8MALLOC_BUILD_STATIC must be ON")
+endif()
+
+if(V8MALLOC_BUILD_UBSAN AND V8MALLOC_BUILD_TSAN)
+	message(FATAL_ERROR
+		"V8MALLOC_BUILD_UBSAN and V8MALLOC_BUILD_TSAN are mutually exclusive")
+endif()
+
+set(V8MALLOC_SANITIZER_FLAGS)
+if(V8MALLOC_BUILD_UBSAN)
+	# -fno-sanitize-recover makes UB fatal so CI turns red on the
+	# first violation instead of logging and continuing.
+	list(APPEND V8MALLOC_SANITIZER_FLAGS
+		-fsanitize=undefined
+		-fno-sanitize-recover=undefined)
+endif()
+if(V8MALLOC_BUILD_TSAN)
+	list(APPEND V8MALLOC_SANITIZER_FLAGS -fsanitize=thread)
+endif()
+if(V8MALLOC_SANITIZER_FLAGS)
+	add_compile_options(${V8MALLOC_SANITIZER_FLAGS})
+	add_link_options(${V8MALLOC_SANITIZER_FLAGS})
 endif()
 
 # --- Per-architecture compile flags (platform-abstraction.md §5.2) ------------

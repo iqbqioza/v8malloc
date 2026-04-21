@@ -5,6 +5,15 @@ if(NOT V8MALLOC_BUILD_STATIC)
 	set(V8MALLOC_TEST_LIBRARY v8malloc_shared)
 endif()
 
+# TSan is experimental under v8malloc: its shadow-memory scheme
+# clashes with our early-init mmaps from the library constructor
+# ("FATAL: ThreadSanitizer: unexpected memory mapping"). The
+# V8MALLOC_BUILD_TSAN option at the top-level CMakeLists turns on
+# the sanitizer flags for the library build, but running the full
+# test suite under TSan currently fails in our environment and is
+# tracked as a known issue. UBSan is the supported sanitizer in v0.
+set(V8MALLOC_TEST_PIE_FLAGS)
+
 function(v8malloc_add_test name)
 	add_executable(${name} ${name}.c)
 	target_link_libraries(${name} PRIVATE ${V8MALLOC_TEST_LIBRARY})
@@ -44,6 +53,7 @@ v8malloc_add_test(test_libc_fallback)
 v8malloc_add_test(test_fork)
 v8malloc_add_test(test_numa)
 v8malloc_add_test(test_threading)
+v8malloc_add_test(test_thread_churn)
 
 # LD_PRELOAD interposition test. preload_target is a standalone
 # program with no compile-time link to v8malloc; the test runner

@@ -307,13 +307,13 @@ static int check_posix_memalign(void)
 		return fail("posix_memalign(7) did not return EINVAL");
 	}
 
-	/* Same volatile-trick as in check_aligned_alloc: dodge the
-	 * compiler's nonnull diagnostic on a literal NULL so the runtime
-	 * EINVAL guard gets exercised. */
-	void **null_memptr = NULL;
-	void **volatile sink = null_memptr;
-	/* NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker) */
-	ret = posix_memalign(sink, 64, 16);
+	/* Exercise the runtime EINVAL guard by calling our own
+	 * v8m_posix_memalign, which doesn't carry glibc's __nonnull
+	 * attribute. That dodges both the compile-time nonnull
+	 * diagnostic and UBSan's nonnull-attribute runtime check; the
+	 * null branch inside v8m_posix_memalign is the code under
+	 * test. */
+	ret = v8m_posix_memalign(NULL, 64, 16);
 	if (ret != EINVAL) {
 		return fail(
 		    "posix_memalign(NULL memptr) did not return EINVAL");

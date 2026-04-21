@@ -76,6 +76,35 @@ make cppcheck       # cppcheck
 make lint           # all of the above
 ```
 
+## Sanitizers
+
+v8malloc ships with two sanitizer build variants:
+
+```bash
+cmake -S . -B build/ubsan -DV8MALLOC_BUILD_UBSAN=ON
+cmake --build build/ubsan && ctest --test-dir build/ubsan
+
+cmake -S . -B build/tsan -DV8MALLOC_BUILD_TSAN=ON
+cmake --build build/tsan
+```
+
+- **UndefinedBehaviorSanitizer** (`-DV8MALLOC_BUILD_UBSAN=ON`) is
+  the supported configuration: the full `ctest` suite passes under
+  UBSan, catching integer overflow, misaligned loads, and the
+  other standard UB classes across every allocator path.
+- **ThreadSanitizer** (`-DV8MALLOC_BUILD_TSAN=ON`) builds the
+  library with `-fsanitize=thread` but is currently experimental.
+  TSan's shadow-memory scheme clashes with the early mmap calls
+  our library constructor makes, and the full test suite does not
+  yet pass under it. Tracked for a dedicated investigation cycle.
+- **AddressSanitizer is intentionally unsupported.** ASan
+  intercepts `malloc` / `free` at load time, which means an
+  ASan-instrumented binary bypasses v8malloc entirely and the
+  sanitizer run exercises ASan's own allocator rather than ours.
+  Use Valgrind (which does the same but is transparent to us) or
+  the UBSan build for defect-finding; a v8malloc-aware ASan
+  variant is future work.
+
 ## Project layout
 
 ```
