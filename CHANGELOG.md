@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- ST-03 fork-safety stress test
+  (`tests/test_fork_stress.c`, benchmarks.md §4.3). Spins 4
+  worker threads in the parent doing continuous alloc/free
+  across four size buckets (slab-Tiny, slab-Small, buddy,
+  Large), then forks 25 times back-to-back with the workers
+  still running. Each child frees the two inherited anchor
+  allocations (slab + buddy), drives a byte-pattern-verified
+  4-bucket × 64-op allocate/write/verify/free workload across
+  every backend, and `_exit`s. Parent waits for each child,
+  aggregates failures, stops the workers, and runs a post-storm
+  allocate/free cycle to confirm it stayed healthy. Complements
+  the single-fork happy-path coverage in `tests/test_fork.c` —
+  any atfork-ordering or parent/child shared-page-map
+  regression surfaces as a deadlock (timeout) or a child exit
+  with non-zero status.
+
 - MB-05 fragmentation scenario benchmark
   (`bench/mb_05_fragmentation.c`, benchmarks.md §2.5). Drives
   the spec's fragmentation-maximizing pattern: allocate N
