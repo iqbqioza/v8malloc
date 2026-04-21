@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Benchmark runner script (`scripts/bench-run.sh`). Pins the
+  host into the benchmarks.md §1.3 measurement environment
+  before invoking the supplied bench command — switches every
+  online CPU's frequency governor to `performance`, disables
+  transparent huge pages, and disables ASLR — then restores the
+  prior settings on exit (trap on EXIT/INT/TERM). Tuning steps
+  need root; without root the script prints a warning and runs
+  the bench anyway so dev-laptop iteration still benefits from
+  the harness. `--drop-caches` opt-in for fault-heavy workloads.
+  Usage: `scripts/bench-run.sh -- ./build/bench/bench/mb_01_throughput`.
+
 - Exhaustive `malloc_usable_size` contract test
   (`tests/test_usable_size.c`). Sweeps every Tiny / Small slab
   request in `[1, V8M_SMALL_MAX_SIZE]` (4 096 sizes) and asserts

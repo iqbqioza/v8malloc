@@ -150,6 +150,18 @@ LD_PRELOAD=$(pwd)/path/to/libjemalloc.so \
     ./build/bench/bench/mb_01_throughput          # jemalloc
 ```
 
+For stable numbers across runs, drive the bench through
+`scripts/bench-run.sh`, which pins the CPU governor to
+`performance`, disables THP, and disables ASLR for the bench's
+lifetime (and restores all three on exit). Tuning steps need
+root; without root the script warns and runs the bench anyway:
+
+```bash
+sudo scripts/bench-run.sh -- ./build/bench/bench/mb_01_throughput
+sudo scripts/bench-run.sh --drop-caches \
+    -- ./build/bench/bench/mb_02_scalability
+```
+
 Knobs (env vars):
 - `V8M_BENCH_DURATION_MS` — per-size / per-config timing budget
   (MB-01 default 250, MB-02 default 1000)
@@ -241,7 +253,7 @@ the matching CHANGELOG section and opens a draft GitHub release.
 ├── .claude/            # Internal design docs (not packaged)
 ├── .githooks/          # Conventional Commits + clang-format gates
 ├── .github/workflows/  # GitHub Actions CI
-└── scripts/            # Release pipeline
+└── scripts/            # Release pipeline + bench runner
 ```
 
 ## Contributing
