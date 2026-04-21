@@ -110,6 +110,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Buddy pool (`v8m_buddy_pool_init/destroy/alloc/free`) plus
+  two helpers added to the buddy module: `v8m_buddy_block_size`
+  recovers the level of a previously-allocated block by walking
+  the alloc bitmaps (no per-allocation header needed), and
+  `v8m_buddy_is_empty` reports whether any allocation remains.
+  The pool keeps a fixed-cap array of 64 buddy arenas (16 MiB
+  Medium-class capacity); alloc tries every in-use arena before
+  lazily acquiring a fresh 256 KiB-aligned region from the page
+  heap, and free locates the owning arena by bounds-checking
+  the in-use slots, then reclaims the arena once it drains to
+  empty. A single per-pool mutex serializes operations,
+  matching the slab pool's structure. Test suite covers init/
+  destroy, bounds (size 0, > 256 KiB, NULL, foreign pointer),
+  single-allocation round-trip, multi-arena fill (verified by
+  page-heap mmap_calls advancing), arena reclamation on full
+  drain (verified by munmap_calls advancing), and an 8-thread
+  × 64-op concurrency stress.
+
 - Slab pool (`v8m_slab_pool_init/destroy/alloc/free`):
   per-class management of Tiny + Small slab pages. For each of
   the 32 slab classes (0..31) the pool holds a `current` page

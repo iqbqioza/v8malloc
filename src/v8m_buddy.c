@@ -192,3 +192,35 @@ void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
 
 	list_push(&buddy->free_lists[level], current);
 }
+
+size_t v8m_buddy_block_size(const struct v8m_buddy *buddy, const void *ptr)
+{
+	if (ptr == NULL) {
+		return 0;
+	}
+	uintptr_t addr = (uintptr_t)ptr;
+	uintptr_t base = (uintptr_t)buddy->arena_base;
+	if (addr < base || addr >= base + buddy->arena_size) {
+		return 0;
+	}
+	uintptr_t offset = addr - base;
+	for (uint32_t level = 0; level < V8M_BUDDY_LEVELS; level++) {
+		uint32_t idx =
+		    (uint32_t)(offset >> (V8M_BUDDY_MIN_SHIFT + level));
+		if ((buddy->alloc_bitmap[level] & ((uint64_t)1U << idx)) !=
+		    0U) {
+			return level_to_size(level);
+		}
+	}
+	return 0;
+}
+
+bool v8m_buddy_is_empty(const struct v8m_buddy *buddy)
+{
+	for (uint32_t i = 0; i < V8M_BUDDY_LEVELS; i++) {
+		if (buddy->alloc_bitmap[i] != 0U) {
+			return false;
+		}
+	}
+	return true;
+}

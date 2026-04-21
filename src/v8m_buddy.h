@@ -77,4 +77,20 @@ void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size);
  */
 void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size);
 
+/*
+ * Byte size of the currently-allocated block that contains `ptr`.
+ * Returns 0 if `ptr` is NULL, lies outside the arena, or does not
+ * sit at the start of any allocated buddy block. Used by the buddy
+ * pool's size-less free path to recover the level from the bitmaps.
+ */
+size_t v8m_buddy_block_size(const struct v8m_buddy *buddy, const void *ptr);
+
+/*
+ * True iff no buddy block in the arena is currently allocated. A
+ * freshly-initialized buddy is empty; it remains empty across any
+ * sequence of paired alloc / free operations that drains all
+ * outstanding allocations.
+ */
+bool v8m_buddy_is_empty(const struct v8m_buddy *buddy);
+
 #endif /* V8M_BUDDY_H */
