@@ -11,9 +11,12 @@
  *      the Large/Huge direct path. Route accordingly.
  *   2. Otherwise try the buddy pool's range-check ownership; on
  *      success it owned and freed.
- *   3. Otherwise the pointer is foreign — for v0 it is silently
- *      dropped. The init/fini cycle adds the libc fallback via
- *      dlsym(RTLD_NEXT, "free").
+ *   3. Otherwise the pointer is foreign — forward it to the libc
+ *      free captured via dlsym(RTLD_NEXT, "free") at constructor
+ *      time. If RTLD_NEXT did not resolve (we were not preloaded
+ *      and there is no libc allocator behind us), the pointer is
+ *      silently dropped, which is still better than crashing on a
+ *      pre-init allocation we cannot identify.
  *
  * This is the single-threaded baseline — every operation goes
  * through the slab/buddy pools' per-pool mutexes. The TLC + L2 core

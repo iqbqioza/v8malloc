@@ -110,6 +110,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Libc fallback for foreign pointers
+  (`v8m_libc_fallback_init/ready/free/malloc`): the library
+  constructor now resolves the next free/malloc/calloc/realloc on
+  the dynamic search path via `dlsym(RTLD_NEXT, ...)` before
+  v8m_dispatch_init runs. The dispatcher's free path replaces the
+  v0 silent-drop on foreign pointers with a forward to the
+  captured libc free, so pre-init allocations made by other
+  library constructors no longer leak. Resolution is safe to call
+  from inside the constructor: any malloc dlsym performs internally
+  hits our pre-init bootstrap allocator. Falls back to silent-drop
+  only when RTLD_NEXT does not resolve (statically-linked-only
+  case). Test exercises round-tripping a libc allocation through
+  the v8malloc-overridden free across four size buckets, plus
+  verifies the fallback was captured.
+
+- glibc internal `__libc_malloc` / `__libc_free` / `__libc_calloc`
+  / `__libc_realloc` / `__libc_memalign` / `__libc_valloc` /
+  `__libc_pvalloc` aliases. Defined as `__attribute__((alias("v8m_*"))`
+  on the public implementations so call sites inside libc that
+  bypass the public symbols (and code linked against
+  libc_nonshared.a) still hit v8malloc. Exported through the
+  V8MALLOC_1.0 linker version node alongside the standard names.
+
 - Aligned allocation family (`aligned_alloc`, `posix_memalign`,
   `memalign`, `valloc`, `pvalloc`) plus matching `v8m_*`
   variants. `v8m_dispatch_alloc_aligned` is the new entry

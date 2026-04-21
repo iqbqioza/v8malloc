@@ -16,6 +16,7 @@
 #include "v8m_dispatch.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
+#include "v8m_libc_fallback.h"
 #include "v8m_page.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
@@ -158,9 +159,11 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 		return;
 	}
 
-	/* Foreign pointer — silently dropped for v0. The libc
-	 * fallback (dlsym(RTLD_NEXT, "free")) lands with the public
-	 * API / init cycle. */
+	/* Foreign pointer — forward to the captured libc free if
+	 * resolution succeeded; otherwise drop on the floor (only
+	 * possible when v8malloc is not preloaded and statically
+	 * linked into the program with no libc allocator behind it). */
+	v8m_libc_free(ptr);
 }
 
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)

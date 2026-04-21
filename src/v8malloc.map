@@ -35,6 +35,14 @@ V8MALLOC_1.0 {
 		memalign;
 		valloc;
 		pvalloc;
+
+		__libc_malloc;
+		__libc_free;
+		__libc_calloc;
+		__libc_realloc;
+		__libc_memalign;
+		__libc_valloc;
+		__libc_pvalloc;
 	local:
 		*;
 };

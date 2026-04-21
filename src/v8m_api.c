@@ -27,6 +27,7 @@
 #include "v8m_bootstrap.h"
 #include "v8m_config.h"
 #include "v8m_dispatch.h"
+#include "v8m_libc_fallback.h"
 #include "v8malloc/v8malloc.h"
 
 /* 0 = uninitialized, 1 = ready, 2 = shutting down. The constructor
@@ -43,6 +44,12 @@ static void abort_with(const char *msg)
 
 __attribute__((constructor(101))) static void v8m_constructor(void)
 {
+	/* Resolve libc fallbacks first — dlsym may itself allocate, and
+	 * those calls hit our malloc override before dispatch_ready is
+	 * true, falling through to the bootstrap allocator. Doing the
+	 * resolution before dispatch_init keeps the recursion bounded
+	 * to the bootstrap path. */
+	v8m_libc_fallback_init();
 	v8m_config_init();
 	if (v8m_dispatch_init(&g_dispatch) != 0) {
 		abort_with("v8malloc: dispatch init failed\n");
@@ -335,3 +342,31 @@ V8M_EXPORT void *pvalloc(size_t size)
 {
 	return v8m_pvalloc(size);
 }
+
+/* --- glibc internal aliases --------------------------------------- */
+/*
+ * glibc's internal call sites — and any code linked against
+ * libc_nonshared.a that bypasses the public symbols — reach the
+ * allocator through the __libc_* prefixed names. Defining them as
+ * aliases of our public implementations interposes on those call
+ * sites too. See architecture.md §3.3. The names are reserved by
+ * the implementation per C, but that is precisely why glibc uses
+ * them; the linter's reserved-identifier / readability rules are
+ * irrelevant here, hence the blanket NOLINTs. */
+/* NOLINTBEGIN(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,
+ * readability-identifier-naming,bugprone-easily-swappable-parameters) */
+V8M_EXPORT void *__libc_malloc(size_t size)
+    __attribute__((alias("v8m_malloc")));
+V8M_EXPORT void __libc_free(void *ptr) __attribute__((alias("v8m_free")));
+V8M_EXPORT void *__libc_calloc(size_t nmemb, size_t size)
+    __attribute__((alias("v8m_calloc")));
+V8M_EXPORT void *__libc_realloc(void *ptr, size_t size)
+    __attribute__((alias("v8m_realloc")));
+V8M_EXPORT void *__libc_memalign(size_t alignment, size_t size)
+    __attribute__((alias("v8m_memalign")));
+V8M_EXPORT void *__libc_valloc(size_t size)
+    __attribute__((alias("v8m_valloc")));
+V8M_EXPORT void *__libc_pvalloc(size_t size)
+    __attribute__((alias("v8m_pvalloc")));
+/* NOLINTEND(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp,
+ * readability-identifier-naming,bugprone-easily-swappable-parameters) */

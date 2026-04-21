@@ -67,6 +67,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_config.c
 	src/v8m_dispatch.c
 	src/v8m_large.c
+	src/v8m_libc_fallback.c
 	src/v8m_page.c
 	src/v8m_page_heap.c
 	src/v8m_size_class.c
