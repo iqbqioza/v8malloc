@@ -11,12 +11,12 @@
  *      the Large/Huge direct path. Route accordingly.
  *   2. Otherwise try the buddy pool's range-check ownership; on
  *      success it owned and freed.
- *   3. Otherwise the pointer is foreign — forward it to the libc
- *      free captured via dlsym(RTLD_NEXT, "free") at constructor
- *      time. If RTLD_NEXT did not resolve (we were not preloaded
- *      and there is no libc allocator behind us), the pointer is
- *      silently dropped, which is still better than crashing on a
- *      pre-init allocation we cannot identify.
+ *   3. Otherwise the pointer is foreign — silently dropped for v0.
+ *      The libc fallback captured by v8m_libc_fallback_init is
+ *      ready, but routing here is unsafe until the page-heap
+ *      region map (TODO.md open question #1) lands: the magic
+ *      check in step 1 reads at the page base, which faults for
+ *      truly-foreign pointers whose page-aligned base is unmapped.
  *
  * This is the single-threaded baseline — every operation goes
  * through the slab/buddy pools' per-pool mutexes. The TLC + L2 core
@@ -95,5 +95,25 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr);
  * the mmap_size minus the header reservation.
  */
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr);
+
+/*
+ * pthread_atfork hooks. The parent process's library constructor
+ * registers a triple that calls these via fixed wrappers; the
+ * dispatcher exposes them so the public API layer doesn't need to
+ * reach into pool internals.
+ *
+ * Lock acquisition order in `prefork` is slab → buddy; both
+ * postfork handlers release in reverse (buddy → slab). Acquiring
+ * before fork ensures the child sees a quiescent dispatcher state
+ * even though only the calling thread survived the syscall, and
+ * releasing afterwards lets both processes resume normal use.
+ *
+ * In the child, the locks acquired by the prefork hook are held
+ * by the (only surviving) calling thread, so unlocking them is
+ * safe — re-init via pthread_mutex_init is unnecessary.
+ */
+void v8m_dispatch_prefork(struct v8m_dispatch *dispatch);
+void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch);
+void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch);
 
 #endif /* V8M_DISPATCH_H */

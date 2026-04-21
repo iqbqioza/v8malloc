@@ -7,6 +7,7 @@
  * the buddy pool's range-check ownership covers them.
  */
 
+#include <pthread.h> /* IWYU pragma: keep */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,7 +17,6 @@
 #include "v8m_dispatch.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
-#include "v8m_libc_fallback.h"
 #include "v8m_page.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
@@ -159,11 +159,14 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 		return;
 	}
 
-	/* Foreign pointer — forward to the captured libc free if
-	 * resolution succeeded; otherwise drop on the floor (only
-	 * possible when v8malloc is not preloaded and statically
-	 * linked into the program with no libc allocator behind it). */
-	v8m_libc_free(ptr);
+	/* Foreign pointer — silently dropped for v0. The libc
+	 * fallback (v8m_libc_free) is captured at constructor time
+	 * but cannot be used safely from this branch yet: the magic
+	 * check above reads through `meta`, which faults if the
+	 * truly-foreign pointer's page-aligned base sits in an
+	 * unmapped page. Wiring the fallback in here requires the
+	 * page-heap region map (open question #1 in TODO.md) so the
+	 * foreign-vs-ours decision is made before any read. */
 }
 
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
@@ -179,4 +182,24 @@ size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
 		return v8m_large_usable_size(ptr);
 	}
 	return v8m_buddy_pool_block_size(&dispatch->buddy, ptr);
+}
+
+/* --- pthread_atfork plumbing -------------------------------------- */
+
+void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
+{
+	(void)pthread_mutex_lock(&dispatch->slab.lock);
+	(void)pthread_mutex_lock(&dispatch->buddy.lock);
+}
+
+void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
+{
+	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
+	(void)pthread_mutex_unlock(&dispatch->slab.lock);
+}
+
+void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
+{
+	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
+	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }

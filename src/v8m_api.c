@@ -17,6 +17,7 @@
 
 #include <errno.h>
 #include <malloc.h> /* malloc_usable_size prototype (glibc extension) */
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -42,6 +43,34 @@ static void abort_with(const char *msg)
 	abort();
 }
 
+/* pthread_atfork wrappers — pthread_atfork takes parameter-less
+ * function pointers, so the handlers thunk through to the dispatch
+ * helpers using the global g_dispatch instance. Each one early-outs
+ * unless the dispatcher is fully initialized; that protects against
+ * the (unusual) case where another library forks during a
+ * constructor chain that runs before ours. */
+
+static void v8m_atfork_prepare(void)
+{
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+		v8m_dispatch_prefork(&g_dispatch);
+	}
+}
+
+static void v8m_atfork_parent(void)
+{
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+		v8m_dispatch_postfork_parent(&g_dispatch);
+	}
+}
+
+static void v8m_atfork_child(void)
+{
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+		v8m_dispatch_postfork_child(&g_dispatch);
+	}
+}
+
 __attribute__((constructor(101))) static void v8m_constructor(void)
 {
 	/* Resolve libc fallbacks first — dlsym may itself allocate, and
@@ -53,6 +82,14 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	v8m_config_init();
 	if (v8m_dispatch_init(&g_dispatch) != 0) {
 		abort_with("v8malloc: dispatch init failed\n");
+	}
+	/* Register fork handlers before publishing the ready flag so
+	 * that any thread that calls fork() the moment we go live sees
+	 * the locks acquired in deterministic order. pthread_atfork
+	 * itself may allocate; that goes through bootstrap. */
+	if (pthread_atfork(v8m_atfork_prepare, v8m_atfork_parent,
+			   v8m_atfork_child) != 0) {
+		abort_with("v8malloc: pthread_atfork registration failed\n");
 	}
 	atomic_store_explicit(&g_init_state, 1, memory_order_release);
 }

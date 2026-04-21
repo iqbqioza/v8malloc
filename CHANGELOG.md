@@ -110,6 +110,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Fork safety via `pthread_atfork`. The library constructor now
+  registers a triple of handlers that acquire the slab pool and
+  buddy pool mutexes (in fixed slab→buddy order) before fork()
+  and release them in reverse in both parent and child. Without
+  the prepare handler, a forked child could inherit a pool mutex
+  locked by a parent thread that didn't survive the syscall, and
+  the child's first malloc would deadlock. The dispatcher exposes
+  the helpers as `v8m_dispatch_prefork` /
+  `v8m_dispatch_postfork_parent` / `v8m_dispatch_postfork_child`
+  so the public-API layer doesn't reach into pool internals; the
+  registration runs after `v8m_dispatch_init` succeeds and aborts
+  if `pthread_atfork` itself fails. New `test_fork` spins a worker
+  thread hammering malloc/free against the very mutexes the
+  prepare handler must acquire, fork()s in the middle of that
+  storm, drives an allocate/free cycle in both parent and child,
+  and waits for clean exits.
+
+- Foreign-pointer free routing reverted to a silent drop. The
+  `v8m_libc_free` wiring added in the previous cycle requires a
+  safe foreign-vs-ours decision before reading at the pointer's
+  page-aligned base, and the magic-check that powers that
+  decision can fault when the foreign pointer's base sits in an
+  unmapped page. The libc-fallback module, the `__libc_*`
+  aliases, and the dlsym capture all stand; only the
+  `v8m_dispatch_free`-side forward is held back until the
+  page-heap region map (TODO.md open question #1) lands.
+
 - Libc fallback for foreign pointers
   (`v8m_libc_fallback_init/ready/free/malloc`): the library
   constructor now resolves the next free/malloc/calloc/realloc on
