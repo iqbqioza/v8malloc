@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Weekly benchmark workflow
+  (`.github/workflows/bench-weekly.yml`). Runs every Sunday
+  06:00 UTC (plus `workflow_dispatch` for on-demand baseline
+  captures). Builds Release + bench, opportunistically installs
+  jemalloc / tcmalloc / mimalloc (a missing distro package
+  doesn't fail the workflow — the compare script skips any
+  allocator it cannot find), drives MB-01..06 through
+  `scripts/bench-compare.sh` so each result row is tagged by
+  allocator, and uploads the aggregated output as a workflow
+  artifact (`bench-results-<run-id>`, 90-day retention) so
+  maintainers can diff week-over-week. Bench durations are
+  bumped above the interactive defaults (1–2 s per cell) so the
+  numbers are not warmup-dominated. The automated >5%
+  perf-regression gate needs a persisted baseline file
+  (follow-up cycle); this lands the scheduler so the raw data
+  stream starts now.
+
 - Comparative baseline script (`scripts/bench-compare.sh`).
   Drives a single benchmark binary against every reference
   allocator installed on the host (glibc, jemalloc, tcmalloc,

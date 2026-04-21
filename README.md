@@ -251,6 +251,14 @@ GitHub Actions runs three jobs on every PR and push to `main`
   - `format-check + tidy + cppcheck` — the same lint surface
     `make lint` runs locally.
 
+A weekly benchmark workflow
+(`.github/workflows/bench-weekly.yml`) runs every Sunday 06:00
+UTC: it builds Release + bench, drives every MB-01..06 through
+`scripts/bench-compare.sh` (cross-allocator), and uploads the
+aggregated output as a workflow artifact for week-over-week
+diffing. `workflow_dispatch` lets a maintainer trigger it
+on-demand after a perf-related change.
+
 Multi-arch coverage (aarch64, ppc64le, s390x, riscv64) lives in
 `.github/workflows/multi-arch.yml`, scheduled every Monday 06:00
 UTC and triggerable on demand via `workflow_dispatch`. Each lane

@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Weekly benchmark workflow. Builds v8malloc in release mode with
+# the bench harness enabled, runs every MB-01..06 benchmark with the
+# spec-realistic knobs (longer durations than the interactive
+# defaults so the numbers are not warmup-dominated), optionally
+# compares against jemalloc/tcmalloc/mimalloc when those packages
+# are available, and uploads the aggregated output as a workflow
+# artifact so maintainers can diff week-over-week.
+#
+# Schedule:
+#   - cron: every Sunday 06:00 UTC — runs on a quieter GitHub
+#     runner window than the weekday release churn
+#   - workflow_dispatch: manual trigger for on-demand baseline
+#     captures (e.g. after a perf-related change lands)
+#
+# What this does NOT do:
+#   - Automated perf-regression gate (>5% fail). That needs a
+#     persisted baseline file in the repo or a GitHub artifact
+#     from the previous run; landing just the scheduler first so
+#     the raw data is captured, baseline-diff logic lands as
+#     follow-up.
+#   - Tune the runner (THP / ASLR / governor). GitHub shared
+#     runners run behind a shared scheduler so the absolute
+#     numbers are noisy either way; we report them as-is and the
+#     week-over-week diff is what matters.
+#
+# Knob overrides flow through as env vars (V8M_BENCH_DURATION_MS
+# etc.) so a maintainer can tweak a single bench without editing
+# this file.
+
+name: bench-weekly
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-benches:
+    name: Run MB-01..06 in release mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain + comparator allocators
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang \
+            libjemalloc2 libtcmalloc-minimal4 libmimalloc2.0 \
+            || true
+          # The `|| true` guards against a distro rename — the
+          # bench compare script skips any allocator it cannot
+          # find, so a missing one does not fail the workflow.
+
+      - name: Configure (Release + bench)
+        run: |
+          cmake -S . -B build/bench \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DV8MALLOC_BUILD_BENCH=ON
+
+      - name: Build
+        run: cmake --build build/bench --parallel
+
+      - name: Create results dir
+        run: mkdir -p bench-results
+
+      - name: MB-01 single-thread throughput
+        run: |
+          V8M_BENCH_DURATION_MS=1000 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_01_throughput \
+            > bench-results/mb_01_throughput.txt 2>&1 || true
+          cat bench-results/mb_01_throughput.txt
+
+      - name: MB-02 multi-thread scalability
+        run: |
+          V8M_BENCH_DURATION_MS=2000 V8M_BENCH_WARMUP_MS=200 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_02_scalability \
+            > bench-results/mb_02_scalability.txt 2>&1 || true
+          cat bench-results/mb_02_scalability.txt
+
+      - name: MB-03 producer/consumer
+        run: |
+          V8M_BENCH_DURATION_MS=2000 V8M_BENCH_WARMUP_MS=200 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_03_producer_consumer \
+            > bench-results/mb_03_producer_consumer.txt 2>&1 || true
+          cat bench-results/mb_03_producer_consumer.txt
+
+      - name: MB-04 mixed-size workload
+        run: |
+          V8M_BENCH_DURATION_MS=2000 V8M_BENCH_WARMUP_MS=200 \
+          V8M_BENCH_LIVE_COUNT=10000 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_04_mixed \
+            > bench-results/mb_04_mixed.txt 2>&1 || true
+          cat bench-results/mb_04_mixed.txt
+
+      - name: MB-05 fragmentation
+        run: |
+          V8M_BENCH_LIVE_COUNT=20000 V8M_BENCH_ITERS=50 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_05_fragmentation \
+            > bench-results/mb_05_fragmentation.txt 2>&1 || true
+          cat bench-results/mb_05_fragmentation.txt
+
+      - name: MB-06 large-allocation latency
+        run: |
+          V8M_BENCH_ITERS=200 V8M_BENCH_MAX_SIZE_MB=16 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_06_large_latency \
+            > bench-results/mb_06_large_latency.txt 2>&1 || true
+          cat bench-results/mb_06_large_latency.txt
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: bench-results/
+          retention-days: 90
