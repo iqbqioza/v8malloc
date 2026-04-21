@@ -127,6 +127,11 @@ across eight sizes spanning every backend (8 B through 2 MiB).
 It links statically against the library so the numbers reflect
 the same code path direct consumers see.
 
+`bench/mb_04_mixed.c` drives a bounded working set through
+alloc/free with sizes drawn from the spec's six-band
+distribution (8 B → 256 KiB), the closest thing the suite has
+to a "realistic mixed workload". Single-thread.
+
 `bench/mb_06_large_latency.c` is the latency-side companion to
 MB-01. Single-thread per-iteration p50/p99 timing of the Large
 mmap path, broken down into alloc / first-touch fault / free

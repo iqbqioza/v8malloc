@@ -6,7 +6,52 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Slab pool partials-list duplicate-insertion bug
+  (`src/v8m_slab_pool.c`). When a `free` triggered a
+  full → partial transition on a page that was still tracked as
+  `cls->current`, the was_full branch unconditionally inserted
+  the page into `cls->partials`, leaving the page tracked from
+  two slots simultaneously (current + partials head). When the
+  page later drained to empty, `unlink_from_class` removed only
+  one occurrence; the other survived the subsequent
+  `page_heap_free → munmap`, so the partials list ended up
+  holding a dangling pointer to an unmapped page. The next
+  allocation that reached `try_partials` would walk the list,
+  read `(*link)->used_count` from the freed memory, and SIGSEGV
+  at the slab-page base (or at a stale magic byte if the kernel
+  had already remapped the address for a different VMA).
+  
+  Surfaced first by an attempted MB-03 producer/consumer bench
+  (deleted at the time as "blocked by a slab-pool race") and
+  re-surfaced reliably by the new single-thread MB-04. Fix:
+  `else if (was_full)` becomes `else if (was_full && cls->current
+  != meta)` — if meta is already the current page, the partials
+  insertion is redundant and the duplicate entry is the bug.
+  Verified by running MB-04 to completion at live_count = 2000
+  (~2.2 M ops in 500 ms), the failing repro before the fix.
+
 ### Added
+- MB-04 mixed-size workload benchmark
+  (`bench/mb_04_mixed.c`, benchmarks.md §2.4). Single-thread
+  workload driving a bounded working set of `live_count`
+  concurrent allocations through alloc/free with sizes drawn
+  from the spec's six-band distribution (8 B/32 B at 40 %, …,
+  > 64 KiB at 3 %). Each iteration picks a random slot and
+  replaces its allocation with a fresh size from the
+  distribution, so the working set holds at roughly
+  `live_count` live objects — the spec's "concurrently live
+  objects" knob. NULL returns are tolerated and counted in
+  `alloc_failures` (the > 64 KiB tail occasionally exhausts the
+  buddy pool's 16 MiB cap; throughput reflects only successful
+  ops). Bringing this up surfaced and unblocked the slab-pool
+  partials-list double-insertion bug fixed in this same cycle.
+  Multi-thread variants (the spec's "threads: 1, 8, 64") land
+  with finer-grained per-pool synchronization. Knobs:
+  `V8M_BENCH_DURATION_MS` (default 1000), `V8M_BENCH_WARMUP_MS`
+  (default 100), `V8M_BENCH_LIVE_COUNT` (default 10000, capped
+  at 10 M), `V8M_BENCH_SEED` (default 0x1234).
+
 - MB-06 large-allocation latency benchmark
   (`bench/mb_06_large_latency.c`, benchmarks.md §2.6).
   Single-thread per-iteration timing of the Large / Huge mmap

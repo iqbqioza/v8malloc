@@ -223,9 +223,19 @@ bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 	if (became_empty) {
 		unlink_from_class(cls, meta);
 		v8m_page_heap_free(meta, V8M_PAGE_SIZE);
-	} else if (was_full) {
+	} else if (was_full && cls->current != meta) {
 		/* Full -> partial transition; the page wasn't in any
-		 * list, so add it to partials. */
+		 * list, so add it to partials. The `cls->current != meta`
+		 * guard matters: a page can be `current` AND full (the
+		 * try_current path leaves it as current until the next
+		 * alloc walks it off), so a free that triggers
+		 * full -> partial on the still-current page would
+		 * otherwise insert a duplicate entry. The duplicate
+		 * survives the eventual unmap (unlink_from_class only
+		 * removes one occurrence), leaving partials holding a
+		 * dangling pointer that crashes the next try_partials
+		 * walk. Caught by MB-04 / MB-03 stress patterns at
+		 * Small classes 30/31. */
 		meta->next = cls->partials;
 		cls->partials = meta;
 	}
