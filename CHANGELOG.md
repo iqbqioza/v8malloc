@@ -7,6 +7,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MB-06 large-allocation latency benchmark
+  (`bench/mb_06_large_latency.c`, benchmarks.md §2.6).
+  Single-thread per-iteration timing of the Large / Huge mmap
+  path, reported separately for the three phases the kernel
+  charges differently: `alloc` latency (mmap + region-map
+  insert), `fault` latency (the first-touch `memset` that pulls
+  in physical pages on demand — page-fault dominated), and
+  `free` latency (region-map remove + munmap). Each phase
+  reports both p50 and p99 across `V8M_BENCH_ITERS` iterations
+  per size, so the spec's "Large allocation ≤0.5× glibc"
+  median-comparison criterion (benchmarks.md §6) is directly
+  legible. The memset is fenced with a one-byte
+  `__asm__ volatile("" : : "r"(ptr) : "memory")` compiler
+  barrier — without it gcc dead-code-eliminates the memset
+  (its result is only ever consumed by free) and the fault
+  numbers come out as zero.
+
+  Sweeps the spec's exact size ladder (256 KiB → 256 MiB).
+  256 KiB sits at the buddy/Large boundary so the bench also
+  surfaces the routing transition. Multi-thread coverage (the
+  spec's "threads: 1, 8") lands once the page-heap region map
+  grows finer-grained synchronization. Knobs:
+  `V8M_BENCH_ITERS` (default 100, clamped to [10, 10000] so
+  taint-flow analysis is happy), `V8M_BENCH_MAX_SIZE_MB`
+  (default 256; lower for limited-RAM CI runners).
+
 - Benchmark runner script (`scripts/bench-run.sh`). Pins the
   host into the benchmarks.md §1.3 measurement environment
   before invoking the supplied bench command — switches every

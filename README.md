@@ -127,6 +127,13 @@ across eight sizes spanning every backend (8 B through 2 MiB).
 It links statically against the library so the numbers reflect
 the same code path direct consumers see.
 
+`bench/mb_06_large_latency.c` is the latency-side companion to
+MB-01. Single-thread per-iteration p50/p99 timing of the Large
+mmap path, broken down into alloc / first-touch fault / free
+phases — the spec's "Large allocation ≤0.5× glibc median"
+pass criterion is directly comparable from the alloc_us_p50
+column.
+
 `bench/mb_02_scalability.c` sweeps thread counts at the
 spec's 64 B fixed size and reports total throughput,
 per-thread throughput, and the scalability ratio versus the
