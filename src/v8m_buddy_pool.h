@@ -68,10 +68,13 @@ void v8m_buddy_pool_destroy(struct v8m_buddy_pool *pool);
 void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size);
 
 /*
- * Return a previously-issued allocation. Returns true iff the
- * arena that held the allocation became fully empty (after which
- * the pool has already returned it to the page heap). Tolerates
- * NULL ptr; returns false for ptrs the pool does not own.
+ * Return a previously-issued allocation. Returns true iff the pool
+ * owned `ptr` (and therefore freed it). Returns false for NULL,
+ * foreign pointers, and pointers that fall inside an in-use arena
+ * but don't sit at the start of any allocated buddy block. The
+ * boolean lets the dispatch layer fall through to other handlers
+ * for foreign pointers; whether the arena itself was reclaimed on
+ * this free can be inferred from `v8m_page_heap_get_stats`.
  */
 bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr);
 

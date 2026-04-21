@@ -149,13 +149,11 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 
 	v8m_buddy_free(&slot->buddy, ptr, size);
 
-	bool reclaimed = false;
 	if (v8m_buddy_is_empty(&slot->buddy)) {
 		v8m_page_heap_free(slot->buddy.arena_base, V8M_BUDDY_MAX_BLOCK);
 		slot->in_use = false;
-		reclaimed = true;
 	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
-	return reclaimed;
+	return true;
 }

@@ -79,6 +79,9 @@ static int check_single_round_trip(void)
 		return fail("init returned non-zero");
 	}
 
+	struct v8m_page_heap_stats before_alloc = {0};
+	v8m_page_heap_get_stats(&before_alloc);
+
 	void *obj = v8m_buddy_pool_alloc(&pool, BLOCK_SIZE);
 	if (obj == NULL) {
 		v8m_buddy_pool_destroy(&pool);
@@ -89,8 +92,18 @@ static int check_single_round_trip(void)
 		return fail("alloc pointer not 8 KiB-aligned");
 	}
 
-	bool reclaimed = v8m_buddy_pool_free(&pool, obj);
-	if (!reclaimed) {
+	struct v8m_page_heap_stats before_free = {0};
+	v8m_page_heap_get_stats(&before_free);
+
+	bool freed = v8m_buddy_pool_free(&pool, obj);
+	if (!freed) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("single free did not own the pointer");
+	}
+
+	struct v8m_page_heap_stats after_free = {0};
+	v8m_page_heap_get_stats(&after_free);
+	if (after_free.munmap_calls <= before_free.munmap_calls) {
 		v8m_buddy_pool_destroy(&pool);
 		return fail("single free did not reclaim the arena");
 	}
@@ -174,14 +187,17 @@ static int check_arena_reclamation(void)
 	v8m_page_heap_get_stats(&before);
 
 	/* Free the last allocation — that's the only one in the second
-	 * arena, so the second arena should drain and be reclaimed. */
+	 * arena, so the second arena should drain and be reclaimed.
+	 * The reclamation itself is observed below via page-heap
+	 * stats; the boolean return only confirms that the pool
+	 * recognized the pointer as one of its own. */
 	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
 	void *last = (void *)addrs[ARENA_BLOCK_CAPACITY];
-	bool reclaimed = v8m_buddy_pool_free(&pool, last);
-	if (!reclaimed) {
+	bool freed = v8m_buddy_pool_free(&pool, last);
+	if (!freed) {
 		v8m_buddy_pool_destroy(&pool);
 		return fail(
-		    "the last-allocation free did not reclaim its arena");
+		    "the last-allocation free was not recognized as owned");
 	}
 
 	struct v8m_page_heap_stats after = {0};

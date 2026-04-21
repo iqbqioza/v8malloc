@@ -110,6 +110,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Allocation dispatcher (`v8m_dispatch_init/destroy/alloc/free`):
+  the first end-to-end allocator, composing the slab pool,
+  buddy pool, and direct-mmap Large/Huge path behind one
+  `alloc(size)` / `free(ptr)` interface. Allocation routes by
+  size: classes 0..31 → slab pool, sizes ≤ 256 KiB but above
+  the slab range → buddy pool, everything larger → direct mmap.
+  Free uses the v8m_page_meta magic check at the page base to
+  tell slab/large pages apart from buddy and foreign pointers;
+  buddy allocations are recognized via the buddy pool's
+  range-check ownership, foreign pointers are silently dropped
+  for v0 (the libc fallback via `dlsym(RTLD_NEXT, "free")`
+  lands with the public API / init cycle).
+  v8m_buddy_pool_free's return value is now "true iff owned and
+  freed" so the dispatcher can disambiguate ownership from
+  reclamation; the buddy-pool tests pick up the reclamation
+  signal from page-heap stats instead. Test suite covers
+  init/destroy, round-trip alloc/free for representative sizes
+  in every backend (Tiny, Small, Medium, Large, Huge), correct
+  routing per size category (verified by inspecting the page
+  metadata produced by each path), distinct addresses across 32
+  mixed-size allocations, NULL/foreign-pointer tolerance, and
+  an 8-thread × 64-op concurrent mixed-size stress.
+
 - Buddy pool (`v8m_buddy_pool_init/destroy/alloc/free`) plus
   two helpers added to the buddy module: `v8m_buddy_block_size`
   recovers the level of a previously-allocated block by walking
