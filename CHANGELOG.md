@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Exhaustive realloc-semantics test (`tests/test_realloc.c`).
+  Walks a 10-cell size ladder (8 B → 4 MiB) upward through every
+  backend boundary — slab Tiny → slab Small → buddy Medium →
+  buddy boundary → Large mmap → Huge mmap — reallocing one buffer
+  through every cell. Stamps a deterministic byte pattern keyed
+  on the absolute offset (so the pattern is one coherent run
+  across multiple grow-with-copy steps), and verifies the prefix
+  survives every transition. The downward shrink walk does the
+  same in reverse — start from the largest cell, stamp the whole
+  buffer, shrink one cell at a time, verify the surviving prefix
+  after each step. Plus a 256-byte-step intra-class shrink loop
+  within Small, a slab→Huge→slab round-trip with prefix
+  verification at each end, and the standard edge cases
+  (realloc(NULL, n), realloc(ptr, 0), realloc(NULL, 0)).
+  Complements the basic realloc happy-path check in
+  `tests/test_api.c`. Caught a stamp-vs-verify off-by-one in the
+  test itself during development (the stamp helper was
+  buffer-relative, the verify helper offset-relative); the fix
+  threads an absolute (start, end) range through the stamp helper.
+
 - Multi-arch weekly CI workflow
   (`.github/workflows/multi-arch.yml`). Runs the full build +
   ctest suite under QEMU-user emulation against every Tier 1 /
