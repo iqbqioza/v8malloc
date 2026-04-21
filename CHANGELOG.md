@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MB-07 NUMA local-allocation-rate benchmark
+  (`bench/mb_07_numa_local.c`, benchmarks.md §2.7).
+  Single-thread; for each allocation, touches the first byte to
+  force the kernel to back the page with a local physical
+  frame, then issues a direct `get_mempolicy` syscall with
+  `MPOL_F_NODE | MPOL_F_ADDR` (bypasses libnuma so the bench
+  link line stays clean) to read the actual residency node id
+  and compares against `v8m_numa_current_node()`. Reports per
+  size-band `local` / `unknown` / `local_%`. Up-front probe
+  skips the whole sweep cleanly with a one-line note when the
+  kernel returns ENOSYS / EPERM (every WSL2 / no-NUMA / seccomp-
+  filtered runtime — the dev container exhibits the EPERM
+  case). On a single-NUMA host every row reads 100 % local;
+  the bench is the regression gate for the future per-NUMA pool
+  work, so a routing mistake cannot silently send a thread's
+  allocation to the wrong node.
+
 - Weekly benchmark workflow
   (`.github/workflows/bench-weekly.yml`). Runs every Sunday
   06:00 UTC (plus `workflow_dispatch` for on-demand baseline

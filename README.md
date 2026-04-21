@@ -144,7 +144,13 @@ alloc/free-half/refill churn for K iterations and reports
 the RSR trend over time is directly plot-ready.
 
 `bench/mb_06_large_latency.c` is the latency-side companion to
-MB-01. Single-thread per-iteration p50/p99 timing of the Large
+MB-01.
+
+`bench/mb_07_numa_local.c` verifies allocations land on the
+caller's NUMA node (via `get_mempolicy`) and reports a
+per-size-band local-rate percentage. On single-node hosts the
+bench reads 100 % and doubles as a regression gate for the
+future per-NUMA pool sharding work. Single-thread per-iteration p50/p99 timing of the Large
 mmap path, broken down into alloc / first-touch fault / free
 phases — the spec's "Large allocation ≤0.5× glibc median"
 pass criterion is directly comparable from the alloc_us_p50
