@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Exhaustive calloc / reallocarray test
+  (`tests/test_calloc.c`). A 9-cell sweep across every backend
+  (slab Tiny → slab Small → buddy Medium → buddy boundary →
+  Large mmap → Huge mmap), each cell calling `calloc(nmemb,
+  size)`, verifying every byte is zero, dirtying with 0xAB, and
+  freeing — then a second pass repeats the sweep so a
+  missed-zero bug on slot reuse surfaces (the second-pass calloc
+  may land on a slot the first pass dirtied). Plus boundary
+  overflow tests beyond the trivial SIZE_MAX × SIZE_MAX (the
+  hard cases — small × large that still wraps, e.g.
+  (SIZE_MAX/2)+2 × 2), the calloc(0, n) / calloc(n, 0) /
+  calloc(0, 0) lifecycle edges, reallocarray's matching
+  overflow contract, and reallocarray byte-preservation across
+  grow + shrink. Complements test_api's basic happy path.
+
+### Notes
+- MB-03 producer/consumer benchmark exposed and reverted. A
+  first-cut implementation (one SPSC ring per pair, producer
+  malloc → consumer free) ran into a slab-pool use-after-free
+  under sustained cross-thread alloc/free at the same size
+  class: the empty-page reclamation (`v8m_page_heap_free` →
+  `munmap` while holding the slab pool mutex) interleaved with
+  a concurrent `v8m_slab_pool_alloc` such that a producer wrote
+  to a page the consumer had just unmapped. Both threads were
+  serialized on the pool mutex, so the race is somewhere
+  subtler — most likely `cls->current` becoming stale across
+  unmap+remap when `mmap(NULL, ...)` happens to return the same
+  virtual address. Reverted the bench to keep the tree green;
+  MB-03 is unblocked once the thread cache lands and empty-page
+  reclamation can be made lazy. Tracked in TODO.md.
+
 - Exhaustive realloc-semantics test (`tests/test_realloc.c`).
   Walks a 10-cell size ladder (8 B → 4 MiB) upward through every
   backend boundary — slab Tiny → slab Small → buddy Medium →
