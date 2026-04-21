@@ -151,6 +151,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   segfaults this bench within seconds of the timed loop.
 
 ### Fixed
+- CI build error on older Clang (`src/v8m_bootstrap.c`). The
+  bootstrap buffer was declared as
+  `static alignas(V8M_PAGE_SIZE) unsigned char …[]`, which
+  GitHub Actions' Ubuntu-latest Clang (< 19) rejects with "an
+  attribute list cannot appear here" — the parser tries to
+  interpret the `alignas(…)` parenthesised expression as an
+  attribute-list in a position it is not allowed. C23's grammar
+  is ambiguous enough here that leading the alignment specifier
+  works on every supported compiler, so the order is now
+  `alignas(V8M_PAGE_SIZE) static unsigned char …[]`. Local
+  Clang 19 accepted both forms; the CI lane against 18.x was
+  the only place the earlier ordering mattered.
+
 - Slab pool partials-list duplicate-insertion bug
   (`src/v8m_slab_pool.c`). When a `free` triggered a
   full → partial transition on a page that was still tracked as

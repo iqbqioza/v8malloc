@@ -27,8 +27,12 @@
  * runtime if the constructor chain actually consumes them. */
 #define V8M_BOOTSTRAP_SIZE (V8M_PAGE_SIZE * 4U)
 
-static alignas(
-    V8M_PAGE_SIZE) unsigned char v8m_bootstrap_buffer[V8M_BOOTSTRAP_SIZE];
+/* C23 allows `alignas` to appear anywhere in the declaration-
+ * specifier list, but clang < 19 rejects it positioned after
+ * `static` (parses the paren-expression as an attribute-list).
+ * Leading alignas works on every supported compiler. */
+alignas(V8M_PAGE_SIZE) static unsigned char v8m_bootstrap_buffer
+    [V8M_BOOTSTRAP_SIZE];
 static atomic_size_t v8m_bootstrap_offset = 0;
 
 static void v8m_bootstrap_oom(void)
