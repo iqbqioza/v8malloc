@@ -110,6 +110,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Slab pool (`v8m_slab_pool_init/destroy/alloc/free`):
+  per-class management of Tiny + Small slab pages. For each of
+  the 32 slab classes (0..31) the pool holds a `current` page
+  and a `partials` chain; the underlying tiny-vs-small slab is
+  dispatched by `meta->size_class < V8M_SMALL_FIRST_CLASS`.
+  Allocation tries the current page, falls through to partials,
+  and finally acquires a fresh page from the page heap. Free
+  reads `is_full` before the slab free so it can detect the
+  full → partial transition and re-insert the recovered page;
+  pages that drain to empty are returned to the page heap. A
+  single per-pool mutex serializes operations — the lock-free
+  thread-local cache lands on top of this in a future cycle.
+  Test suite covers init/destroy, bounds, single alloc/free per
+  class, multi-page allocation when one page exhausts, the
+  full → partial recovery path (verified by page-heap stats
+  staying flat after a recovered page is reused), and an
+  8-thread × 256-op concurrency stress.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
