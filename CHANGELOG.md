@@ -110,6 +110,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Public POSIX allocation API (`malloc`, `free`, `calloc`,
+  `realloc`, `reallocarray`, `malloc_usable_size`) plus the
+  matching `v8m_`-prefixed variants. Both name groups route
+  through the same v8m_dispatch instance; the standard names
+  are exported through the V8MALLOC_1.0 linker version node so
+  LD_PRELOAD substitution works. A library constructor at
+  priority 101 runs `v8m_config_init` then `v8m_dispatch_init`
+  on a global dispatcher; pre-init / post-shutdown allocations
+  fall through to the bootstrap allocator, and bootstrap
+  pointers survive the transition (free recognizes them via the
+  range check and treats them as no-ops). calloc and reallocarray
+  guard against the nmemb*size overflow with `errno = ENOMEM`,
+  malloc_usable_size returns the backend's actual block byte
+  size, and realloc copies `min(old_usable, new_size)` bytes
+  before freeing the old allocation. aligned_alloc /
+  posix_memalign / memalign / valloc / pvalloc need a custom-
+  alignment path through the backends and ship in their own
+  cycle. Test suite covers basic round-trip across slab/buddy/
+  large size categories, calloc zeroing + overflow, the four
+  realloc shapes (NULL, grow with data preservation, shrink,
+  ptr+0), reallocarray overflow, and malloc_usable_size. The
+  existing test_slab_*, test_page_meta, and test_buddy tests
+  switched their fake-page allocators from libc's
+  `aligned_alloc` to `v8m_page_heap_alloc/_free` so the malloc
+  override no longer misroutes their fake-page frees through
+  the dispatcher.
+
 - Allocation dispatcher (`v8m_dispatch_init/destroy/alloc/free`):
   the first end-to-end allocator, composing the slab pool,
   buddy pool, and direct-mmap Large/Huge path behind one

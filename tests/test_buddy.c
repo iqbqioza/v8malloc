@@ -14,6 +14,7 @@
 #include <stdlib.h>
 
 #include "v8m_buddy.h"
+#include "v8m_page_heap.h"
 
 static int fail(const char *msg)
 {
@@ -27,9 +28,18 @@ enum {
 	EXHAUSTION_COUNT = 32
 };
 
+/* Use the page heap (mmap-backed) for the buddy arena rather than
+ * libc's aligned_alloc — once v8m_api.c links the malloc/free
+ * hijacks, the libc aligned_alloc/free pair would clash with our
+ * dispatcher on the test's fake arena memory. */
 static void *alloc_arena(void)
 {
-	return aligned_alloc(V8M_BUDDY_MAX_BLOCK, V8M_BUDDY_MAX_BLOCK);
+	return v8m_page_heap_alloc(V8M_BUDDY_MAX_BLOCK, V8M_BUDDY_MAX_BLOCK);
+}
+
+static void release_arena(void *arena)
+{
+	v8m_page_heap_free(arena, V8M_BUDDY_MAX_BLOCK);
 }
 
 static uint32_t count_free(const struct v8m_buddy *buddy, uint32_t level)
@@ -62,11 +72,11 @@ static int check_init_state(void)
 	v8m_buddy_init(&buddy, arena);
 
 	if (!is_fully_coalesced(&buddy)) {
-		free(arena);
+		release_arena(arena);
 		return fail("fresh buddy is not fully coalesced");
 	}
 
-	free(arena);
+	release_arena(arena);
 	return 0;
 }
 
@@ -81,27 +91,27 @@ static int check_single_alloc_free(void)
 
 	void *ptr = v8m_buddy_alloc(&buddy, 8192);
 	if (ptr == NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(8 KiB) returned NULL on fresh arena");
 	}
 	if ((uintptr_t)ptr % 8192U != 0U) {
-		free(arena);
+		release_arena(arena);
 		return fail("8 KiB alloc is not 8 KiB-aligned");
 	}
 	if ((uintptr_t)ptr < (uintptr_t)arena ||
 	    (uintptr_t)ptr >= (uintptr_t)arena + V8M_BUDDY_MAX_BLOCK) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc returned a pointer outside the arena");
 	}
 
 	v8m_buddy_free(&buddy, ptr, 8192);
 	if (!is_fully_coalesced(&buddy)) {
-		free(arena);
+		release_arena(arena);
 		return fail(
 		    "buddy not fully coalesced after single alloc/free");
 	}
 
-	free(arena);
+	release_arena(arena);
 	return 0;
 }
 
@@ -118,18 +128,18 @@ static int check_exhaustion(void)
 	for (int i = 0; i < EXHAUSTION_COUNT; i++) {
 		void *obj = v8m_buddy_alloc(&buddy, 8192);
 		if (obj == NULL) {
-			free(arena);
+			release_arena(arena);
 			return fail("alloc failed before arena exhaustion");
 		}
 		if ((uintptr_t)obj % 8192U != 0U) {
-			free(arena);
+			release_arena(arena);
 			return fail("mid-sequence pointer not 8 KiB-aligned");
 		}
 		ptrs[i] = (uintptr_t)obj;
 	}
 
 	if (v8m_buddy_alloc(&buddy, 8192) != NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc succeeded past arena exhaustion");
 	}
 
@@ -141,7 +151,7 @@ static int check_exhaustion(void)
 					     ? (ptrs[i] - ptrs[j])
 					     : (ptrs[j] - ptrs[i]);
 			if (diff < 8192U) {
-				free(arena);
+				release_arena(arena);
 				return fail("two 8 KiB allocations overlap");
 			}
 		}
@@ -153,11 +163,11 @@ static int check_exhaustion(void)
 		v8m_buddy_free(&buddy, obj, 8192);
 	}
 	if (!is_fully_coalesced(&buddy)) {
-		free(arena);
+		release_arena(arena);
 		return fail("arena not coalesced after full free");
 	}
 
-	free(arena);
+	release_arena(arena);
 	return 0;
 }
 
@@ -173,22 +183,22 @@ static int check_size_rounding(void)
 	/* Non-power-of-two size rounds up to the next level. */
 	void *rounded_up = v8m_buddy_alloc(&buddy, 5000);
 	if (rounded_up == NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(5000) returned NULL");
 	}
 	if ((uintptr_t)rounded_up % 8192U != 0U) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(5000) pointer not 8 KiB-aligned");
 	}
 
 	/* Minimum block is 4 KiB. */
 	void *min_block = v8m_buddy_alloc(&buddy, V8M_BUDDY_MIN_BLOCK);
 	if (min_block == NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(4 KiB) returned NULL");
 	}
 	if ((uintptr_t)min_block % V8M_BUDDY_MIN_BLOCK != 0U) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(4 KiB) pointer not 4 KiB-aligned");
 	}
 
@@ -198,21 +208,21 @@ static int check_size_rounding(void)
 	v8m_buddy_free(&buddy, min_block, V8M_BUDDY_MIN_BLOCK);
 	void *max_block = v8m_buddy_alloc(&buddy, V8M_BUDDY_MAX_BLOCK);
 	if (max_block == NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(256 KiB) returned NULL after drain");
 	}
 	if ((uintptr_t)max_block % V8M_BUDDY_MAX_BLOCK != 0U) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(256 KiB) pointer not 256 KiB-aligned");
 	}
 	v8m_buddy_free(&buddy, max_block, V8M_BUDDY_MAX_BLOCK);
 
 	if (!is_fully_coalesced(&buddy)) {
-		free(arena);
+		release_arena(arena);
 		return fail("arena not coalesced after rounding test");
 	}
 
-	free(arena);
+	release_arena(arena);
 	return 0;
 }
 
@@ -226,17 +236,17 @@ static int check_invalid_inputs(void)
 	v8m_buddy_init(&buddy, arena);
 
 	if (v8m_buddy_alloc(&buddy, 0) != NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc(0) did not return NULL");
 	}
 	if (v8m_buddy_alloc(&buddy, V8M_BUDDY_MAX_BLOCK + 1U) != NULL) {
-		free(arena);
+		release_arena(arena);
 		return fail("alloc above max block size did not return NULL");
 	}
 	/* NULL free is tolerated. */
 	v8m_buddy_free(&buddy, NULL, 8192);
 
-	free(arena);
+	release_arena(arena);
 	return 0;
 }
 

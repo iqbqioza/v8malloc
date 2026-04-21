@@ -18,6 +18,7 @@
 
 #include "v8m_internal.h"
 #include "v8m_page.h"
+#include "v8m_page_heap.h"
 #include "v8m_slab_small.h"
 
 static int fail(const char *msg)
@@ -36,14 +37,23 @@ enum {
 	CLASS_LARGE = 31
 };
 
+/* Use the page heap directly (mmap-backed) rather than libc's
+ * aligned_alloc — the public free() override would otherwise misroute
+ * a fake test page into v8m_dispatch_free, which would try to munmap
+ * heap memory after seeing the V8M_MAGIC we stamped. */
 static void *alloc_page(void)
 {
-	void *page = aligned_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+	void *page = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
 	if (page == NULL) {
 		return NULL;
 	}
 	(void)memset(page, 0, V8M_PAGE_SIZE);
 	return page;
+}
+
+static void release_page(void *page)
+{
+	v8m_page_heap_free(page, V8M_PAGE_SIZE);
 }
 
 static bool object_in_data_area(const struct v8m_page_meta *meta,
@@ -77,39 +87,39 @@ static int check_init_sets_metadata(void)
 	struct v8m_page_meta *meta = page;
 
 	if (meta->magic != V8M_MAGIC) {
-		free(page);
+		release_page(page);
 		return fail("V8M_MAGIC not stamped");
 	}
 	if (meta->size_class != CLASS_MID) {
-		free(page);
+		release_page(page);
 		return fail("size_class mis-stamped");
 	}
 	if (meta->object_size != 512) {
-		free(page);
+		release_page(page);
 		return fail("object_size mis-stamped (class 19 -> 512)");
 	}
 	if (meta->capacity != v8m_slab_small_capacity_for(meta->object_size)) {
-		free(page);
+		release_page(page);
 		return fail("capacity disagrees with capacity_for");
 	}
 	if (meta->free_list_head == NULL && meta->capacity > 0) {
-		free(page);
+		release_page(page);
 		return fail("free_list_head NULL after init of non-empty slab");
 	}
 	if (!v8m_slab_small_is_empty(meta)) {
-		free(page);
+		release_page(page);
 		return fail("slab not empty immediately after init");
 	}
 	if (v8m_slab_small_is_full(meta)) {
-		free(page);
+		release_page(page);
 		return fail("slab reported full immediately after init");
 	}
 	if (meta->owner_thread != OWNER_THREAD) {
-		free(page);
+		release_page(page);
 		return fail("owner_thread mis-stamped");
 	}
 
-	free(page);
+	release_page(page);
 	return 0;
 }
 
@@ -127,7 +137,7 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 	uintptr_t *addrs =
 	    (uintptr_t *)malloc((size_t)capacity * sizeof(uintptr_t));
 	if (addrs == NULL) {
-		free(page);
+		release_page(page);
 		return fail("malloc(addrs) failed");
 	}
 
@@ -135,17 +145,17 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 		void *obj = v8m_slab_small_alloc(meta);
 		if (obj == NULL) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc returned NULL before capacity");
 		}
 		if (!object_in_data_area(meta, obj)) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc returned pointer outside data area");
 		}
 		if ((uintptr_t)obj % natural_alignment(object_size) != 0) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc pointer not naturally aligned");
 		}
 		addrs[i] = (uintptr_t)obj;
@@ -153,12 +163,12 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 
 	if (v8m_slab_small_alloc(meta) != NULL) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("alloc succeeded past capacity");
 	}
 	if (!v8m_slab_small_is_full(meta)) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("is_full false when slab exhausted");
 	}
 
@@ -166,7 +176,7 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 		for (uint32_t j = i + 1; j < capacity; j++) {
 			if (addrs[i] == addrs[j]) {
 				free(addrs);
-				free(page);
+				release_page(page);
 				return fail(
 				    "alloc returned the same slot twice");
 			}
@@ -184,18 +194,18 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 	}
 	if (empty_reports != 1) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail(
 		    "v8m_slab_small_free did not signal empty exactly once");
 	}
 	if (!v8m_slab_small_is_empty(meta)) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("is_empty false after freeing every slot");
 	}
 
 	free(addrs);
-	free(page);
+	release_page(page);
 	return 0;
 }
 
@@ -213,26 +223,26 @@ static int check_slot_reuse(void)
 		for (uint32_t i = 0; i < STRESS_ITERATIONS; i++) {
 			void *obj = v8m_slab_small_alloc(meta);
 			if (obj == NULL) {
-				free(page);
+				release_page(page);
 				return fail(
 				    "alloc-then-free churn produced NULL");
 			}
 			(void)v8m_slab_small_free(meta, obj);
 		}
 		if (!v8m_slab_small_is_empty(meta)) {
-			free(page);
+			release_page(page);
 			return fail("slab not empty after alloc-free churn");
 		}
 	}
 
 	for (uint32_t i = 0; i < capacity; i++) {
 		if (v8m_slab_small_alloc(meta) == NULL) {
-			free(page);
+			release_page(page);
 			return fail("alloc failed after stress cycles");
 		}
 	}
 
-	free(page);
+	release_page(page);
 	return 0;
 }
 
@@ -249,15 +259,15 @@ static int check_class_31_page_alignment(void)
 	struct v8m_page_meta *meta = page;
 
 	if (meta->object_size != 4096) {
-		free(page);
+		release_page(page);
 		return fail("class 31 object_size != 4096");
 	}
 	if (v8m_slab_small_data_offset(4096) != 4096) {
-		free(page);
+		release_page(page);
 		return fail("class 31 data offset not bumped to 4 KiB");
 	}
 	if (meta->capacity != 15) {
-		free(page);
+		release_page(page);
 		return fail("class 31 capacity != 15 (design: 15)");
 	}
 
@@ -265,20 +275,20 @@ static int check_class_31_page_alignment(void)
 	for (uint32_t i = 0; i < meta->capacity; i++) {
 		void *obj = v8m_slab_small_alloc(meta);
 		if (obj == NULL) {
-			free(page);
+			release_page(page);
 			return fail("class 31 alloc returned NULL early");
 		}
 		if ((uintptr_t)obj % 4096U != 0U) {
-			free(page);
+			release_page(page);
 			return fail("class 31 pointer not 4 KiB-aligned");
 		}
 	}
 	if (v8m_slab_small_alloc(meta) != NULL) {
-		free(page);
+		release_page(page);
 		return fail("class 31 alloc succeeded past capacity");
 	}
 
-	free(page);
+	release_page(page);
 	return 0;
 }
 

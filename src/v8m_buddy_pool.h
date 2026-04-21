@@ -78,4 +78,12 @@ void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size);
  */
 bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr);
 
+/*
+ * Byte size of the buddy-pool allocation containing `ptr`. Returns
+ * 0 if `ptr` is NULL, lies outside every in-use arena, or is not
+ * the start of an allocated buddy block. Used by the dispatch
+ * layer's malloc_usable_size for buddy allocations.
+ */
+size_t v8m_buddy_pool_block_size(struct v8m_buddy_pool *pool, const void *ptr);
+
 #endif /* V8M_BUDDY_POOL_H */

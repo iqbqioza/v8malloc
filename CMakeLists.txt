@@ -60,6 +60,7 @@ endif()
 # --- Sources ------------------------------------------------------------------
 
 set(V8MALLOC_SOURCES
+	src/v8m_api.c
 	src/v8m_bootstrap.c
 	src/v8m_buddy.c
 	src/v8m_buddy_pool.c

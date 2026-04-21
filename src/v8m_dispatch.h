@@ -68,4 +68,13 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size);
  */
 void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr);
 
+/*
+ * Bytes accessible through `ptr`, recovered from the owning
+ * backend. Returns 0 for NULL or for pointers no backend owns.
+ * For slabs the value is the size class's object size; for buddy
+ * allocations the chosen power-of-two block size; for Large/Huge
+ * the mmap_size minus the header reservation.
+ */
+size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr);
+
 #endif /* V8M_DISPATCH_H */

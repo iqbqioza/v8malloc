@@ -58,6 +58,11 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 	return v8m_large_alloc(size, 0);
 }
 
+/* `ptr` cannot be const-qualified: v8m_slab_small_free overwrites
+ * the first sizeof(void *) bytes of the freed object with the
+ * free-list link, so the type must remain non-const all the way
+ * down. */
+/* cppcheck-suppress constParameterPointer */
 void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 {
 	if (ptr == NULL) {
@@ -87,4 +92,19 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 	/* Foreign pointer — silently dropped for v0. The libc
 	 * fallback (dlsym(RTLD_NEXT, "free")) lands with the public
 	 * API / init cycle. */
+}
+
+size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
+{
+	if (ptr == NULL) {
+		return 0;
+	}
+	const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
+	if (v8m_page_meta_valid(meta)) {
+		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+			return meta->object_size;
+		}
+		return v8m_large_usable_size(ptr);
+	}
+	return v8m_buddy_pool_block_size(&dispatch->buddy, ptr);
 }

@@ -58,3 +58,13 @@ bool v8m_ptr_is_bootstrap(const void *ptr)
 	uintptr_t start = (uintptr_t)v8m_bootstrap_buffer;
 	return addr >= start && addr < start + V8M_BOOTSTRAP_SIZE;
 }
+
+size_t v8m_bootstrap_remaining(const void *ptr)
+{
+	if (!v8m_ptr_is_bootstrap(ptr)) {
+		return 0;
+	}
+	uintptr_t addr = (uintptr_t)ptr;
+	uintptr_t end = (uintptr_t)v8m_bootstrap_buffer + V8M_BOOTSTRAP_SIZE;
+	return (size_t)(end - addr);
+}

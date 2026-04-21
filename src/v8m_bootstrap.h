@@ -43,4 +43,12 @@ void *v8m_bootstrap_alloc(size_t size);
  */
 bool v8m_ptr_is_bootstrap(const void *ptr);
 
+/*
+ * Bytes from `ptr` to the end of the bootstrap buffer (a safe upper
+ * bound on what realloc may read when copying out of a bootstrap
+ * allocation — the per-allocation size is not tracked). Returns 0 if
+ * `ptr` is not a bootstrap pointer.
+ */
+size_t v8m_bootstrap_remaining(const void *ptr);
+
 #endif /* V8M_BOOTSTRAP_H */

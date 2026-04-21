@@ -18,6 +18,7 @@
 
 #include "v8m_internal.h"
 #include "v8m_page.h"
+#include "v8m_page_heap.h"
 
 static int fail(const char *msg)
 {
@@ -28,11 +29,14 @@ static int fail(const char *msg)
 int main(void)
 {
 	/* Two consecutive 64 KiB-aligned pages so we can probe the
-	 * intra-page and cross-page cases. aligned_alloc requires the
-	 * size to be a multiple of the alignment. */
-	void *raw = aligned_alloc(V8M_PAGE_SIZE, 2 * V8M_PAGE_SIZE);
+	 * intra-page and cross-page cases. Use the page heap (mmap)
+	 * rather than libc's aligned_alloc — once v8m_api.c links the
+	 * malloc/free hijacks, libc's aligned_alloc/free pair would
+	 * route a fake page through v8m_dispatch_free, which would
+	 * try to munmap heap memory after seeing the V8M_MAGIC. */
+	void *raw = v8m_page_heap_alloc(2 * V8M_PAGE_SIZE, V8M_PAGE_SIZE);
 	if (raw == NULL) {
-		return fail("aligned_alloc(2 pages) failed");
+		return fail("page-heap alloc(2 pages) failed");
 	}
 	(void)memset(raw, 0xCC, 2 * V8M_PAGE_SIZE);
 
@@ -49,11 +53,11 @@ int main(void)
 
 	/* ptr_to_meta on each page base returns the base itself. */
 	if (v8m_ptr_to_meta(meta_a) != meta_a) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("ptr_to_meta(base_a) != base_a");
 	}
 	if (v8m_ptr_to_meta(meta_b) != meta_b) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("ptr_to_meta(base_b) != base_b");
 	}
 
@@ -61,24 +65,24 @@ int main(void)
 	for (size_t off = 0; off < V8M_PAGE_SIZE; off++) {
 		const void *probe = (const char *)meta_a + off;
 		if (v8m_ptr_to_meta(probe) != meta_a) {
-			free(raw);
+			v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 			return fail("ptr_to_meta drifted within page A");
 		}
 	}
 
 	/* The byte immediately after page A belongs to page B. */
 	if (v8m_ptr_to_meta((char *)meta_a + V8M_PAGE_SIZE) != meta_b) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("ptr_to_meta did not roll over at page boundary");
 	}
 
 	/* Magic verification: A is valid, B is not, NULL is not. */
 	if (!v8m_page_meta_valid(meta_a)) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("valid page rejected by magic check");
 	}
 	if (v8m_page_meta_valid(meta_b)) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("corrupted page accepted by magic check");
 	}
 	/* cppcheck correctly constant-folds v8m_page_meta_valid(NULL) to
@@ -86,7 +90,7 @@ int main(void)
 	 * runtime in case the implementation ever changes. */
 	/* cppcheck-suppress knownConditionTrueFalse */
 	if (v8m_page_meta_valid(NULL)) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("NULL accepted by magic check");
 	}
 
@@ -101,23 +105,23 @@ int main(void)
 
 	const struct v8m_page_meta *viewed = (const struct v8m_page_meta *)tiny;
 	if (viewed->magic != V8M_MAGIC) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("tiny magic invisible via common-layout cast");
 	}
 	if (viewed->size_class != 0) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("tiny size_class invisible via common-layout cast");
 	}
 	if (viewed->object_size != 8) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail(
 		    "tiny object_size invisible via common-layout cast");
 	}
 	if (viewed->capacity != 7936) {
-		free(raw);
+		v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 		return fail("tiny capacity invisible via common-layout cast");
 	}
 
-	free(raw);
+	v8m_page_heap_free(raw, 2 * V8M_PAGE_SIZE);
 	return 0;
 }

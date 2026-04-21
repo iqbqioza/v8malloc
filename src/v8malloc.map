@@ -11,6 +11,20 @@ V8MALLOC_1.0 {
 		v8m_version_major;
 		v8m_version_minor;
 		v8m_version_patch;
+
+		v8m_malloc;
+		v8m_free;
+		v8m_calloc;
+		v8m_realloc;
+		v8m_reallocarray;
+		v8m_malloc_usable_size;
+
+		malloc;
+		free;
+		calloc;
+		realloc;
+		reallocarray;
+		malloc_usable_size;
 	local:
 		*;
 };

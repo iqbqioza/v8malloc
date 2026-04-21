@@ -64,6 +64,26 @@ V8M_EXPORT int v8m_version_major(void);
 V8M_EXPORT int v8m_version_minor(void);
 V8M_EXPORT int v8m_version_patch(void);
 
+/* --- Allocation API (v8m_-prefixed, namespaced) ------------------- */
+
+#include <stddef.h>
+
+/*
+ * Namespaced allocation API. The standard `malloc`, `free`,
+ * `calloc`, `realloc`, `reallocarray`, and `malloc_usable_size`
+ * symbols are also exported by the library and route to the same
+ * implementations; consumers get those prototypes from <stdlib.h>
+ * and <malloc.h> as usual. The v8m_* names exist so a program can
+ * call into v8malloc explicitly even when the standard symbols are
+ * resolved to a different allocator.
+ */
+V8M_EXPORT void *v8m_malloc(size_t size);
+V8M_EXPORT void v8m_free(void *ptr);
+V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size);
+V8M_EXPORT void *v8m_realloc(void *ptr, size_t size);
+V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size);
+V8M_EXPORT size_t v8m_malloc_usable_size(void *ptr);
+
 #ifdef __cplusplus
 }
 #endif

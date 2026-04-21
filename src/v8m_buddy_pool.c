@@ -157,3 +157,16 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 	(void)pthread_mutex_unlock(&pool->lock);
 	return true;
 }
+
+size_t v8m_buddy_pool_block_size(struct v8m_buddy_pool *pool, const void *ptr)
+{
+	if (ptr == NULL) {
+		return 0;
+	}
+	(void)pthread_mutex_lock(&pool->lock);
+	struct v8m_buddy_pool_arena *slot = find_owning_arena(pool, ptr);
+	size_t size =
+	    (slot != NULL) ? v8m_buddy_block_size(&slot->buddy, ptr) : 0;
+	(void)pthread_mutex_unlock(&pool->lock);
+	return size;
+}

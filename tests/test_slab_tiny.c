@@ -16,6 +16,7 @@
 
 #include "v8m_internal.h"
 #include "v8m_page.h"
+#include "v8m_page_heap.h"
 #include "v8m_slab_tiny.h"
 
 static int fail(const char *msg)
@@ -30,14 +31,24 @@ static int fail(const char *msg)
 
 enum { MANY_FREE_CYCLES = 3, STRESS_ITERATIONS = 16384 };
 
+/* Use the page heap directly (mmap-backed) rather than libc's
+ * aligned_alloc — once the public free() hijack from v8m_api.c is
+ * linked in, libc's aligned_alloc/free pair would route fake test
+ * pages through v8m_dispatch_free, which would try to munmap heap
+ * memory after seeing the V8M_MAGIC we stamped on the page. */
 static void *alloc_page(void)
 {
-	void *page = aligned_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+	void *page = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
 	if (page == NULL) {
 		return NULL;
 	}
 	(void)memset(page, 0, V8M_PAGE_SIZE);
 	return page;
+}
+
+static void release_page(void *page)
+{
+	v8m_page_heap_free(page, V8M_PAGE_SIZE);
 }
 
 static bool object_in_data_area(const struct v8m_page_meta *meta,
@@ -72,35 +83,35 @@ static int check_init_sets_metadata(void)
 	struct v8m_page_meta *meta = page;
 
 	if (meta->magic != V8M_MAGIC) {
-		free(page);
+		release_page(page);
 		return fail("V8M_MAGIC not stamped");
 	}
 	if (meta->size_class != 7) {
-		free(page);
+		release_page(page);
 		return fail("size_class mis-stamped");
 	}
 	if (meta->object_size != 64) {
-		free(page);
+		release_page(page);
 		return fail("object_size mis-stamped");
 	}
 	if (meta->capacity != v8m_slab_tiny_capacity_for(64)) {
-		free(page);
+		release_page(page);
 		return fail("capacity disagrees with capacity_for");
 	}
 	if (!v8m_slab_tiny_is_empty(meta)) {
-		free(page);
+		release_page(page);
 		return fail("slab not empty immediately after init");
 	}
 	if (v8m_slab_tiny_is_full(meta)) {
-		free(page);
+		release_page(page);
 		return fail("slab reported full immediately after init");
 	}
 	if (meta->owner_thread != OWNER_THREAD) {
-		free(page);
+		release_page(page);
 		return fail("owner_thread mis-stamped");
 	}
 
-	free(page);
+	release_page(page);
 	return 0;
 }
 
@@ -121,7 +132,7 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 	uintptr_t *addrs =
 	    (uintptr_t *)malloc((size_t)capacity * sizeof(uintptr_t));
 	if (addrs == NULL) {
-		free(page);
+		release_page(page);
 		return fail("malloc(addrs) failed");
 	}
 
@@ -129,17 +140,17 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 		void *obj = v8m_slab_tiny_alloc(meta);
 		if (obj == NULL) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc returned NULL before capacity");
 		}
 		if (!object_in_data_area(meta, obj)) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc returned pointer outside data area");
 		}
 		if ((uintptr_t)obj % natural_alignment(object_size) != 0) {
 			free(addrs);
-			free(page);
+			release_page(page);
 			return fail("alloc pointer not naturally aligned");
 		}
 		addrs[i] = (uintptr_t)obj;
@@ -148,12 +159,12 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 	/* Exhausted — one more alloc must fail. */
 	if (v8m_slab_tiny_alloc(meta) != NULL) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("alloc succeeded past capacity");
 	}
 	if (!v8m_slab_tiny_is_full(meta)) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("is_full false when slab exhausted");
 	}
 
@@ -162,7 +173,7 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 		for (uint32_t j = i + 1; j < capacity; j++) {
 			if (addrs[i] == addrs[j]) {
 				free(addrs);
-				free(page);
+				release_page(page);
 				return fail(
 				    "alloc returned the same slot twice");
 			}
@@ -183,23 +194,23 @@ static int check_full_capacity_reachable_for(uint32_t size_class)
 	}
 	if (empty_reports != 1) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail(
 		    "v8m_slab_tiny_free did not signal empty exactly once");
 	}
 	if (!v8m_slab_tiny_is_empty(meta)) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("is_empty false after freeing every slot");
 	}
 	if (v8m_slab_tiny_is_full(meta)) {
 		free(addrs);
-		free(page);
+		release_page(page);
 		return fail("is_full true after freeing every slot");
 	}
 
 	free(addrs);
-	free(page);
+	release_page(page);
 	return 0;
 }
 
@@ -221,14 +232,14 @@ static int check_slot_reuse(void)
 		for (uint32_t i = 0; i < STRESS_ITERATIONS; i++) {
 			const void *obj = v8m_slab_tiny_alloc(meta);
 			if (obj == NULL) {
-				free(page);
+				release_page(page);
 				return fail(
 				    "alloc-then-free churn produced NULL");
 			}
 			(void)v8m_slab_tiny_free(meta, obj);
 		}
 		if (!v8m_slab_tiny_is_empty(meta)) {
-			free(page);
+			release_page(page);
 			return fail("slab not empty after alloc-free churn");
 		}
 	}
@@ -236,12 +247,12 @@ static int check_slot_reuse(void)
 	/* After the churn, fully fill once more to prove no state rot. */
 	for (uint32_t i = 0; i < capacity; i++) {
 		if (v8m_slab_tiny_alloc(meta) == NULL) {
-			free(page);
+			release_page(page);
 			return fail("alloc failed after stress cycles");
 		}
 	}
 
-	free(page);
+	release_page(page);
 	return 0;
 }
 
