@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Weekly multi-arch CI. Runs the build + ctest gate against every
+# Tier 1 / Tier 2 architecture on the platform-abstraction.md
+# support list, exercising the per-arch atomics, alignment, and
+# cache-line constants the architecture-abstraction layer
+# (`src/v8m_arch.h`) selects on. The QEMU emulation is slow — the
+# full ctest run takes 5–15 minutes per arch — which is why this
+# lives in a separate workflow rather than blocking PR merges.
+#
+# Schedule:
+#   - cron: every Monday 06:00 UTC, so any regression that lands
+#     during the work week is visible at the start of the next one
+#   - workflow_dispatch: manual trigger for ad-hoc reruns (e.g.
+#     after a multi-arch fix)
+#
+# Architectures covered:
+#   - aarch64  (Tier 1)
+#   - ppc64le  (Tier 2)
+#   - s390x    (Tier 2)
+#   - riscv64  (Tier 2 — qemu-user emulation; sometimes flaky on
+#                actions/runner kernels, hence continue-on-error)
+#
+# loongarch64 (Tier 3) is intentionally absent: Debian's
+# loongarch64 toolchain is not yet in the standard repos and the
+# uraimo runner image does not list it. Once Debian Trixie ships
+# loongarch64 the matrix grows by one row.
+
+name: multi-arch
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qemu-build-test:
+    name: ${{ matrix.arch }} build + ctest (qemu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            continue_on_error: false
+          - arch: ppc64le
+            continue_on_error: false
+          - arch: s390x
+            continue_on_error: false
+          - arch: riscv64
+            continue_on_error: true
+
+    continue-on-error: ${{ matrix.continue_on_error }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build + test under qemu
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ubuntu24.04
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          # The action mounts $GITHUB_WORKSPACE inside the container
+          # at the same path, so cmake paths line up with the host.
+          shell: /bin/bash
+          install: |
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+              build-essential cmake gcc
+          run: |
+            set -euo pipefail
+            cmake -S . -B build/multiarch \
+              -DCMAKE_C_COMPILER=gcc \
+              -DCMAKE_BUILD_TYPE=Debug
+            cmake --build build/multiarch --parallel
+            ctest --test-dir build/multiarch --output-on-failure

@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Multi-arch weekly CI workflow
+  (`.github/workflows/multi-arch.yml`). Runs the full build +
+  ctest suite under QEMU-user emulation against every Tier 1 /
+  Tier 2 architecture on the platform-abstraction.md support
+  list — aarch64, ppc64le, s390x, riscv64 — exercising the
+  per-arch atomics, alignment, and cache-line constants the
+  architecture-abstraction layer (`src/v8m_arch.h`) selects on.
+  Schedule: every Monday 06:00 UTC plus `workflow_dispatch` for
+  ad-hoc reruns. Per-arch run takes 5–15 minutes (QEMU is slow);
+  splitting from the per-PR gate keeps PR turnaround under five
+  minutes. Uses `uraimo/run-on-arch-action@v3` which mounts
+  `$GITHUB_WORKSPACE` inside the container at the same path so
+  cmake paths line up with the host. riscv64 carries
+  `continue-on-error: true` because qemu-user emulation
+  occasionally faults on the runner kernels; the other three
+  arches gate the workflow. loongarch64 (Tier 3) is intentionally
+  absent until Debian's loongarch64 toolchain lands in the
+  standard repos.
+
 - Exhaustive alignment-sweep test (`tests/test_alignment.c`).
   Walks every power-of-two alignment from 16 (max_align_t) up to
   V8M_BUDDY_MAX_BLOCK across five representative request sizes

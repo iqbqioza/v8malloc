@@ -205,9 +205,13 @@ GitHub Actions runs three jobs on every PR and push to `main`
   - `format-check + tidy + cppcheck` — the same lint surface
     `make lint` runs locally.
 
-Multi-arch coverage (aarch64, ppc64le, s390x, riscv64) lives in a
-separate weekly workflow (TODO) so PR turnaround stays under five
-minutes.
+Multi-arch coverage (aarch64, ppc64le, s390x, riscv64) lives in
+`.github/workflows/multi-arch.yml`, scheduled every Monday 06:00
+UTC and triggerable on demand via `workflow_dispatch`. Each lane
+runs the full build + ctest suite under QEMU-user emulation
+(`uraimo/run-on-arch-action`); a per-arch run takes 5–15 minutes,
+which is why this is split out from the per-PR gate (the latter
+stays under five minutes).
 
 ## Cutting a release
 
