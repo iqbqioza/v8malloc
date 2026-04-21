@@ -7,6 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Comparative baseline script (`scripts/bench-compare.sh`).
+  Drives a single benchmark binary against every reference
+  allocator installed on the host (glibc, jemalloc, tcmalloc,
+  mimalloc, v8malloc), setting `LD_PRELOAD` per run and
+  emitting one tagged block of bench output per allocator so
+  the numbers are directly comparable without leaving the
+  current host-state window. Allocator discovery uses per-lib
+  env overrides (`V8M_JEMALLOC_SO` / `V8M_TCMALLOC_SO` /
+  `V8M_MIMALLOC_SO`) first, then falls back to `ldconfig -p`
+  pattern match; missing allocators are skipped with a note so
+  a sparse dev box (only v8malloc + glibc) still gets a two-way
+  compare. `--only name,...` filters the allocator list;
+  `--reps N` repeats each allocator. Pass-through env vars
+  (`V8M_BENCH_DURATION_MS`, etc.) work. Chains cleanly with
+  `scripts/bench-run.sh`:
+  `sudo scripts/bench-run.sh -- scripts/bench-compare.sh \
+  -- ./build/bench/bench/mb_01_throughput`.
+
 - ST-03 fork-safety stress test
   (`tests/test_fork_stress.c`, benchmarks.md §4.3). Spins 4
   worker threads in the parent doing continuous alloc/free

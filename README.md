@@ -185,6 +185,17 @@ sudo scripts/bench-run.sh --drop-caches \
     -- ./build/bench/bench/mb_02_scalability
 ```
 
+For a cross-allocator comparison (glibc / jemalloc / tcmalloc /
+mimalloc / v8malloc), `scripts/bench-compare.sh` drives a single
+bench against every allocator installed on the host and tags
+each run's output with the allocator name:
+
+```bash
+scripts/bench-compare.sh -- ./build/bench/bench/mb_01_throughput
+sudo scripts/bench-run.sh -- scripts/bench-compare.sh \
+    -- ./build/bench/bench/mb_02_scalability
+```
+
 Knobs (env vars):
 - `V8M_BENCH_DURATION_MS` — per-size / per-config timing budget
   (MB-01 default 250, MB-02 default 1000)
