@@ -110,6 +110,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Distance-ordered NUMA fallback (numa.md §5.2). The library
+  constructor now also reads
+  `/sys/devices/system/node/nodeN/distance` for every detected
+  node, populates a `g_distance[from][to]` SLIT matrix
+  (`uint8_t`, clamped at 255), and computes a
+  `g_fallback[from][rank]` table sorted by ascending distance via
+  insertion sort (cheap with the 64-node cap). Two new exports —
+  `v8m_numa_node_distance(from, to)` and
+  `v8m_numa_fallback_node(from, rank)` — let allocator paths pick
+  the cheapest cross-node target when the local node runs out of
+  capacity. `rank == 0` is always the source node itself; ranks
+  past the end saturate back to the source so callers can walk
+  `0..node_count` without bounds checks. Missing distance rows
+  (kernels without ACPI SLIT or sysfs-distance support) leave
+  `g_distance` zero, which collapses the fallback order to
+  identity — a safe degradation. test_numa walks every node × rank
+  combination and asserts the fallback distances are non-decreasing.
+
 - Per-thread cached `v8m_numa_current_node` with 1-in-1024
   refresh (numa.md §2.2). Two new `__thread` slots cache the
   resolved node id and a call counter; only every 1024-th call

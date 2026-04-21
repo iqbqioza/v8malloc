@@ -62,4 +62,28 @@ uint32_t v8m_numa_node_for_cpu(uint32_t cpu);
  */
 uint32_t v8m_numa_current_node(void);
 
+/*
+ * SLIT-style relative distance from `from` to `to`, as reported
+ * by /sys/devices/system/node/nodeN/distance. The Linux convention
+ * is 10 for local, 20+ for remote; values are clamped to uint8_t
+ * (max 255) which matches the on-disk SLIT field width. Returns
+ * 0 if either id is out of range or the kernel didn't populate
+ * the row (e.g. sysfs absent — single-node fallback always
+ * reports distance 0 to itself, which is the "unknown" sentinel).
+ */
+uint8_t v8m_numa_node_distance(uint32_t from_node, uint32_t to_node);
+
+/*
+ * Distance-ordered fallback for `from`. `rank == 0` always
+ * returns `from` itself (distance to self is the smallest);
+ * higher ranks return the next-closest node, ties broken by
+ * lower node id. Returns `from` for any rank >= node_count
+ * (saturating).
+ *
+ * Allocator callers walk `rank = 0, 1, 2, ...` until they find a
+ * node with capacity, getting the cheapest cross-node access
+ * first.
+ */
+uint32_t v8m_numa_fallback_node(uint32_t from, uint32_t rank);
+
 #endif /* V8M_NUMA_H */
