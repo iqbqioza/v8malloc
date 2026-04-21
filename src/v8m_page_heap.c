@@ -93,6 +93,14 @@ bool v8m_page_heap_owns(const void *ptr)
 	return owned;
 }
 
+size_t v8m_page_heap_live_region_count(void)
+{
+	(void)pthread_mutex_lock(&g_region_lock);
+	size_t count = g_region_count;
+	(void)pthread_mutex_unlock(&g_region_lock);
+	return count;
+}
+
 static bool is_power_of_two(size_t value)
 {
 	return value != 0 && (value & (value - 1U)) == 0;

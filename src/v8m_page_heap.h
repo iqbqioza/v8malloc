@@ -82,4 +82,13 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
  */
 bool v8m_page_heap_owns(const void *ptr);
 
+/*
+ * Number of regions currently in the region map. Useful to glibc-
+ * compat reporters (mallinfo / mallinfo2) that need a "mmapped
+ * regions" count — mmap_calls - munmap_calls cannot be used for
+ * that because the over-allocate-and-trim strategy emits multiple
+ * munmaps per mmap, leaving the difference net-negative.
+ */
+size_t v8m_page_heap_live_region_count(void);
+
 #endif /* V8M_PAGE_HEAP_H */

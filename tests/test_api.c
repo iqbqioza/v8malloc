@@ -367,6 +367,125 @@ static int check_memalign_valloc_pvalloc(void)
 	return 0;
 }
 
+static int check_glibc_compat_surface(void)
+{
+	/* mallopt is a no-op returning 1 (success). Any param/value
+	 * combination should succeed. mallopt / malloc_trim are flagged
+	 * MT-unsafe by tidy because the legacy ABI assumes a single
+	 * arena lock; v8malloc serializes them through dispatch state. */
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	if (mallopt(M_TRIM_THRESHOLD, 1024 * 1024) != 1) {
+		return fail("mallopt(M_TRIM_THRESHOLD) did not return 1");
+	}
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	if (mallopt(M_MMAP_MAX, 0) != 1) {
+		return fail("mallopt(M_MMAP_MAX) did not return 1");
+	}
+
+	/* malloc_trim is a no-op honestly reporting 0 (no memory
+	 * released by this call). */
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	if (malloc_trim(0) != 0) {
+		return fail("malloc_trim(0) did not return 0");
+	}
+
+	/* mallinfo / mallinfo2 should reflect at least one live
+	 * mmap region after we make a Large allocation that bypasses
+	 * any in-arena reuse. */
+	void *anchor = malloc((size_t)512 * 1024);
+	if (anchor == NULL) {
+		return fail("anchor malloc returned NULL");
+	}
+/* mallinfo is marked deprecated in <malloc.h> in favour of
+ * mallinfo2; we deliberately exercise both for ABI coverage. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	struct mallinfo info = mallinfo();
+#pragma GCC diagnostic pop
+	if (info.hblks <= 0) {
+		free(anchor);
+		return fail("mallinfo.hblks not positive after malloc");
+	}
+	if (info.hblkhd <= 0) {
+		free(anchor);
+		return fail("mallinfo.hblkhd not positive after malloc");
+	}
+	struct mallinfo2 info2 = mallinfo2();
+	if (info2.hblks == 0U) {
+		free(anchor);
+		return fail("mallinfo2.hblks zero after malloc");
+	}
+	if (info2.hblkhd == 0U) {
+		free(anchor);
+		return fail("mallinfo2.hblkhd zero after malloc");
+	}
+	free(anchor);
+
+	/* malloc_info(NULL) → EINVAL; with a real stream it must
+	 * succeed and write at least a header byte. */
+	errno = 0;
+	if (malloc_info(0, NULL) != -1 || errno != EINVAL) {
+		return fail("malloc_info(NULL) did not fail with EINVAL");
+	}
+	char *buffer = NULL;
+	size_t buffer_len = 0;
+	FILE *stream = open_memstream(&buffer, &buffer_len);
+	if (stream == NULL) {
+		return fail("open_memstream failed");
+	}
+	if (malloc_info(0, stream) != 0) {
+		(void)fclose(stream);
+		free(buffer);
+		return fail("malloc_info returned non-zero");
+	}
+	(void)fclose(stream);
+	if (buffer == NULL || buffer_len == 0U ||
+	    strstr(buffer, "<malloc") == NULL) {
+		free(buffer);
+		return fail("malloc_info output missing <malloc tag");
+	}
+	free(buffer);
+
+	/* malloc_stats writes to stderr. Redirect stderr through a
+	 * pipe (open_memstream-backed FILE has no underlying fd) so
+	 * the test can validate the output without leaking it into
+	 * the suite log. */
+	int saved_stderr = dup(STDERR_FILENO);
+	if (saved_stderr < 0) {
+		return fail("dup(stderr) failed");
+	}
+	int pipe_fds[2];
+	if (pipe(pipe_fds) != 0) {
+		(void)close(saved_stderr);
+		return fail("pipe() failed");
+	}
+	(void)fflush(stderr);
+	if (dup2(pipe_fds[1], STDERR_FILENO) < 0) {
+		(void)close(pipe_fds[0]);
+		(void)close(pipe_fds[1]);
+		(void)close(saved_stderr);
+		return fail("dup2(stderr) failed");
+	}
+	malloc_stats();
+	(void)fflush(stderr);
+	(void)dup2(saved_stderr, STDERR_FILENO);
+	(void)close(saved_stderr);
+	(void)close(pipe_fds[1]);
+
+	char captured[1024];
+	ssize_t bytes = read(pipe_fds[0], captured, sizeof(captured) - 1U);
+	(void)close(pipe_fds[0]);
+	if (bytes <= 0) {
+		return fail("malloc_stats wrote nothing to stderr");
+	}
+	captured[bytes] = '\0';
+	if (strstr(captured, "v8malloc statistics") == NULL) {
+		return fail("malloc_stats output missing header");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -401,5 +520,9 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_memalign_valloc_pvalloc();
+	status = check_memalign_valloc_pvalloc();
+	if (status != 0) {
+		return status;
+	}
+	return check_glibc_compat_surface();
 }

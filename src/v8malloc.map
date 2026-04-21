@@ -36,6 +36,13 @@ V8MALLOC_1.0 {
 		valloc;
 		pvalloc;
 
+		mallinfo;
+		mallinfo2;
+		mallopt;
+		malloc_stats;
+		malloc_info;
+		malloc_trim;
+
 		__libc_malloc;
 		__libc_free;
 		__libc_calloc;

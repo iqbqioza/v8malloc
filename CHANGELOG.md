@@ -110,6 +110,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- glibc statistics & tuning extensions: `mallinfo`, `mallinfo2`,
+  `mallopt`, `malloc_stats`, `malloc_info`, and `malloc_trim`.
+  All routed through a shared `v8m_collect_live_stats` snapshot of
+  the page heap so the same counters back every reporter.
+  `mallinfo` / `mallinfo2` populate `hblks` from the new
+  `v8m_page_heap_live_region_count` (the previous candidate of
+  `mmap_calls - munmap_calls` is net-negative because the
+  over-allocate-and-trim strategy emits multiple munmaps per
+  mmap), `hblkhd` / `arena` / `uordblks` from
+  `bytes_mapped - bytes_unmapped`. `malloc_stats` writes a
+  human-readable digest to stderr; `malloc_info` emits a minimal
+  v8malloc-tagged XML document; `mallopt` is an accepting no-op
+  (returns 1) so legacy software that calls it unconditionally
+  keeps working — runtime configuration lives behind the
+  `V8M_*` env vars and `v8m_config_set/get`. `malloc_trim`
+  honestly returns 0 (no chunk-top to release in v0). All six
+  exit through the V8MALLOC_1.0 linker version node.
+
+- Modern glibc (≥ 2.34) no longer declares `malloc_get_state` /
+  `malloc_set_state`, so we skip them rather than ship aliases
+  for symbols nothing imports. Documented in TODO.md.
+
 - Page-heap region map (`v8m_page_heap_owns`). Every successful
   `v8m_page_heap_alloc` now records its returned range in a
   bounded array (cap: 4096 live regions; mutex-protected linear
