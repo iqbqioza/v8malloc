@@ -127,6 +127,12 @@ across eight sizes spanning every backend (8 B through 2 MiB).
 It links statically against the library so the numbers reflect
 the same code path direct consumers see.
 
+`bench/mb_03_producer_consumer.c` pairs N producer threads
+with N consumer threads via an SPSC ring; every alloc/free pair
+crosses a thread boundary, so the bench measures the
+cross-thread free path. Without a thread cache this number is a
+regression floor — as TLC lands, it should climb dramatically.
+
 `bench/mb_04_mixed.c` drives a bounded working set through
 alloc/free with sizes drawn from the spec's six-band
 distribution (8 B → 256 KiB), the closest thing the suite has

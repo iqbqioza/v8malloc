@@ -6,6 +6,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- MB-03 producer/consumer benchmark
+  (`bench/mb_03_producer_consumer.c`, benchmarks.md §2.3). N
+  producer threads each `malloc` fixed-size objects and hand
+  them to a paired consumer via a bounded 1024-slot SPSC ring;
+  the consumer `free`s. Every alloc/free pair crosses a thread
+  boundary, so the bench measures the cost of the cross-thread
+  free path that the future remote-free MPSC queue will
+  optimize. Pair sweep (1, 2, 4, 8, 16), capped at
+  `min(nproc/2, 32)` by default (`V8M_BENCH_MAX_PAIRS=N`
+  overrides). Size sweep matches the spec exactly: 64 B / 256 B
+  / 1 KiB. Reports per-row `handoffs` / `handoffs_per_sec` /
+  `per_pair` so the single-mutex scaling story is legible.
+  Also serves as the regression gate for the slab-pool
+  partials-list double-insertion bug fixed in the same cycle as
+  MB-04: any reintroduction of a stale partials-list entry
+  segfaults this bench within seconds of the timed loop.
+
 ### Fixed
 - Slab pool partials-list duplicate-insertion bug
   (`src/v8m_slab_pool.c`). When a `free` triggered a
