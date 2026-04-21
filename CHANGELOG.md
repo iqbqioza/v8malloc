@@ -110,6 +110,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- LD_PRELOAD interposition test (`tests/preload_target.c` +
+  `test_ld_preload`). The target is a standalone program with no
+  compile-time dependency on libv8malloc; CMake injects the
+  shared library via `LD_PRELOAD=$<TARGET_FILE:v8malloc_shared>`
+  in the test's environment. The target then verifies (a)
+  `v8m_version` resolves through `dlsym(RTLD_DEFAULT, ...)` —
+  proving our library was actually loaded — and (b) malloc /
+  realloc / free across every backend size still round-trip
+  correctly. Without the dlsym check, the malloc workload would
+  silently exercise libc and the test would pass without proving
+  anything.
+
 - End-to-end concurrency test through the public allocation API
   (`tests/test_threading.c`). 8 worker threads × 512 ops each
   cycle through 11 sizes spanning every backend (slab Tiny / slab

@@ -44,3 +44,22 @@ v8malloc_add_test(test_libc_fallback)
 v8malloc_add_test(test_fork)
 v8malloc_add_test(test_numa)
 v8malloc_add_test(test_threading)
+
+# LD_PRELOAD interposition test. preload_target is a standalone
+# program with no compile-time link to v8malloc; the test runner
+# injects libv8malloc.so via LD_PRELOAD and the program verifies
+# our public symbols are visible (dlsym of v8m_version) and that
+# malloc/realloc/free have been transparently redirected.
+if(V8MALLOC_BUILD_SHARED)
+	add_executable(preload_target preload_target.c)
+	target_link_libraries(preload_target PRIVATE dl)
+	target_compile_options(preload_target PRIVATE
+		-Wall -Wextra -Wpedantic -Wshadow
+		-Wstrict-prototypes -Wmissing-prototypes
+		-Wold-style-definition
+	)
+	add_test(NAME test_ld_preload COMMAND preload_target)
+	set_tests_properties(test_ld_preload PROPERTIES
+		ENVIRONMENT
+		"LD_PRELOAD=$<TARGET_FILE:v8malloc_shared>")
+endif()
