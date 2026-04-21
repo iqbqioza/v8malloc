@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MB-05 fragmentation scenario benchmark
+  (`bench/mb_05_fragmentation.c`, benchmarks.md §2.5). Drives
+  the spec's fragmentation-maximizing pattern: allocate N
+  objects with random sizes, free 50 % at random, re-allocate
+  N/2 with different sizes (always fresh distribution draws),
+  repeat K iterations. After each iteration the bench samples
+  three views of memory consumption — `logical_bytes`
+  (`malloc_usable_size` summed across live slots),
+  `mapped_bytes` (`v8m_get_stats.live_bytes` — the allocator's
+  own VMA reservation), and `rss_bytes` (`/proc/self/statm`
+  resident pages × page size) — and reports `frag_ratio =
+  mapped / logical`, the fraction of allocator reservation
+  beyond the user's asked-for bytes (combined internal +
+  external fragmentation). Output is one row per iteration so
+  the time series is plot-ready. Default 10 000 live × 20
+  iterations keeps interactive runs sub-second; the spec's
+  1M × 100 sweep is reachable via env knobs. Knobs:
+  `V8M_BENCH_LIVE_COUNT` (default 10000, capped at 1M),
+  `V8M_BENCH_ITERS` (default 20, capped at 1000),
+  `V8M_BENCH_SEED` (default 0x5a5a). Per-class internal /
+  external fragmentation breakdown lands as follow-up.
+
 - MB-03 producer/consumer benchmark
   (`bench/mb_03_producer_consumer.c`, benchmarks.md §2.3). N
   producer threads each `malloc` fixed-size objects and hand
