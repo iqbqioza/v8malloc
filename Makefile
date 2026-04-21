@@ -44,18 +44,36 @@ coverage:
 	@if command -v lcov >/dev/null 2>&1 && command -v genhtml >/dev/null 2>&1; then \
 		lcov --capture --directory build/coverage \
 		     --output-file build/coverage/lcov.info \
-		     --rc lcov_branch_coverage=1 \
-		     --ignore-errors gcov,unused,inconsistent,mismatch >/dev/null; \
+		     --rc branch_coverage=1 \
+		     --ignore-errors gcov,unused,inconsistent,mismatch,negative,deprecated >/dev/null; \
 		lcov --remove build/coverage/lcov.info '/usr/*' '*/tests/*' \
 		     --output-file build/coverage/lcov.filtered.info \
-		     --ignore-errors unused,inconsistent >/dev/null; \
+		     --ignore-errors unused,inconsistent,deprecated >/dev/null; \
 		genhtml build/coverage/lcov.filtered.info \
 		        --output-directory build/coverage/html \
-		        --branch-coverage >/dev/null; \
+		        --branch-coverage \
+		        --ignore-errors inconsistent,deprecated >/dev/null; \
 		echo "coverage report: build/coverage/html/index.html"; \
+		summary=$$(lcov --summary build/coverage/lcov.filtered.info \
+		           --rc branch_coverage=1 \
+		           --ignore-errors unused,inconsistent,deprecated 2>/dev/null \
+		           | grep -E '^  lines\.+' | awk '{print $$2}' \
+		           | tr -d '%'); \
+		if [ -z "$$summary" ]; then \
+			echo "coverage: failed to parse lcov summary"; exit 1; \
+		fi; \
+		printf "coverage: %s%% lines (gate: %s%%)\n" "$$summary" "$(COVERAGE_MIN)"; \
+		awk -v have="$$summary" -v want="$(COVERAGE_MIN)" \
+		    'BEGIN { exit (have+0 < want+0) ? 1 : 0 }' \
+		    || { echo "coverage: below threshold"; exit 1; }; \
 	else \
 		echo "lcov / genhtml not found; raw .gcda files in build/coverage/"; \
 	fi
+
+# Coverage threshold (line %) the gate enforces. Override on the
+# command line to relax during cycles where coverage temporarily
+# regresses: `COVERAGE_MIN=80 make coverage`.
+COVERAGE_MIN ?= 85
 
 # Fuzz flow: configure with V8MALLOC_BUILD_FUZZ=ON + UBSan via
 # clang, build the driver, run a 60-second smoke iteration. Longer

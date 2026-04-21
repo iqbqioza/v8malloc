@@ -161,11 +161,27 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 
 __attribute__((destructor(101))) static void v8m_destructor(void)
 {
-	int prev =
-	    atomic_exchange_explicit(&g_init_state, 0, memory_order_acquire);
-	if (prev == 1) {
-		v8m_dispatch_destroy(&g_dispatch);
-	}
+	/* Mark the dispatcher as shut down so any allocation from a
+	 * post-destructor call site (rare but possible) sees the
+	 * "not ready" state and serves from bootstrap. We deliberately
+	 * do NOT call v8m_dispatch_destroy here:
+	 *
+	 *   On process exit, glibc's _IO_cleanup atexit handler
+	 *   flushes stdio AFTER our destructor runs, and the stdout
+	 *   buffer was malloc'd through us — tearing the dispatcher
+	 *   down (unmapping the buddy arena that held the buffer)
+	 *   leaves the flush writing to an unmapped page and produces
+	 *   silent output loss. The OS reclaims our mmap'd regions
+	 *   when the process exits, so skipping the in-process
+	 *   teardown is harmless in the LD_PRELOAD / static-link case.
+	 *
+	 *   The dlopen/dlclose case (where the destructor needs to
+	 *   actually return memory because the process keeps running)
+	 *   is documented as v0-unsupported; a future cycle adds the
+	 *   atexit-based teardown that defers munmaps until after
+	 *   stdio cleanup.
+	 */
+	(void)atomic_exchange_explicit(&g_init_state, 0, memory_order_acquire);
 }
 
 static bool dispatch_ready(void)

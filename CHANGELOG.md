@@ -110,6 +110,45 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- MB-01 single-thread throughput benchmark
+  (`bench/mb_01_throughput.c`, benchmarks.md §3.1) and the
+  surrounding `bench/` scaffolding. The benchmark sweeps eight
+  sizes spanning every backend (8 B / 64 B / 512 B / 4 KiB slab,
+  16 KiB / 64 KiB / 256 KiB buddy, 2 MiB Huge mmap), with a
+  per-size timed loop measuring alloc/write/free throughput.
+  Output is space-separated columns (size_bytes / iters /
+  elapsed_us / ns_per_op / ops_per_sec) so cross-allocator
+  comparison runs (jemalloc / mimalloc / tcmalloc / glibc) ingest
+  cleanly into a spreadsheet or `diff`. Knobs come from env vars
+  (`V8M_BENCH_DURATION_MS`, `V8M_BENCH_WARMUP_MS`) so LD_PRELOAD
+  comparison runs need no recompile. New `bench/CMakeLists.txt`
+  is gated on the existing `V8MALLOC_BUILD_BENCH` option;
+  `v8malloc_add_bench` is the helper future MB-XX files use.
+
+- Coverage line-coverage gate. `make coverage` now parses the
+  lcov summary after building the HTML report and **fails** when
+  line coverage drops below `COVERAGE_MIN` (85% by default;
+  override on the command line). Current coverage is 86.5%, so
+  the gate is live. Without lcov / genhtml installed the gate is
+  silently skipped and the raw `.gcda` data is still available
+  for IDE tooling.
+
+- Process-exit destructor no longer unmaps. The previous
+  destructor at priority 101 called `v8m_dispatch_destroy`,
+  which unmapped every page-heap region — including buddy
+  arenas that held malloc'd allocations still owned by glibc's
+  stdio (e.g. the stdout buffer). When `_IO_cleanup`'s atexit
+  handler ran afterwards to flush stdio, the write hit an
+  unmapped page and produced silent output loss. The destructor
+  now only swaps the init state; the OS reclaims our mappings
+  on process exit, which is harmless in the LD_PRELOAD /
+  static-link case. (Caught by the bench landing in this same
+  cycle — `mb_01_throughput`'s output was disappearing
+  entirely.) The dlopen/dlclose case where a process keeps
+  running after our unload remains v0-unsupported; the
+  atexit-based teardown that defers munmaps until after stdio
+  cleanup lands in a follow-up cycle.
+
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`). Three
   parallel jobs gate every PR and push to `main`: matrix build +
   ctest under both gcc and clang, UBSan build + ctest under

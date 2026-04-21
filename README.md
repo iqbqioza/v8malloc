@@ -98,16 +98,52 @@ the full library for coverage-guided fuzzing is a follow-on cycle.
 ## Coverage
 
 ```bash
-make coverage   # configure + build + ctest + lcov + genhtml
+make coverage                    # default 85% line-coverage gate
+COVERAGE_MIN=80 make coverage    # relax the threshold
 ```
 
-Builds the library and tests with `--coverage` (gcov) and runs
-the suite. If `lcov` and `genhtml` are installed, the script
-post-processes the `.gcda` files into an HTML report under
-`build/coverage/html/index.html`. Without lcov / genhtml the raw
-`.gcda` data lives under `build/coverage/` for IDE-driven coverage
-tooling. Coverage instrumentation is mutually exclusive with the
-sanitizers.
+Builds the library and tests with `--coverage` (gcov), runs the
+suite, and post-processes the `.gcda` files through `lcov` +
+`genhtml` into `build/coverage/html/index.html`. The target then
+parses lcov's summary and **fails** when line coverage drops below
+`COVERAGE_MIN` (85% by default), so CI catches regressions.
+Without lcov / genhtml installed the raw `.gcda` data still lives
+under `build/coverage/` for IDE-driven coverage tooling and the
+threshold check is skipped. Coverage instrumentation is mutually
+exclusive with the sanitizers.
+
+## Benchmarks
+
+```bash
+cmake -S . -B build/bench -DCMAKE_BUILD_TYPE=Release \
+                          -DV8MALLOC_BUILD_BENCH=ON
+cmake --build build/bench
+./build/bench/bench/mb_01_throughput
+```
+
+`bench/mb_01_throughput.c` is the first microbenchmark from
+`benchmarks.md` — a single-thread alloc / write / free loop
+across eight sizes spanning every backend (8 B through 2 MiB).
+It links statically against the library so the numbers reflect
+the same code path direct consumers see.
+
+LD_PRELOAD-style comparison runs (v8malloc vs glibc / jemalloc /
+mimalloc / tcmalloc) drop in cleanly because the bench links
+against the standard `malloc` / `free` symbols:
+
+```bash
+./build/bench/bench/mb_01_throughput              # v8malloc (linked)
+LD_PRELOAD=$(pwd)/path/to/libjemalloc.so \
+    ./build/bench/bench/mb_01_throughput          # jemalloc
+```
+
+Knobs (env vars):
+- `V8M_BENCH_DURATION_MS` — per-size timing budget (default 250)
+- `V8M_BENCH_WARMUP_MS`   — warmup before timing (default 50)
+
+Output is space-separated columns (size_bytes / iters /
+elapsed_us / ns_per_op / ops_per_sec) — easy to ingest into a
+spreadsheet or compare across runs with `diff`.
 
 ## Sanitizers
 
