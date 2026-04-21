@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-PR / per-push CI gate. Builds and tests v8malloc under both
+# GCC and Clang, runs the format / tidy / cppcheck linters, and
+# repeats the test suite under UndefinedBehaviorSanitizer. All four
+# gates (default-build tests, UBSan tests, format-check, tidy +
+# cppcheck) must pass for a PR to merge.
+#
+# Multi-arch coverage (aarch64 / ppc64le / s390x / riscv64) lands
+# in a separate weekly workflow; this gate ships x86_64 only so PR
+# turnaround stays under five minutes.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} build + ctest
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ${{ matrix.compiler }}
+      - name: Configure
+        run: |
+          cmake -S . -B build/ci \
+            -DCMAKE_C_COMPILER=${{ matrix.compiler }} \
+            -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build/ci --parallel
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure
+
+  ubsan:
+    name: clang + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang
+      - name: Configure UBSan
+        run: |
+          cmake -S . -B build/ubsan \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DV8MALLOC_BUILD_UBSAN=ON
+      - name: Build
+        run: cmake --build build/ubsan --parallel
+      - name: Test
+        run: ctest --test-dir build/ubsan --output-on-failure
+
+  lint:
+    name: format-check + tidy + cppcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang clang-format clang-tidy cppcheck
+      - name: Configure
+        run: cmake --preset dev
+      - name: Build (compile_commands.json for tidy)
+        run: cmake --build --preset dev
+      - name: format-check
+        run: cmake --build --preset format-check
+      - name: tidy
+        run: cmake --build --preset tidy
+      - name: cppcheck
+        run: cmake --build --preset cppcheck

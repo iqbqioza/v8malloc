@@ -110,6 +110,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`). Three
+  parallel jobs gate every PR and push to `main`: matrix build +
+  ctest under both gcc and clang, UBSan build + ctest under
+  clang, and the format-check / tidy / cppcheck linters. Multi-
+  arch coverage stays in a separate weekly workflow (TODO) so
+  PR turnaround stays under five minutes.
+
+- Release pipeline script (`scripts/release.sh`). Run from a
+  checked-out `vMAJOR.MINOR.PATCH` tagged commit; the script
+  asserts the working tree is clean, the tag matches
+  `V8M_VERSION_STRING` in the public header, builds the release
+  tree + runs the full ctest suite, then produces a `git archive`
+  source tarball with sha256 (and detached GPG signature when a
+  key is available). `--gh-release` opens a draft GitHub release
+  with the matching CHANGELOG section as the body and the
+  artifacts attached; the draft never auto-publishes — a
+  maintainer always inspects before flipping visibility.
+  `--skip-tests` shortens iteration on the script itself.
+  README §Cutting a release documents the workflow.
+
 - MAP_HUGETLB primary attempt for Huge allocations
   (huge-pages.md §4.1). `v8m_page_heap_alloc` now tries
   `mmap(MAP_HUGETLB)` first when the request is shaped for it

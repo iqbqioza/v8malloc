@@ -138,6 +138,37 @@ cmake --build build/tsan
   the UBSan build for defect-finding; a v8malloc-aware ASan
   variant is future work.
 
+## Continuous integration
+
+GitHub Actions runs three jobs on every PR and push to `main`
+(`.github/workflows/ci.yml`):
+
+  - `gcc build + ctest` and `clang build + ctest` — the full
+    suite against both compilers.
+  - `clang + UBSan` — same suite under
+    `V8MALLOC_BUILD_UBSAN=ON`.
+  - `format-check + tidy + cppcheck` — the same lint surface
+    `make lint` runs locally.
+
+Multi-arch coverage (aarch64, ppc64le, s390x, riscv64) lives in a
+separate weekly workflow (TODO) so PR turnaround stays under five
+minutes.
+
+## Cutting a release
+
+```bash
+git tag -s -m "Release 0.2.0" v0.2.0
+./scripts/release.sh                 # builds + tarball + sha256
+./scripts/release.sh --gh-release    # also opens a draft GitHub release
+```
+
+The script verifies HEAD is on a `vMAJOR.MINOR.PATCH` tag, that
+`V8M_VERSION_STRING` in the public header matches the tag, runs a
+release-mode build + the full ctest suite, then produces a
+`git archive` source tarball with sha256 (and a detached GPG
+signature when a key is available). With `--gh-release` it pulls
+the matching CHANGELOG section and opens a draft GitHub release.
+
 ## Project layout
 
 ```
@@ -149,7 +180,9 @@ cmake --build build/tsan
 ├── cmake/              # Package config templates
 ├── man/                # Man pages
 ├── .claude/            # Internal design docs (not packaged)
-└── .githooks/          # Conventional Commits + clang-format gates
+├── .githooks/          # Conventional Commits + clang-format gates
+├── .github/workflows/  # GitHub Actions CI
+└── scripts/            # Release pipeline
 ```
 
 ## Contributing
