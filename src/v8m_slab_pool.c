@@ -8,6 +8,7 @@
  */
 
 #include <pthread.h> /* IWYU pragma: keep */
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -100,15 +101,37 @@ static void *try_current(struct v8m_slab_pool_class *cls)
 }
 
 /*
- * Promote partial pages one at a time into `current` and try
- * allocating from each, until one succeeds or the partials list is
- * exhausted.
+ * Promote the most-utilized partial page into `current` and
+ * allocate from it. Picking the page closest to full first
+ * concentrates allocations and lets less-utilized pages drain to
+ * empty (and back to the page heap) faster — fragmentation.md
+ * §4.3's `v8m_select_allocation_page`. The scan is O(N partials)
+ * per refill; v0 keeps it linear, the future per-class priority
+ * queue / utilization-bucketed list optimizes when N grows large.
+ *
+ * Defensive fall-through: if the picked page is somehow already
+ * full (shouldn't happen for partials, but a corrupted heap or a
+ * race with a future lock-free path could expose it), drop it and
+ * try the next page in walk order so the pool can still satisfy
+ * the request.
  */
 static void *try_partials(struct v8m_slab_pool_class *cls)
 {
 	while (cls->partials != NULL) {
-		struct v8m_page_meta *page = cls->partials;
-		cls->partials = page->next;
+		struct v8m_page_meta **best_link = &cls->partials;
+		uint32_t best_used = 0;
+		for (struct v8m_page_meta **link = &cls->partials;
+		     *link != NULL; link = &(*link)->next) {
+			uint32_t used = atomic_load_explicit(
+			    &(*link)->used_count, memory_order_relaxed);
+			if (used >= best_used) {
+				best_used = used;
+				best_link = link;
+			}
+		}
+
+		struct v8m_page_meta *page = *best_link;
+		*best_link = page->next;
 		page->next = NULL;
 		cls->current = page;
 		void *obj = slab_alloc_dispatch(page);

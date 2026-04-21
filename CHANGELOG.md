@@ -110,6 +110,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Page-utilization-aware allocation pick. The slab pool's
+  `try_partials` no longer pops the LIFO head; it scans the
+  partials list and promotes the most-utilized page (the one
+  with the highest `used_count`). Concentrating new allocations
+  on near-full pages lets less-utilized pages drain back to
+  empty (and the page heap) faster, the optimization called for
+  in fragmentation.md §4.3 as `v8m_select_allocation_page`.
+  Linear scan in v0; the future per-class priority queue or
+  utilization-bucketed list keeps the cost bounded once the
+  partials count grows large. New `check_partials_pick_most_utilized`
+  in `test_slab_pool` sets up two partial pages (12 used vs 10
+  used) with the less-utilized one at the LIFO head and verifies
+  the next allocation lands in the more-utilized page.
+
 - Pointer introspection: `v8m_is_valid_ptr` and
   `v8m_ptr_info(ptr, &out)`. Both reuse the existing region map +
   page-meta + buddy machinery, so no new tracking — they just

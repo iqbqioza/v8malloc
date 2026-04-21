@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "v8m_internal.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
 #include "v8m_size_class.h"
@@ -273,6 +274,105 @@ static int check_concurrent(void)
 	return 0;
 }
 
+/*
+ * Verify the partials pick honours utilization: when two partial
+ * pages are eligible, the most-utilized one should be chosen so
+ * less-utilized pages drain back to empty (and the page heap)
+ * faster.
+ *
+ * Layout: class 31 holds 15 objects per page. The partials code
+ * path only fires when `current` cannot satisfy the allocation,
+ * so the test fills three distinct pages (A, B, C) before exercising
+ * the pick:
+ *
+ *   1. 15 allocs    — page A becomes current and fills to 15.
+ *   2. 15 allocs    — alloc 16 forces B as current; the next 14
+ *                     fill B. A is now off every list (full).
+ *   3. 15 allocs    — alloc 31 forces C as current; the next 14
+ *                     fill C. B is also off every list now.
+ *   4. Free 3 in A  — A enters partials with used_count = 12.
+ *   5. Free 5 in B  — B enters partials with used_count = 10 and,
+ *                     per the LIFO push, becomes the head of the
+ *                     list. C is current and full.
+ *   6. Alloc once   — try_current returns NULL (C is full), so
+ *                     try_partials walks [B, A]. With the
+ *                     utilization-aware pick, A wins despite B
+ *                     being at the head.
+ */
+static int check_partials_pick_most_utilized(void)
+{
+	struct v8m_slab_pool pool;
+	if (v8m_slab_pool_init(&pool) != 0) {
+		return fail("init returned non-zero");
+	}
+
+	uintptr_t a_objs[CLASS_31_PAGE_CAPACITY];
+	uintptr_t b_objs[CLASS_31_PAGE_CAPACITY];
+	uintptr_t c_objs[CLASS_31_PAGE_CAPACITY];
+
+	for (int i = 0; i < CLASS_31_PAGE_CAPACITY; i++) {
+		a_objs[i] = (uintptr_t)v8m_slab_pool_alloc(
+		    &pool, CLASS_SMALL_LARGE, OWNER_THREAD);
+		if (a_objs[i] == 0U) {
+			v8m_slab_pool_destroy(&pool);
+			return fail("page A fill alloc returned NULL");
+		}
+	}
+	for (int i = 0; i < CLASS_31_PAGE_CAPACITY; i++) {
+		b_objs[i] = (uintptr_t)v8m_slab_pool_alloc(
+		    &pool, CLASS_SMALL_LARGE, OWNER_THREAD);
+		if (b_objs[i] == 0U) {
+			v8m_slab_pool_destroy(&pool);
+			return fail("page B fill alloc returned NULL");
+		}
+	}
+	for (int i = 0; i < CLASS_31_PAGE_CAPACITY; i++) {
+		c_objs[i] = (uintptr_t)v8m_slab_pool_alloc(
+		    &pool, CLASS_SMALL_LARGE, OWNER_THREAD);
+		if (c_objs[i] == 0U) {
+			v8m_slab_pool_destroy(&pool);
+			return fail("page C fill alloc returned NULL");
+		}
+	}
+
+	uintptr_t a_base = a_objs[0] & V8M_PAGE_MASK;
+	uintptr_t b_base = b_objs[0] & V8M_PAGE_MASK;
+	uintptr_t c_base = c_objs[0] & V8M_PAGE_MASK;
+	if (a_base == b_base || a_base == c_base || b_base == c_base) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("test setup produced pages sharing a page base");
+	}
+
+	for (int i = 0; i < 3; i++) {
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		void *obj = (void *)a_objs[i];
+		struct v8m_page_meta *meta = v8m_ptr_to_meta(obj);
+		(void)v8m_slab_pool_free(&pool, meta, obj);
+	}
+	for (int i = 0; i < 5; i++) {
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		void *obj = (void *)b_objs[i];
+		struct v8m_page_meta *meta = v8m_ptr_to_meta(obj);
+		(void)v8m_slab_pool_free(&pool, meta, obj);
+	}
+
+	void *picked =
+	    v8m_slab_pool_alloc(&pool, CLASS_SMALL_LARGE, OWNER_THREAD);
+	if (picked == NULL) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("alloc after free pair returned NULL");
+	}
+	uintptr_t picked_base = (uintptr_t)picked & V8M_PAGE_MASK;
+	if (picked_base != a_base) {
+		v8m_slab_pool_destroy(&pool);
+		return fail(
+		    "partials pick chose B (less utilized) instead of A");
+	}
+
+	v8m_slab_pool_destroy(&pool);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_init_destroy();
@@ -300,6 +400,10 @@ int main(void)
 		return status;
 	}
 	status = check_full_to_partial_transition();
+	if (status != 0) {
+		return status;
+	}
+	status = check_partials_pick_most_utilized();
 	if (status != 0) {
 		return status;
 	}
