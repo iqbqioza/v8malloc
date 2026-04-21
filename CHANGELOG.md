@@ -110,6 +110,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- MAP_HUGETLB primary attempt for Huge allocations
+  (huge-pages.md §4.1). `v8m_page_heap_alloc` now tries
+  `mmap(MAP_HUGETLB)` first when the request is shaped for it
+  (size is a 2 MiB multiple, alignment is at least 2 MiB,
+  `V8M_OPT_HUGE_PAGES` allows it); on success the kernel returns
+  a 2 MiB-aligned region backed by reserved huge pages with no
+  over-allocate-and-trim needed. On failure (no reserved huge
+  pages — typical in containers and CI) the allocator falls
+  through to the existing mmap + MADV_HUGEPAGE path, which
+  remains the supported fallback.
+
+  `v8m_large_alloc` bumps the page-heap alignment to 2 MiB and
+  rounds the mmap_size to the same multiple for Huge requests
+  (size > V8M_LARGE_MAX_SIZE) so they're shaped for the primary
+  attempt. The aligned variant (`v8m_large_alloc_aligned`) keeps
+  the v0 V8M_PAGE_SIZE alignment so callers that asked for a
+  specific user alignment aren't silently over-aligned.
+
+  Two new counters land on `struct v8m_page_heap_stats`:
+  `hugetlb_alloc_calls` (every attempt) and
+  `hugetlb_alloc_failures` (the subset that fell back). A new
+  `check_hugetlb_attempt` test in `test_page_heap` verifies the
+  calls counter advances at-threshold and stays put both
+  sub-threshold and when `V8M_OPT_HUGE_PAGES=0`.
+
 - C++ Itanium-ABI mangled aliases for the non-throwing operator
   new / delete variants. Sixteen new exports under V8MALLOC_1.0
   cover sized delete (C++14), aligned new/delete (C++17),

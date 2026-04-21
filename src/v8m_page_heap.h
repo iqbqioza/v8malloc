@@ -61,6 +61,17 @@ struct v8m_page_heap_stats {
 	 * allocations large enough (>= 2 MiB) to benefit from being
 	 * backed by transparent huge pages. */
 	uint64_t hugepage_advise_calls;
+	/* Number of mmap(MAP_HUGETLB) attempts the page heap has made.
+	 * Triggered for allocations that are 2 MiB-multiple AND
+	 * 2 MiB-aligned with V8M_OPT_HUGE_PAGES != 0. */
+	uint64_t hugetlb_alloc_calls;
+	/* Subset of hugetlb_alloc_calls that returned MAP_FAILED —
+	 * typically because the system has no reserved huge pages
+	 * (`echo N > /proc/sys/vm/nr_hugepages`). The page heap
+	 * silently falls back to ordinary mmap + MADV_HUGEPAGE in
+	 * that case, so a non-zero failure count is informational,
+	 * not an error. */
+	uint64_t hugetlb_alloc_failures;
 };
 
 /*

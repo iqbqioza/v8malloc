@@ -25,6 +25,8 @@ static _Atomic uint64_t v8m_advise_calls = 0;
 static _Atomic uint64_t v8m_bytes_mapped = 0;
 static _Atomic uint64_t v8m_bytes_unmapped = 0;
 static _Atomic uint64_t v8m_hugepage_advise_calls = 0;
+static _Atomic uint64_t v8m_hugetlb_alloc_calls = 0;
+static _Atomic uint64_t v8m_hugetlb_alloc_failures = 0;
 
 /*
  * Allocations at or above this size are candidates for the
@@ -33,6 +35,14 @@ static _Atomic uint64_t v8m_hugepage_advise_calls = 0;
  * entire mapping with a single 2 MiB page when memory is available.
  */
 #define V8M_HUGEPAGE_HINT_MIN_BYTES ((size_t)2 * 1024 * 1024)
+
+/*
+ * MAP_HUGETLB requires the size to be a multiple of the system
+ * huge-page size (2 MiB on x86_64 / aarch64) and the kernel
+ * returns a 2 MiB-aligned address. The same value drives both
+ * size-multiple and alignment checks.
+ */
+#define V8M_HUGETLB_BYTES ((size_t)2 * 1024 * 1024)
 
 /*
  * Region map. Bounded array of (start, end) tuples kept in
@@ -137,6 +147,38 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 	    !is_power_of_two(alignment)) {
 		return NULL;
 	}
+
+	/* Try MAP_HUGETLB first when the request is shaped for it:
+	 * size is a 2 MiB multiple, alignment is at least 2 MiB, and
+	 * V8M_OPT_HUGE_PAGES allows it. The kernel returns a 2 MiB-
+	 * aligned address so no over-allocate-and-trim is needed; on
+	 * failure (no reserved huge pages — the typical case in
+	 * containers and CI) we fall through to the regular mmap +
+	 * MADV_HUGEPAGE path, which is documented as the supported
+	 * fallback for this code path (huge-pages.md §4.1). */
+	if (bytes >= V8M_HUGETLB_BYTES &&
+	    (bytes & (V8M_HUGETLB_BYTES - 1U)) == 0U &&
+	    alignment >= V8M_HUGETLB_BYTES &&
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
+		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_calls, 1U,
+					  memory_order_relaxed);
+		void *huge =
+		    mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+		if (huge != MAP_FAILED) {
+			record_mmap(bytes);
+			if (region_register(huge, bytes) != 0) {
+				(void)munmap(huge, bytes);
+				record_munmap(bytes);
+				return NULL;
+			}
+			return huge;
+		}
+		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_failures, 1U,
+					  memory_order_relaxed);
+		/* Fall through to the regular path. */
+	}
+
 	/* Over-allocate by `alignment` so we can slide up to the next
 	 * aligned boundary and trim whatever lies outside. Guard against
 	 * size_t overflow in the addition. */
@@ -231,4 +273,8 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&v8m_bytes_unmapped, memory_order_relaxed);
 	out->hugepage_advise_calls = atomic_load_explicit(
 	    &v8m_hugepage_advise_calls, memory_order_relaxed);
+	out->hugetlb_alloc_calls = atomic_load_explicit(
+	    &v8m_hugetlb_alloc_calls, memory_order_relaxed);
+	out->hugetlb_alloc_failures = atomic_load_explicit(
+	    &v8m_hugetlb_alloc_failures, memory_order_relaxed);
 }

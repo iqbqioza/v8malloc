@@ -279,6 +279,73 @@ static int check_hugepage_advice(void)
 	return 0;
 }
 
+static int check_hugetlb_attempt(void)
+{
+	v8m_config_init();
+
+	/* A 2 MiB-multiple allocation aligned to 2 MiB triggers the
+	 * MAP_HUGETLB primary attempt. We're agnostic to whether the
+	 * kernel has reserved huge pages — what matters is that the
+	 * attempt fired (calls counter advanced). On systems without
+	 * reserved hugepages the failures counter advances in lockstep
+	 * and the allocator falls back to the regular mmap path; on
+	 * systems with reservations the failures counter stays put
+	 * and the alloc returns directly from MAP_HUGETLB. Either
+	 * outcome is acceptable here.
+	 *
+	 * Sub-2-MiB allocations or alignments below 2 MiB must NOT
+	 * touch the calls counter. */
+	struct v8m_page_heap_stats before = {0};
+	struct v8m_page_heap_stats after = {0};
+
+	/* Sub-threshold: 1 MiB at 64 KiB alignment must not attempt. */
+	v8m_page_heap_get_stats(&before);
+	void *small = v8m_page_heap_alloc((size_t)1024 * 1024, V8M_PAGE_SIZE);
+	if (small == NULL) {
+		return fail("sub-threshold alloc returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	if (after.hugetlb_alloc_calls != before.hugetlb_alloc_calls) {
+		v8m_page_heap_free(small, (size_t)1024 * 1024);
+		return fail("sub-threshold alloc made a hugetlb attempt");
+	}
+	v8m_page_heap_free(small, (size_t)1024 * 1024);
+
+	/* At-threshold: 2 MiB at 2 MiB alignment must attempt. */
+	v8m_page_heap_get_stats(&before);
+	void *huge = v8m_page_heap_alloc(HUGEPAGE_BYTES, HUGEPAGE_BYTES);
+	if (huge == NULL) {
+		return fail("at-threshold alloc returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	if (after.hugetlb_alloc_calls <= before.hugetlb_alloc_calls) {
+		v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+		return fail("hugetlb_alloc_calls did not advance");
+	}
+	v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+
+	/* HUGE_PAGES=0 suppresses the attempt even at threshold. */
+	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 0);
+	v8m_page_heap_get_stats(&before);
+	void *suppressed_alloc =
+	    v8m_page_heap_alloc(HUGEPAGE_BYTES, HUGEPAGE_BYTES);
+	if (suppressed_alloc == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
+		return fail("alloc with HUGE_PAGES=0 returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	bool suppressed =
+	    after.hugetlb_alloc_calls == before.hugetlb_alloc_calls;
+	v8m_page_heap_free(suppressed_alloc, HUGEPAGE_BYTES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
+	if (!suppressed) {
+		return fail(
+		    "HUGE_PAGES=0 did not suppress the hugetlb attempt");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_alignment();
@@ -308,5 +375,9 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_hugepage_advice();
+	status = check_hugepage_advice();
+	if (status != 0) {
+		return status;
+	}
+	return check_hugetlb_attempt();
 }

@@ -12,11 +12,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
 #include "v8m_size_class.h"
+#include "v8malloc/v8malloc.h"
 
 /* Common-prefix offsets must match v8m_page_meta exactly, so generic
  * reverse-lookup code (v8m_ptr_to_meta + magic check) works against
@@ -80,24 +82,42 @@ static size_t round_up_pow2(size_t value, size_t multiple)
 }
 
 /*
- * Shared backend used by v8m_large_alloc / v8m_large_alloc_aligned.
- * `alignment` is a power of two, < V8M_PAGE_SIZE, or 0 for the
- * default V8M_SLAB_HEADER_SIZE offset.
+ * 2 MiB matches Linux's standard huge-page size on x86_64 and
+ * aarch64; bumping mmap_size and the page-heap alignment to this
+ * value lets the page heap try MAP_HUGETLB for Huge allocations
+ * (size > V8M_LARGE_MAX_SIZE) when V8M_OPT_HUGE_PAGES is enabled.
  */
-/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+#define V8M_LARGE_HUGE_ALIGN ((size_t)2 * 1024 * 1024)
+
+/*
+ * Shared backend used by v8m_large_alloc / v8m_large_alloc_aligned.
+ * `header_offset` places the user pointer; `pheap_alignment` is
+ * the alignment requested from the page heap (always >=
+ * V8M_PAGE_SIZE) and also drives the mmap_size rounding so the
+ * resulting allocation is shaped for the page heap's MAP_HUGETLB
+ * attempt when applicable.
+ */
+/* The four parameters share size-or-uint types; the linter flags
+ * the adjacent size_t pair as swappable. The naming pins each
+ * role (`header_offset`, `pheap_alignment`, `owner_thread`) and
+ * the function is internal to this file — wrapping in a struct
+ * just for the linter's benefit would obscure the intent. */
+/* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
 static void *large_alloc_with_offset(size_t size, size_t header_offset,
+				     size_t pheap_alignment,
 				     uint64_t owner_thread)
+/* NOLINTEND(bugprone-easily-swappable-parameters) */
 {
 	/* Overflow guard: need room for the header + size, then round
-	 * up to a page multiple. */
-	if (size > SIZE_MAX - header_offset - V8M_PAGE_SIZE) {
+	 * up to the page-heap alignment. */
+	if (size > SIZE_MAX - header_offset - pheap_alignment) {
 		return NULL;
 	}
 
 	size_t total = header_offset + size;
-	size_t mmap_size = round_up_pow2(total, V8M_PAGE_SIZE);
+	size_t mmap_size = round_up_pow2(total, pheap_alignment);
 
-	void *region = v8m_page_heap_alloc(mmap_size, V8M_PAGE_SIZE);
+	void *region = v8m_page_heap_alloc(mmap_size, pheap_alignment);
 	if (region == NULL) {
 		return NULL;
 	}
@@ -139,8 +159,19 @@ void *v8m_large_alloc(size_t size, uint64_t owner_thread)
 	if (size == 0) {
 		return NULL;
 	}
+	/* Huge allocations bump the page-heap alignment to 2 MiB so
+	 * the page heap's MAP_HUGETLB attempt is in play. The mmap_size
+	 * is rounded to the same alignment, wasting at most 2 MiB of
+	 * virtual address space per Huge alloc — small relative to the
+	 * request. Large allocations (256 KiB - 2 MiB) keep the
+	 * V8M_PAGE_SIZE alignment the v0 baseline used. */
+	size_t pheap_alignment = V8M_PAGE_SIZE;
+	if (size > V8M_LARGE_MAX_SIZE &&
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
+		pheap_alignment = V8M_LARGE_HUGE_ALIGN;
+	}
 	return large_alloc_with_offset(size, V8M_SLAB_HEADER_SIZE,
-				       owner_thread);
+				       pheap_alignment, owner_thread);
 }
 
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
@@ -152,9 +183,13 @@ void *v8m_large_alloc_aligned(size_t size, size_t alignment,
 	}
 	if (alignment == 0 || alignment <= V8M_SLAB_HEADER_SIZE) {
 		/* Default header offset already satisfies alignment <=
-		 * V8M_SLAB_HEADER_SIZE (which is a power of two). */
+		 * V8M_SLAB_HEADER_SIZE (which is a power of two). The
+		 * aligned variant always uses V8M_PAGE_SIZE for the
+		 * page-heap alignment — callers asked for specific user
+		 * alignment, so don't over-align them into MAP_HUGETLB
+		 * eligibility. */
 		return large_alloc_with_offset(size, V8M_SLAB_HEADER_SIZE,
-					       owner_thread);
+					       V8M_PAGE_SIZE, owner_thread);
 	}
 	/* The header sits at region offset 0; the user pointer is at
 	 * offset header_offset. v8m_ptr_to_meta masks away the low
@@ -166,7 +201,8 @@ void *v8m_large_alloc_aligned(size_t size, size_t alignment,
 	/* alignment is a power of two > V8M_SLAB_HEADER_SIZE, so the
 	 * smallest multiple of alignment that admits the header is
 	 * `alignment` itself. */
-	return large_alloc_with_offset(size, alignment, owner_thread);
+	return large_alloc_with_offset(size, alignment, V8M_PAGE_SIZE,
+				       owner_thread);
 }
 
 void v8m_large_free(const void *obj)
