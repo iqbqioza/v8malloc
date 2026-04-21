@@ -40,6 +40,16 @@
 static atomic_int g_init_state = 0;
 static struct v8m_dispatch g_dispatch;
 
+/* OOM handler + soft-limit state. The handler pointer rides in an
+ * atomic so set/install across threads is well-defined; the limit
+ * is a relaxed atomic since malloc reads it on the fast path and
+ * the writer rarely changes it. A per-thread reentrancy flag (set
+ * during the handler call) keeps a sub-allocation that itself
+ * fails from recursing back into the handler. */
+static _Atomic(v8m_oom_handler_t) g_oom_handler;
+static atomic_size_t g_soft_limit;
+static __thread bool t_oom_in_handler;
+
 static void abort_with(const char *msg)
 {
 	(void)write(STDERR_FILENO, msg, strlen(msg));
@@ -114,6 +124,47 @@ static bool dispatch_ready(void)
 
 /* --- v8m_-prefixed API --------------------------------------------- */
 
+/*
+ * True iff serving `size` more bytes would push live page-heap
+ * bytes above the soft limit. A limit of 0 disables the check.
+ * Reads `live_bytes` from the page heap stats — slightly stale
+ * under concurrency but the limit is advisory, so an occasional
+ * over-shoot is acceptable.
+ */
+static bool over_soft_limit(size_t size)
+{
+	size_t limit =
+	    atomic_load_explicit(&g_soft_limit, memory_order_relaxed);
+	if (limit == 0U) {
+		return false;
+	}
+	struct v8m_page_heap_stats stats = {0};
+	v8m_page_heap_get_stats(&stats);
+	uint64_t live = stats.bytes_mapped - stats.bytes_unmapped;
+	return live + size > limit;
+}
+
+/*
+ * Invoke the installed OOM handler (if any) and return whether a
+ * retry was requested. Reentrancy-safe: a sub-allocation made by
+ * the handler that itself fails will see `t_oom_in_handler == true`
+ * and skip the recursive callback. */
+static bool oom_handler_says_retry(size_t size)
+{
+	if (t_oom_in_handler) {
+		return false;
+	}
+	v8m_oom_handler_t handler =
+	    atomic_load_explicit(&g_oom_handler, memory_order_acquire);
+	if (handler == NULL) {
+		return false;
+	}
+	t_oom_in_handler = true;
+	int retry = handler(size);
+	t_oom_in_handler = false;
+	return retry != 0;
+}
+
 V8M_EXPORT void *v8m_malloc(size_t size)
 {
 	if (!dispatch_ready()) {
@@ -122,7 +173,18 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 		 * malloc(0) policy. */
 		return v8m_bootstrap_alloc(size > 0U ? size : 1U);
 	}
+	if (over_soft_limit(size)) {
+		if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
+			/* The handler released enough memory to fit. */
+		} else {
+			errno = ENOMEM;
+			return NULL;
+		}
+	}
 	void *ptr = v8m_dispatch_alloc(&g_dispatch, size);
+	if (ptr == NULL && oom_handler_says_retry(size)) {
+		ptr = v8m_dispatch_alloc(&g_dispatch, size);
+	}
 	if (ptr == NULL) {
 		errno = ENOMEM;
 	}
@@ -393,6 +455,22 @@ V8M_EXPORT void v8m_get_stats(struct v8m_stats *out)
 V8M_EXPORT void v8m_dump_stats(void)
 {
 	malloc_stats();
+}
+
+V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler)
+{
+	return atomic_exchange_explicit(&g_oom_handler, handler,
+					memory_order_acq_rel);
+}
+
+V8M_EXPORT void v8m_set_soft_limit(size_t bytes)
+{
+	atomic_store_explicit(&g_soft_limit, bytes, memory_order_relaxed);
+}
+
+V8M_EXPORT size_t v8m_get_soft_limit(void)
+{
+	return atomic_load_explicit(&g_soft_limit, memory_order_relaxed);
 }
 
 /* --- glibc statistics / tuning extensions -------------------------- */

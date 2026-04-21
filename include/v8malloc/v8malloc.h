@@ -168,6 +168,47 @@ V8M_EXPORT void v8m_get_stats(struct v8m_stats *out);
  */
 V8M_EXPORT void v8m_dump_stats(void);
 
+/* --- Failure-path hooks ----------------------------------------- */
+
+/*
+ * Out-of-memory handler signature. Invoked on the (rare) allocation
+ * path that exhausts the page heap or trips the soft limit. The
+ * handler receives the size that failed to satisfy and returns a
+ * non-zero value to ask the allocator to retry the request once
+ * (giving the program a chance to free other allocations first), or
+ * zero to let the allocation fail with errno = ENOMEM.
+ *
+ * The handler runs on the calling thread with the dispatcher fully
+ * initialized. It must be reentrancy-safe: if it allocates and the
+ * sub-allocation also fails, the nested call returns NULL with
+ * errno = ENOMEM rather than recursing back into the handler.
+ */
+typedef int (*v8m_oom_handler_t)(size_t requested_size);
+
+/*
+ * Install or clear the OOM handler. Pass NULL to clear (the default).
+ * The previous handler is returned so callers can chain.
+ */
+V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler);
+
+/*
+ * Cap the bytes the page heap may have mapped at any one time.
+ * Counted as `bytes_mapped - bytes_unmapped` (matches the
+ * `live_bytes` field of struct v8m_stats). Allocations that would
+ * push the live byte total above the limit fail with NULL /
+ * errno = ENOMEM (after invoking the OOM handler if one is set,
+ * to give the program a chance to free other allocations first).
+ *
+ * Pass 0 to disable the limit (the default). The limit applies to
+ * the page heap only — bootstrap allocations are not counted.
+ */
+V8M_EXPORT void v8m_set_soft_limit(size_t bytes);
+
+/*
+ * Read the current soft limit. Returns 0 when no limit is set.
+ */
+V8M_EXPORT size_t v8m_get_soft_limit(void);
+
 #ifdef __cplusplus
 }
 #endif

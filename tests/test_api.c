@@ -558,6 +558,161 @@ static int check_v8m_stats_api(void)
 	return 0;
 }
 
+/*
+ * OOM handler / soft-limit tests. The handler counts invocations
+ * and (when configured) frees a stashed allocation so the retry
+ * inside v8m_malloc succeeds. Static state because the handler
+ * signature has no user-data slot.
+ */
+static int g_oom_invocations;
+static void *g_oom_release_target;
+
+static int oom_release_then_retry(size_t requested)
+{
+	(void)requested;
+	g_oom_invocations++;
+	if (g_oom_release_target != NULL) {
+		void *to_free = g_oom_release_target;
+		g_oom_release_target = NULL;
+		free(to_free);
+		return 1; /* retry — we just freed enough room */
+	}
+	return 0; /* give up */
+}
+
+static int oom_never_retry(size_t requested)
+{
+	(void)requested;
+	g_oom_invocations++;
+	return 0;
+}
+
+static int check_soft_limit_blocks_alloc(void)
+{
+	if (v8m_get_soft_limit() != 0U) {
+		return fail("soft limit nonzero before any setter");
+	}
+
+	/* Consume some real bytes first so live_bytes is well above
+	 * zero, then plant a limit that the next allocation must
+	 * exceed. */
+	void *baseline = malloc((size_t)256 * 1024);
+	if (baseline == NULL) {
+		return fail("baseline malloc returned NULL");
+	}
+	struct v8m_stats stats = {0};
+	v8m_get_stats(&stats);
+
+	v8m_set_soft_limit(stats.live_bytes); /* zero headroom */
+	if (v8m_get_soft_limit() != stats.live_bytes) {
+		v8m_set_soft_limit(0);
+		free(baseline);
+		return fail("v8m_get_soft_limit did not see the new value");
+	}
+
+	errno = 0;
+	void *blocked = malloc((size_t)512 * 1024);
+	if (blocked != NULL) {
+		v8m_set_soft_limit(0);
+		free(blocked);
+		free(baseline);
+		return fail("soft limit did not block allocation");
+	}
+	if (errno != ENOMEM) {
+		v8m_set_soft_limit(0);
+		free(baseline);
+		return fail("blocked allocation did not set ENOMEM");
+	}
+
+	v8m_set_soft_limit(0); /* clear */
+	free(baseline);
+	return 0;
+}
+
+static int check_oom_handler_retry(void)
+{
+	v8m_oom_handler_t prev = v8m_set_oom_handler(oom_release_then_retry);
+	if (prev != NULL) {
+		v8m_set_oom_handler(prev);
+		return fail("OOM handler was non-NULL before install");
+	}
+
+	void *anchor = malloc((size_t)256 * 1024);
+	if (anchor == NULL) {
+		v8m_set_oom_handler(NULL);
+		return fail("anchor malloc failed");
+	}
+	struct v8m_stats stats = {0};
+	v8m_get_stats(&stats);
+	v8m_set_soft_limit(stats.live_bytes);
+
+	g_oom_invocations = 0;
+	g_oom_release_target = anchor;
+	void *retry_succeeded = malloc((size_t)128 * 1024);
+	if (retry_succeeded == NULL) {
+		v8m_set_soft_limit(0);
+		v8m_set_oom_handler(NULL);
+		return fail("OOM-handler retry path did not succeed");
+	}
+	/* The analyzer can't see g_oom_invocations being incremented
+	 * through the function pointer the allocator invokes on the OOM
+	 * path, so it flags this comparison as known-false. */
+	/* cppcheck-suppress knownConditionTrueFalse */
+	if (g_oom_invocations == 0) {
+		v8m_set_soft_limit(0);
+		v8m_set_oom_handler(NULL);
+		free(retry_succeeded);
+		return fail("OOM handler was not invoked");
+	}
+	free(retry_succeeded);
+	v8m_set_soft_limit(0);
+
+	v8m_set_oom_handler(NULL);
+	return 0;
+}
+
+static int check_oom_handler_no_retry(void)
+{
+	v8m_set_oom_handler(oom_never_retry);
+
+	void *anchor = malloc((size_t)256 * 1024);
+	if (anchor == NULL) {
+		v8m_set_oom_handler(NULL);
+		return fail("anchor malloc failed");
+	}
+	struct v8m_stats stats = {0};
+	v8m_get_stats(&stats);
+	v8m_set_soft_limit(stats.live_bytes);
+
+	g_oom_invocations = 0;
+	errno = 0;
+	void *blocked = malloc((size_t)128 * 1024);
+	if (blocked != NULL) {
+		v8m_set_soft_limit(0);
+		v8m_set_oom_handler(NULL);
+		free(blocked);
+		free(anchor);
+		return fail("alloc unexpectedly succeeded after no-retry");
+	}
+	if (errno != ENOMEM) {
+		v8m_set_soft_limit(0);
+		v8m_set_oom_handler(NULL);
+		free(anchor);
+		return fail("blocked alloc did not set ENOMEM");
+	}
+	if (g_oom_invocations == 0) {
+		v8m_set_soft_limit(0);
+		v8m_set_oom_handler(NULL);
+		free(anchor);
+		return fail("OOM handler was not invoked on failure");
+	}
+
+	v8m_set_soft_limit(0);
+	v8m_set_oom_handler(NULL);
+	free(anchor);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -604,5 +759,17 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_v8m_stats_api();
+	status = check_v8m_stats_api();
+	if (status != 0) {
+		return status;
+	}
+	status = check_soft_limit_blocks_alloc();
+	if (status != 0) {
+		return status;
+	}
+	status = check_oom_handler_retry();
+	if (status != 0) {
+		return status;
+	}
+	return check_oom_handler_no_retry();
 }

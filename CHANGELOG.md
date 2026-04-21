@@ -110,6 +110,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Failure-path hooks: `v8m_set_oom_handler`,
+  `v8m_set_soft_limit`, `v8m_get_soft_limit`. The OOM handler is
+  invoked from `v8m_malloc` whenever the dispatcher returns NULL
+  or the soft limit blocks the request; if the handler returns
+  non-zero, malloc retries the allocation once. Per-thread
+  reentrancy guard (`__thread bool t_oom_in_handler`) keeps a
+  sub-allocation made by the handler that itself fails from
+  recursing back into the callback. The soft limit caps
+  `bytes_mapped - bytes_unmapped` (matches the `live_bytes` field
+  of `struct v8m_stats`); allocations that would push past the
+  limit fail with NULL / `errno = ENOMEM` after consulting the
+  handler. Pass 0 to disable. Both the handler pointer and the
+  limit value live in atomics so cross-thread set/install is
+  well-defined. Tests cover: setter round-trip, soft limit
+  blocking a Large allocation, handler-driven retry succeeding
+  after the handler frees an anchored allocation, and the
+  no-retry path correctly setting `errno`.
+
+- Open question #3 (soft-limit enforcement policy) resolved:
+  the OOM handler runs first; if it returns non-zero the malloc
+  retries once. No allocator-driven aggressive purge runs at
+  this point — the handler is the single user-controllable
+  release point, and the future background purge thread will
+  shape the live byte total independently rather than racing the
+  failing path.
+
 - Public configuration & statistics API. New `v8m_set_option` /
   `v8m_get_option` thin-forward to `v8m_config_set/get`; new
   `v8m_get_stats(struct v8m_stats *)` exposes the page-heap
