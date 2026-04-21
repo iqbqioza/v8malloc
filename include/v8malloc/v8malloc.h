@@ -169,6 +169,115 @@ V8M_EXPORT void v8m_get_stats(struct v8m_stats *out);
  */
 V8M_EXPORT void v8m_dump_stats(void);
 
+/*
+ * Per-class breakdown for the Large/Huge direct-mmap path. The
+ * `*_alloc_count` / `*_free_count` fields are monotonic across
+ * the process lifetime; `live_count = alloc - free`.
+ * `*_bytes_in_use` is the current sum of mmap_size for live
+ * allocations of that class — useful for sizing huge-page
+ * reservations (huge-pages.md §8).
+ */
+struct v8m_huge_stats {
+	uint64_t large_alloc_count;
+	uint64_t large_free_count;
+	uint64_t large_bytes_in_use;
+	uint64_t huge_alloc_count;
+	uint64_t huge_free_count;
+	uint64_t huge_bytes_in_use;
+};
+
+/*
+ * Snapshot the Large/Huge counters into `*out`. Tolerates NULL.
+ * Pre-init returns all zeroes.
+ */
+V8M_EXPORT void v8m_get_huge_stats(struct v8m_huge_stats *out);
+
+/*
+ * Per-thread allocator stats. Reports cache hit/miss counters and
+ * remote-free queue activity for the calling thread. v0 has no
+ * thread cache yet, so every field reads as zero — the public
+ * surface lands now to lock the contract.
+ */
+struct v8m_thread_stats {
+	uint64_t fast_path_allocs;
+	uint64_t slow_path_allocs;
+	uint64_t fast_path_frees;
+	uint64_t remote_frees_received;
+	uint64_t bin_overflow_flushes;
+};
+
+/*
+ * Snapshot the calling thread's stats. Tolerates NULL.
+ */
+V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out);
+
+/*
+ * Fragmentation snapshot. v0 reports the page-heap-derived metrics
+ * that are universally available; per-class slab utilization is
+ * the next field group to land once the slab pool exposes the
+ * walked counters.
+ */
+struct v8m_frag_metrics {
+	uint64_t live_regions;	      /* mmap'd page-heap regions */
+	uint64_t live_bytes;	      /* bytes_mapped - bytes_unmapped */
+	uint64_t bytes_per_region;    /* live_bytes / live_regions, or 0 */
+	uint64_t region_map_capacity; /* hard cap (4096 in v0) */
+	uint64_t region_map_used_pct; /* live_regions / capacity * 100 */
+	uint64_t large_live_count;
+	uint64_t huge_live_count;
+};
+
+/*
+ * Snapshot fragmentation metrics. Tolerates NULL. Pre-init
+ * returns all zeroes.
+ */
+V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out);
+
+/*
+ * Force a purge cycle: page-heap regions that have drained
+ * (e.g., empty buddy arenas, slab pages with `used_count == 0`)
+ * are returned to the kernel. v0's slab and buddy pools already
+ * release empty pages eagerly on free, so the synchronous purge
+ * call is currently a no-op — the public surface lands to lock
+ * the contract for the future bg purge thread cycle. Returns 0
+ * on success.
+ */
+V8M_EXPORT int v8m_purge(void);
+
+/*
+ * Per-thread variant. Once the thread cache lands this releases
+ * any cached objects bound to the calling thread back to the
+ * pools. No-op in v0.
+ */
+V8M_EXPORT int v8m_purge_thread(void);
+
+/* --- v8m_-namespaced glibc-compat extensions -------------------- */
+/*
+ * Mirrors of the standard glibc statistics / tuning extensions
+ * that the library also exports under their unprefixed names.
+ * Programs that link side-by-side with another allocator can call
+ * these to talk to v8malloc explicitly when the standard symbols
+ * have been resolved elsewhere. Forward to the same shared
+ * `v8m_collect_live_stats` snapshot, so every reporter agrees.
+ *
+ * `struct mallinfo` and `struct mallinfo2` are declared in
+ * `<malloc.h>`. Consumers needing the namespaced variants must
+ * `#include <malloc.h>` ahead of this header (or `<stdio.h>` for
+ * the FILE * argument of `v8m_malloc_info`).
+ */
+struct mallinfo;
+struct mallinfo2;
+
+V8M_EXPORT struct mallinfo v8m_mallinfo(void);
+V8M_EXPORT struct mallinfo2 v8m_mallinfo2(void);
+V8M_EXPORT void v8m_malloc_stats(void);
+/* `stream` is `FILE *`; declared as `void *` so this header doesn't
+ * need to drag in `<stdio.h>`. Callers cast their FILE pointer
+ * implicitly through the void * conversion. */
+V8M_EXPORT int v8m_malloc_info(int options, void *stream);
+V8M_EXPORT int v8m_mallopt(int param, int value);
+V8M_EXPORT int v8m_malloc_trim(size_t pad);
+
 /* --- Failure-path hooks ----------------------------------------- */
 
 /*

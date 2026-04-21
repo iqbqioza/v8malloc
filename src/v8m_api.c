@@ -54,6 +54,53 @@ static _Atomic(v8m_oom_handler_t) g_oom_handler;
 static atomic_size_t g_soft_limit;
 static __thread bool t_oom_in_handler;
 
+/* Forward declaration: dispatch_ready is defined further down with
+ * the rest of the lifecycle helpers, but the live-stats collector
+ * needs to consult it. Keeping the body where it is preserves the
+ * "lifecycle helpers stay together" structure of the file. */
+static bool dispatch_ready(void);
+
+/*
+ * Live-mmap accounting recovered from the page-heap counters. Used
+ * by every reporter (mallinfo / mallinfo2 / malloc_info /
+ * malloc_stats / v8m_get_frag_metrics) so they agree on the same
+ * snapshot. Counters are monotonic so subtraction is safe; pre-init
+ * / post-shutdown returns all zeroes. Defined here (above the first
+ * caller) instead of next to the legacy reporters so the new
+ * v8m_get_frag_metrics in the namespaced section can reach it
+ * without a forward declaration.
+ */
+struct v8m_live_stats {
+	uint64_t live_regions;
+	uint64_t live_bytes;
+	uint64_t bytes_mapped;
+	uint64_t bytes_unmapped;
+	uint64_t mmap_calls;
+	uint64_t munmap_calls;
+	uint64_t advise_calls;
+};
+
+static void v8m_collect_live_stats(struct v8m_live_stats *out)
+{
+	struct v8m_page_heap_stats stats = {0};
+	size_t live_regions = 0;
+	if (dispatch_ready()) {
+		v8m_page_heap_get_stats(&stats);
+		live_regions = v8m_page_heap_live_region_count();
+	}
+	out->bytes_mapped = stats.bytes_mapped;
+	out->bytes_unmapped = stats.bytes_unmapped;
+	out->mmap_calls = stats.mmap_calls;
+	out->munmap_calls = stats.munmap_calls;
+	out->advise_calls = stats.advise_calls;
+	/* live_regions comes from the region map directly; the
+	 * mmap/munmap call counters cannot be used because the
+	 * over-allocate-and-trim strategy emits multiple munmaps
+	 * per mmap, leaving the call-count difference net-negative. */
+	out->live_regions = (uint64_t)live_regions;
+	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
+}
+
 static void abort_with(const char *msg)
 {
 	(void)write(STDERR_FILENO, msg, strlen(msg));
@@ -461,6 +508,118 @@ V8M_EXPORT void v8m_dump_stats(void)
 	malloc_stats();
 }
 
+V8M_EXPORT void v8m_get_huge_stats(struct v8m_huge_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	struct v8m_large_stats raw = {0};
+	if (dispatch_ready()) {
+		v8m_large_get_stats(&raw);
+	}
+	out->large_alloc_count = raw.large_alloc_count;
+	out->large_free_count = raw.large_free_count;
+	out->large_bytes_in_use = raw.large_bytes_in_use;
+	out->huge_alloc_count = raw.huge_alloc_count;
+	out->huge_free_count = raw.huge_free_count;
+	out->huge_bytes_in_use = raw.huge_bytes_in_use;
+}
+
+V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	/* TLC absent in v0; the public surface lands ahead of the
+	 * implementation so consumers can compile against the contract.
+	 * Once the thread cache lands, the per-thread counters move
+	 * into `__thread` storage and this getter snapshots them. */
+	out->fast_path_allocs = 0;
+	out->slow_path_allocs = 0;
+	out->fast_path_frees = 0;
+	out->remote_frees_received = 0;
+	out->bin_overflow_flushes = 0;
+}
+
+V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	struct v8m_live_stats live = {0};
+	struct v8m_large_stats large = {0};
+	if (dispatch_ready()) {
+		v8m_collect_live_stats(&live);
+		v8m_large_get_stats(&large);
+	}
+	out->live_regions = live.live_regions;
+	out->live_bytes = live.live_bytes;
+	out->bytes_per_region = (live.live_regions == 0U)
+				    ? 0U
+				    : live.live_bytes / live.live_regions;
+	out->region_map_capacity = 4096U; /* matches V8M_REGION_MAP_CAPACITY */
+	out->region_map_used_pct = (live.live_regions * 100U) / 4096U;
+	out->large_live_count =
+	    large.large_alloc_count - large.large_free_count;
+	out->huge_live_count = large.huge_alloc_count - large.huge_free_count;
+}
+
+V8M_EXPORT int v8m_purge(void)
+{
+	/* The slab pool returns empty pages to the page heap on free,
+	 * the buddy pool reclaims fully-drained arenas, and Large/Huge
+	 * regions are unmapped on free — there is nothing left to
+	 * release synchronously in v0. The contract lands here so the
+	 * future bg purge thread cycle has a public hook to wire up. */
+	return 0;
+}
+
+V8M_EXPORT int v8m_purge_thread(void)
+{
+	/* Same v0 reasoning as v8m_purge: no thread cache yet, so
+	 * there's nothing thread-bound to flush. */
+	return 0;
+}
+
+/* --- v8m_-namespaced glibc-compat wrappers ------------------------ */
+
+V8M_EXPORT struct mallinfo v8m_mallinfo(void)
+{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	return mallinfo();
+#pragma GCC diagnostic pop
+}
+
+V8M_EXPORT struct mallinfo2 v8m_mallinfo2(void)
+{
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	return mallinfo2();
+}
+
+V8M_EXPORT void v8m_malloc_stats(void)
+{
+	malloc_stats();
+}
+
+V8M_EXPORT int v8m_malloc_info(int options, void *stream)
+{
+	return malloc_info(options, (FILE *)stream);
+}
+
+V8M_EXPORT int v8m_mallopt(int param, int value)
+{
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	return mallopt(param, value);
+}
+
+V8M_EXPORT int v8m_malloc_trim(size_t pad)
+{
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	return malloc_trim(pad);
+}
+
 V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler)
 {
 	return atomic_exchange_explicit(&g_oom_handler, handler,
@@ -552,46 +711,11 @@ V8M_EXPORT bool v8m_is_valid_ptr(const void *ptr)
  * picture sharpens once the thread cache + per-class stats land.
  */
 
-/*
- * Live-mmap accounting recovered from the page-heap counters. Used
- * by mallinfo / mallinfo2 / malloc_info / malloc_stats so they
- * agree on the same snapshot. Counters are monotonic so subtraction
- * is safe; pre-init / post-shutdown returns all zeroes.
- */
-struct v8m_live_stats {
-	uint64_t live_regions;
-	uint64_t live_bytes;
-	uint64_t bytes_mapped;
-	uint64_t bytes_unmapped;
-	uint64_t mmap_calls;
-	uint64_t munmap_calls;
-	uint64_t advise_calls;
-};
-
-static void v8m_collect_live_stats(struct v8m_live_stats *out)
-{
-	struct v8m_page_heap_stats stats = {0};
-	size_t live_regions = 0;
-	if (dispatch_ready()) {
-		v8m_page_heap_get_stats(&stats);
-		live_regions = v8m_page_heap_live_region_count();
-	}
-	out->bytes_mapped = stats.bytes_mapped;
-	out->bytes_unmapped = stats.bytes_unmapped;
-	out->mmap_calls = stats.mmap_calls;
-	out->munmap_calls = stats.munmap_calls;
-	out->advise_calls = stats.advise_calls;
-	/* live_regions comes from the region map directly; the
-	 * mmap/munmap call counters cannot be used because the
-	 * over-allocate-and-trim strategy emits multiple munmaps
-	 * per mmap, leaving the call-count difference net-negative. */
-	out->live_regions = (uint64_t)live_regions;
-	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
-}
-
 /* `int` truncation is intentional — the legacy mallinfo struct
  * predates 64-bit address spaces. Modern code should call mallinfo2
  * instead; mallinfo lives on for ABI compatibility. */
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
 V8M_EXPORT struct mallinfo mallinfo(void)
 {
 	struct v8m_live_stats live;
@@ -604,6 +728,8 @@ V8M_EXPORT struct mallinfo mallinfo(void)
 	return info;
 }
 
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
 V8M_EXPORT struct mallinfo2 mallinfo2(void)
 {
 	struct v8m_live_stats live;

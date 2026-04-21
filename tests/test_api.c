@@ -814,6 +814,119 @@ static int check_ptr_info_invalid(void)
 	return 0;
 }
 
+static int check_huge_and_frag_stats(void)
+{
+	struct v8m_huge_stats huge_before = {0};
+	struct v8m_huge_stats huge_after = {0};
+	struct v8m_frag_metrics frag = {0};
+
+	/* Tolerate NULL on every reporter without crashing. */
+	v8m_get_huge_stats(NULL);
+	v8m_get_frag_metrics(NULL);
+
+	v8m_get_huge_stats(&huge_before);
+
+	/* A 512 KiB allocation is in the Large class (256K..2M). */
+	void *large = malloc((size_t)512 * 1024);
+	if (large == NULL) {
+		return fail("Large malloc returned NULL");
+	}
+	v8m_get_huge_stats(&huge_after);
+	if (huge_after.large_alloc_count !=
+	    huge_before.large_alloc_count + 1U) {
+		free(large);
+		return fail("large_alloc_count did not advance by 1");
+	}
+	if (huge_after.large_bytes_in_use <= huge_before.large_bytes_in_use) {
+		free(large);
+		return fail("large_bytes_in_use did not advance");
+	}
+
+	/* A > 2 MiB allocation lands in the Huge bucket. */
+	void *huge_obj = malloc((size_t)3 * 1024 * 1024);
+	if (huge_obj == NULL) {
+		free(large);
+		return fail("Huge malloc returned NULL");
+	}
+	struct v8m_huge_stats huge_with_huge = {0};
+	v8m_get_huge_stats(&huge_with_huge);
+	if (huge_with_huge.huge_alloc_count !=
+	    huge_after.huge_alloc_count + 1U) {
+		free(huge_obj);
+		free(large);
+		return fail("huge_alloc_count did not advance by 1");
+	}
+
+	v8m_get_frag_metrics(&frag);
+	if (frag.live_regions == 0U || frag.live_bytes == 0U) {
+		free(huge_obj);
+		free(large);
+		return fail("frag metrics reported zero live regions/bytes");
+	}
+	if (frag.region_map_capacity == 0U) {
+		free(huge_obj);
+		free(large);
+		return fail("region_map_capacity reported as zero");
+	}
+	if (frag.large_live_count == 0U || frag.huge_live_count == 0U) {
+		free(huge_obj);
+		free(large);
+		return fail("frag.live counts did not reflect the allocations");
+	}
+
+	free(huge_obj);
+	free(large);
+
+	/* Thread stats stub returns zero until TLC lands; just verify
+	 * the call itself is safe and the values are within range. */
+	struct v8m_thread_stats thread = {0};
+	v8m_get_thread_stats(NULL);
+	v8m_get_thread_stats(&thread);
+	if (thread.fast_path_allocs != 0U || thread.slow_path_allocs != 0U ||
+	    thread.fast_path_frees != 0U ||
+	    thread.remote_frees_received != 0U ||
+	    thread.bin_overflow_flushes != 0U) {
+		return fail("v0 thread stats expected to be zero");
+	}
+	return 0;
+}
+
+static int check_purge_and_namespaced_compat(void)
+{
+	if (v8m_purge() != 0) {
+		return fail("v8m_purge returned non-zero");
+	}
+	if (v8m_purge_thread() != 0) {
+		return fail("v8m_purge_thread returned non-zero");
+	}
+
+	/* The v8m_-namespaced wrappers forward to the unprefixed
+	 * names; smoke-test that they don't crash and report
+	 * something. */
+	struct mallinfo2 info = v8m_mallinfo2();
+	if (info.hblks == 0U && info.hblkhd == 0U) {
+		/* OK if the allocator is currently quiet, but allocate
+		 * to make sure values move. */
+		void *prime = malloc((size_t)512 * 1024);
+		if (prime == NULL) {
+			return fail("prime alloc for namespaced check failed");
+		}
+		info = v8m_mallinfo2();
+		free(prime);
+		if (info.hblks == 0U || info.hblkhd == 0U) {
+			return fail("v8m_mallinfo2 reported zero after alloc");
+		}
+	}
+
+	if (v8m_mallopt(M_TRIM_THRESHOLD, 1024 * 1024) != 1) {
+		return fail("v8m_mallopt did not return 1");
+	}
+	if (v8m_malloc_trim(0) != 0) {
+		return fail("v8m_malloc_trim returned non-zero");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -880,5 +993,13 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_ptr_info_invalid();
+	status = check_ptr_info_invalid();
+	if (status != 0) {
+		return status;
+	}
+	status = check_huge_and_frag_stats();
+	if (status != 0) {
+		return status;
+	}
+	return check_purge_and_namespaced_compat();
 }

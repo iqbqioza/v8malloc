@@ -89,4 +89,29 @@ void v8m_large_free(const void *obj);
  */
 size_t v8m_large_usable_size(const void *obj);
 
+/*
+ * Lifetime counters for the Large/Huge direct-mmap path. Each
+ * `*_count` is monotonically increasing; subtract free from alloc to
+ * get the live count. `*_bytes_in_use` is the current sum of
+ * mmap_size for live allocations of that class — it's maintained by
+ * the alloc/free helpers and is the right number to drive
+ * `v8m_huge_stats`.
+ */
+struct v8m_large_stats {
+	uint64_t large_alloc_count;
+	uint64_t large_free_count;
+	uint64_t large_bytes_in_use;
+	uint64_t huge_alloc_count;
+	uint64_t huge_free_count;
+	uint64_t huge_bytes_in_use;
+};
+
+/*
+ * Snapshot the Large/Huge counters into `*out`. Tolerates NULL.
+ * Atomic per field; not atomic across fields (a free between two
+ * loads can leave the snapshot internally inconsistent by one
+ * count, which is acceptable for diagnostic reporting).
+ */
+void v8m_large_get_stats(struct v8m_large_stats *out);
+
 #endif /* V8M_LARGE_H */

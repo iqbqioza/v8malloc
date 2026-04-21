@@ -110,6 +110,66 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Rounded out the public v8m_* API surface. Six new exports land
+  under V8MALLOC_1.0:
+
+    - `v8m_get_huge_stats(struct v8m_huge_stats *)` reports
+      per-class alloc/free counts and bytes_in_use for the Large
+      (256 KiB – 2 MiB) and Huge (> 2 MiB) direct-mmap paths. The
+      counters are maintained by new atomic state in
+      `src/v8m_large.c` and surfaced through
+      `v8m_large_get_stats`.
+    - `v8m_get_thread_stats(struct v8m_thread_stats *)` locks the
+      per-thread contract (fast_path_allocs, slow_path_allocs,
+      fast_path_frees, remote_frees_received,
+      bin_overflow_flushes). v0 returns zeros — the `__thread`
+      counters wire in with the thread cache cycle; the surface
+      lands now so consumers can compile against the final shape.
+    - `v8m_get_frag_metrics(struct v8m_frag_metrics *)` reports
+      live regions, live bytes, average bytes/region, region-map
+      utilization %, and Large/Huge live counts. Per-class slab
+      utilization joins the struct once the slab pool exposes the
+      walked counters.
+    - `v8m_purge(void)` and `v8m_purge_thread(void)` no-op
+      returning 0. The slab and buddy pools already reclaim
+      empty pages eagerly on free, so there's nothing
+      synchronous to do in v0; the public hook locks the
+      contract for the future bg purge thread.
+
+  Plus six v8m_-namespaced wrappers for the glibc-compat
+  extensions (`v8m_mallinfo`, `v8m_mallinfo2`, `v8m_malloc_stats`,
+  `v8m_malloc_info`, `v8m_mallopt`, `v8m_malloc_trim`) so programs
+  that link side-by-side with another allocator can call into
+  v8malloc explicitly even when the unprefixed names resolve
+  elsewhere. `v8m_malloc_info` takes `void *` for the FILE
+  argument so the public header doesn't have to pull in
+  `<stdio.h>`.
+
+  New `struct v8m_huge_stats`, `struct v8m_thread_stats`, and
+  `struct v8m_frag_metrics` live in the public header.
+  `struct v8m_live_stats` / `v8m_collect_live_stats` move to the
+  top of `src/v8m_api.c` so the new metric reporters can reach
+  them. `dispatch_ready` gets a forward declaration so the
+  collector can consult it without reordering the lifecycle
+  helpers.
+
+- Resolved every remaining open question in TODO.md:
+    - **#2 Bootstrap handoff:** bootstrap allocations leak for
+      the process lifetime by design (the 64 KiB buffer caps the
+      leak; per-pointer free would defeat the bump allocator).
+    - **#4 mallopt vs env vars:** env vars win. Our mallopt is a
+      no-op; `v8m_set_option` takes runtime effect without
+      persistence.
+    - **#5 Profile-mode format:** pprof, dumped on process exit
+      to `/tmp/v8malloc-PID.pb.gz` (overridable via
+      `V8M_PROFILE_PATH`). Implementation lands with the profile
+      mode itself.
+    - **#6 Symbol-versioning granularity:** single
+      `V8MALLOC_1.0` node, mirroring jemalloc / mimalloc /
+      tcmalloc. New nodes only on major releases.
+    - **#8 malloc_get_state / malloc_set_state:** skip — modern
+      glibc (≥ 2.34) no longer declares or exports them.
+
 - LD_PRELOAD interposition test (`tests/preload_target.c` +
   `test_ld_preload`). The target is a standalone program with no
   compile-time dependency on libv8malloc; CMake injects the

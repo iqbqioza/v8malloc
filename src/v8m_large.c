@@ -58,6 +58,19 @@ static_assert(sizeof(struct v8m_large_page_meta) <= V8M_SLAB_HEADER_SIZE,
 #define V8M_LARGE_HUGE_TAG UINT16_MAX
 
 /*
+ * Per-class lifetime counters. Updated on every alloc / free; read
+ * by v8m_large_get_stats and the public v8m_huge_stats reporter.
+ * All relaxed because they're diagnostic — the surrounding
+ * page-heap counters carry the load-bearing happens-before edges.
+ */
+static _Atomic uint64_t v8m_large_alloc_count;
+static _Atomic uint64_t v8m_large_free_count;
+static _Atomic uint64_t v8m_large_bytes_in_use;
+static _Atomic uint64_t v8m_huge_alloc_count;
+static _Atomic uint64_t v8m_huge_free_count;
+static _Atomic uint64_t v8m_huge_bytes_in_use;
+
+/*
  * Round `value` up to the next multiple of `multiple`. `multiple`
  * must be a power of two; the caller checks that.
  */
@@ -104,6 +117,18 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	meta->free_list_head = NULL;
 	meta->next = NULL;
 	meta->mmap_size = mmap_size;
+
+	if (cls == V8M_CLASS_HUGE) {
+		atomic_fetch_add_explicit(&v8m_huge_alloc_count, 1U,
+					  memory_order_relaxed);
+		atomic_fetch_add_explicit(&v8m_huge_bytes_in_use, mmap_size,
+					  memory_order_relaxed);
+	} else {
+		atomic_fetch_add_explicit(&v8m_large_alloc_count, 1U,
+					  memory_order_relaxed);
+		atomic_fetch_add_explicit(&v8m_large_bytes_in_use, mmap_size,
+					  memory_order_relaxed);
+	}
 
 	return (unsigned char *)region + header_offset;
 }
@@ -157,9 +182,22 @@ void v8m_large_free(const void *obj)
 	struct v8m_page_meta *common = v8m_ptr_to_meta(obj);
 	struct v8m_large_page_meta *meta = (struct v8m_large_page_meta *)common;
 	size_t mmap_size = meta->mmap_size;
+	bool was_huge = meta->size_class == (uint16_t)V8M_LARGE_HUGE_TAG;
 
 	atomic_store_explicit(&meta->used_count, 0U, memory_order_relaxed);
 	meta->magic = 0U;
+
+	if (was_huge) {
+		atomic_fetch_add_explicit(&v8m_huge_free_count, 1U,
+					  memory_order_relaxed);
+		atomic_fetch_sub_explicit(&v8m_huge_bytes_in_use, mmap_size,
+					  memory_order_relaxed);
+	} else {
+		atomic_fetch_add_explicit(&v8m_large_free_count, 1U,
+					  memory_order_relaxed);
+		atomic_fetch_sub_explicit(&v8m_large_bytes_in_use, mmap_size,
+					  memory_order_relaxed);
+	}
 
 	v8m_page_heap_free(common, mmap_size);
 }
@@ -179,4 +217,23 @@ size_t v8m_large_usable_size(const void *obj)
 	 * the page (< V8M_PAGE_SIZE), so the low-bits trick is exact. */
 	uintptr_t header_offset = (uintptr_t)obj & (V8M_PAGE_SIZE - 1U);
 	return meta->mmap_size - header_offset;
+}
+
+void v8m_large_get_stats(struct v8m_large_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->large_alloc_count =
+	    atomic_load_explicit(&v8m_large_alloc_count, memory_order_relaxed);
+	out->large_free_count =
+	    atomic_load_explicit(&v8m_large_free_count, memory_order_relaxed);
+	out->large_bytes_in_use =
+	    atomic_load_explicit(&v8m_large_bytes_in_use, memory_order_relaxed);
+	out->huge_alloc_count =
+	    atomic_load_explicit(&v8m_huge_alloc_count, memory_order_relaxed);
+	out->huge_free_count =
+	    atomic_load_explicit(&v8m_huge_free_count, memory_order_relaxed);
+	out->huge_bytes_in_use =
+	    atomic_load_explicit(&v8m_huge_bytes_in_use, memory_order_relaxed);
 }
