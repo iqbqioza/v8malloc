@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Exhaustive `malloc_usable_size` contract test
+  (`tests/test_usable_size.c`). Sweeps every Tiny / Small slab
+  request in `[1, V8M_SMALL_MAX_SIZE]` (4 096 sizes) and asserts
+  `usable == v8m_class_to_size[v8m_size_class(req)]` — slab slots
+  are exact-sized, so this is the strict equality version of the
+  contract. Sweeps every buddy power-of-two boundary plus the
+  size just below it and asserts `req <= usable <=
+  V8M_BUDDY_MAX_BLOCK`. Sweeps four Large / Huge sizes
+  (512 KiB → 4 MiB) and asserts `usable >= req`. Plus the
+  writable-window check: two anchor allocations holding 0x42
+  surround a probe; the test memsets every byte up to
+  `malloc_usable_size(probe)` with 0xCD, frees the probe, and
+  verifies both anchors still hold 0x42 — a misclaimed
+  usable_size that overflows the backing allocation would
+  corrupt the anchor pattern. Also covers the
+  `malloc_usable_size(NULL) == 0` contract and the aligned_alloc
+  path's `usable >= req` even when alignment bumps the request
+  into a larger class. Complements the single-sample basic
+  check in `tests/test_api.c`.
+
 - Exhaustive calloc / reallocarray test
   (`tests/test_calloc.c`). A 9-cell sweep across every backend
   (slab Tiny → slab Small → buddy Medium → buddy boundary →
