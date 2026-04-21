@@ -62,6 +62,7 @@ endif()
 set(V8MALLOC_SOURCES
 	src/v8m_bootstrap.c
 	src/v8m_buddy.c
+	src/v8m_config.c
 	src/v8m_large.c
 	src/v8m_page.c
 	src/v8m_page_heap.c

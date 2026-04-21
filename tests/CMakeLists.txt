@@ -13,6 +13,10 @@ function(v8malloc_add_test name)
 	target_include_directories(${name} PRIVATE
 		${CMAKE_SOURCE_DIR}/src
 	)
+	# Match the library's PRIVATE _GNU_SOURCE so tests can reach
+	# POSIX-extension prototypes (setenv, mmap helpers, ...) without
+	# each .c file having to redeclare it.
+	target_compile_definitions(${name} PRIVATE _GNU_SOURCE)
 	target_compile_options(${name} PRIVATE
 		-Wall -Wextra -Wpedantic -Wshadow
 		-Wstrict-prototypes -Wmissing-prototypes
@@ -31,3 +35,4 @@ v8malloc_add_test(test_slab_tiny)
 v8malloc_add_test(test_slab_small)
 v8malloc_add_test(test_large)
 v8malloc_add_test(test_buddy)
+v8malloc_add_test(test_config)

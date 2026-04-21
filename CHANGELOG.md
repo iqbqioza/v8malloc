@@ -99,6 +99,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   available level, then splits down placing each right child on
   the lower level's free list. Free does immediate coalescing via
   `idx ^ 1` whenever the buddy is free and not split.
+- Runtime configuration (`v8m_config_init/get/set`): one atomic
+  int64 per option, seeded from the V8M_* environment variables
+  documented in AGENT.md §7 with documented defaults (verbose 0,
+  purge interval 10 s, thread-cache max 256, HugePages 1, NUMA
+  aware 1, debug 0, profile 0, compaction threshold 25 %).
+  v8m_config_init re-reads the environment on every call so tests
+  can reset state, and out-of-range option ids fail the
+  set/get bounds check rather than scribbling on memory. Test
+  suite covers defaults, env overrides for every option, fallback
+  to default on unparseable env values, set/get round-trip, and
+  the out-of-range guard.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
