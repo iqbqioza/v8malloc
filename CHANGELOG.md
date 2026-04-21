@@ -110,6 +110,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- End-to-end concurrency test through the public allocation API
+  (`tests/test_threading.c`). 8 worker threads × 512 ops each
+  cycle through 11 sizes spanning every backend (slab Tiny / slab
+  Small / buddy Medium / large mmap / huge mmap), stamp a
+  per-thread byte pattern across the allocation, and verify it
+  before freeing — inter-thread corruption (two threads receiving
+  the same pointer) would surface as a pattern mismatch on the
+  very first verify. Every 8th op detours through `realloc` and
+  confirms the original bytes survive the move. Complements the
+  per-pool stress tests (`test_slab_pool`, `test_buddy_pool`,
+  `test_dispatch`) by exercising the constructor-installed
+  dispatcher and the same path LD_PRELOAD users hit.
+
 - Page-utilization-aware allocation pick. The slab pool's
   `try_partials` no longer pops the LIFO head; it scans the
   partials list and promotes the most-utilized page (the one
