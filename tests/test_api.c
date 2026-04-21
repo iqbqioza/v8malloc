@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "v8malloc/v8malloc.h"
 
@@ -205,6 +206,167 @@ static int check_v8m_namespace(void)
 	return 0;
 }
 
+static int check_aligned_alloc(void)
+{
+	static const size_t cases[][2] = {
+	    /* {alignment, size} — covers slab, buddy, and large paths. */
+	    {16, 16},	    {32, 32},	   {64, 64},	   {128, 128},
+	    {256, 256},	    {512, 1024},   {1024, 1024},   {2048, 2048},
+	    {4096, 4096},   {8192, 16384}, {16384, 32768}, {4096, 200000},
+	    {32768, 65536},
+	};
+	size_t case_count = sizeof(cases) / sizeof(cases[0]);
+	for (size_t i = 0; i < case_count; i++) {
+		size_t alignment = cases[i][0];
+		size_t size = cases[i][1];
+		void *ptr = aligned_alloc(alignment, size);
+		if (ptr == NULL) {
+			(void)fprintf(
+			    stderr,
+			    "test_api: aligned_alloc(%zu, %zu) returned NULL\n",
+			    alignment, size);
+			return 1;
+		}
+		if (((uintptr_t)ptr & (alignment - 1U)) != 0U) {
+			(void)fprintf(stderr,
+				      "test_api: aligned_alloc(%zu, %zu) ptr "
+				      "%p misaligned\n",
+				      alignment, size, ptr);
+			free(ptr);
+			return 1;
+		}
+		(void)memset(ptr, 0xA5, size);
+		free(ptr);
+	}
+
+	/* Invalid alignments: zero, three (not power of 2). The values
+	 * are routed through a volatile variable so the compiler can't
+	 * enforce its compile-time power-of-two check on the constants
+	 * — the runtime guard inside v8m_aligned_alloc is exactly what
+	 * we're testing. */
+	volatile size_t zero_align = 0;
+	volatile size_t three_align = 3;
+	errno = 0;
+	void *bad = aligned_alloc(zero_align, 16);
+	if (bad != NULL || errno != EINVAL) {
+		free(bad);
+		return fail("aligned_alloc(0, 16) did not fail with EINVAL");
+	}
+	errno = 0;
+	bad = aligned_alloc(three_align, 16);
+	if (bad != NULL || errno != EINVAL) {
+		free(bad);
+		return fail("aligned_alloc(3, 16) did not fail with EINVAL");
+	}
+
+	/* Above the supported alignment cap. */
+	errno = 0;
+	bad = aligned_alloc((size_t)1 << 20, 64);
+	if (bad != NULL) {
+		free(bad);
+		return fail("aligned_alloc(1MiB) unexpectedly succeeded");
+	}
+	if (errno != ENOMEM) {
+		return fail("aligned_alloc(1MiB) did not set ENOMEM");
+	}
+	return 0;
+}
+
+static int check_posix_memalign(void)
+{
+	void *ptr = NULL;
+	int ret = posix_memalign(&ptr, 64, 1024);
+	if (ret != 0 || ptr == NULL) {
+		return fail("posix_memalign(64, 1024) failed");
+	}
+	if (((uintptr_t)ptr & 63U) != 0U) {
+		free(ptr);
+		return fail("posix_memalign(64) returned misaligned ptr");
+	}
+	(void)memset(ptr, 0x33, 1024);
+	free(ptr);
+
+	/* Alignment must be a multiple of sizeof(void *). On all
+	 * supported targets sizeof(void *) is 8, so alignment = 4 is
+	 * rejected even though it is a valid power of two. */
+	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+	void *guard = (void *)(uintptr_t)0xDEADBEEF;
+	void *out = guard;
+	ret = posix_memalign(&out, 4, 16);
+	if (ret != EINVAL) {
+		free(out);
+		return fail("posix_memalign(4) did not return EINVAL");
+	}
+	if (out != guard) {
+		return fail("posix_memalign(EINVAL) clobbered *memptr");
+	}
+
+	ret = posix_memalign(&out, 7, 16);
+	if (ret != EINVAL) {
+		free(out);
+		return fail("posix_memalign(7) did not return EINVAL");
+	}
+
+	/* Same volatile-trick as in check_aligned_alloc: dodge the
+	 * compiler's nonnull diagnostic on a literal NULL so the runtime
+	 * EINVAL guard gets exercised. */
+	void **null_memptr = NULL;
+	void **volatile sink = null_memptr;
+	/* NOLINTNEXTLINE(clang-analyzer-core.NonNullParamChecker) */
+	ret = posix_memalign(sink, 64, 16);
+	if (ret != EINVAL) {
+		return fail(
+		    "posix_memalign(NULL memptr) did not return EINVAL");
+	}
+	return 0;
+}
+
+static int check_memalign_valloc_pvalloc(void)
+{
+	long page_signed = sysconf(_SC_PAGESIZE);
+	size_t page = (page_signed > 0) ? (size_t)page_signed : 4096U;
+
+	void *aligned = memalign(128, 256);
+	if (aligned == NULL) {
+		return fail("memalign(128, 256) returned NULL");
+	}
+	if (((uintptr_t)aligned & 127U) != 0U) {
+		free(aligned);
+		return fail("memalign(128) returned misaligned ptr");
+	}
+	free(aligned);
+
+	/* valloc / pvalloc are deprecated by POSIX and the linter flags
+	 * them as MT-unsafe, but we deliberately exercise them here to
+	 * confirm the v8malloc-side wiring is correct. */
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	void *page_aligned = valloc(page);
+	if (page_aligned == NULL) {
+		return fail("valloc returned NULL");
+	}
+	if (((uintptr_t)page_aligned & (page - 1U)) != 0U) {
+		free(page_aligned);
+		return fail("valloc returned non-page-aligned ptr");
+	}
+	free(page_aligned);
+
+	/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+	void *rounded = pvalloc(page + 1U);
+	if (rounded == NULL) {
+		return fail("pvalloc returned NULL");
+	}
+	if (((uintptr_t)rounded & (page - 1U)) != 0U) {
+		free(rounded);
+		return fail("pvalloc returned non-page-aligned ptr");
+	}
+	if (malloc_usable_size(rounded) < (page * 2U)) {
+		free(rounded);
+		return fail("pvalloc did not round size up to page multiple");
+	}
+	free(rounded);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -227,5 +389,17 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_v8m_namespace();
+	status = check_v8m_namespace();
+	if (status != 0) {
+		return status;
+	}
+	status = check_aligned_alloc();
+	if (status != 0) {
+		return status;
+	}
+	status = check_posix_memalign();
+	if (status != 0) {
+		return status;
+	}
+	return check_memalign_valloc_pvalloc();
 }

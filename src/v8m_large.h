@@ -62,6 +62,19 @@ struct v8m_large_page_meta {
 void *v8m_large_alloc(size_t size, uint64_t owner_thread);
 
 /*
+ * Aligned variant. The user pointer is placed at the smallest
+ * alignment-multiple of V8M_SLAB_HEADER_SIZE that fits the header,
+ * keeping the meta at the region's page base so v8m_ptr_to_meta still
+ * recovers it. `alignment` must be a power of two and strictly less
+ * than V8M_PAGE_SIZE; values outside that range return NULL — the
+ * caller must route higher alignments through the buddy path or fail.
+ * `alignment == 0` is treated as "no extra alignment" and behaves
+ * identically to v8m_large_alloc.
+ */
+void *v8m_large_alloc_aligned(size_t size, size_t alignment,
+			      uint64_t owner_thread);
+
+/*
  * Free a region previously returned by v8m_large_alloc(). Tolerates
  * NULL. Caller has already verified `obj` is a v8malloc pointer via
  * v8m_page_meta_valid(). `obj` itself is only read through by the

@@ -2,20 +2,17 @@
 /*
  * Public allocation API. Implements the standard malloc family
  * (malloc, free, calloc, realloc, reallocarray, malloc_usable_size)
- * plus the v8m_-prefixed equivalents, all routing through the
- * single-process v8m_dispatch instance. Library load runs the
- * constructor that initializes the dispatch; library unload runs
- * the destructor that tears it down.
+ * along with the aligned-allocation family (aligned_alloc,
+ * posix_memalign, memalign, valloc, pvalloc) and the v8m_-prefixed
+ * equivalents, all routing through the single-process v8m_dispatch
+ * instance. Library load runs the constructor that initializes the
+ * dispatch; library unload runs the destructor that tears it down.
  *
  * Pre-init / post-shutdown allocations fall through to the
  * bootstrap allocator so library constructors that run before us
  * (and any late shutdown allocations) still get serviced. Bootstrap
  * pointers survive the transition: free() recognizes them via the
  * range check and treats them as no-ops.
- *
- * `aligned_alloc`, `posix_memalign`, and the deprecated `memalign`/
- * `valloc`/`pvalloc` aren't here yet — they need a custom-alignment
- * path through the backends and ship in their own cycle.
  */
 
 #include <errno.h>
@@ -177,6 +174,111 @@ V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
 	return v8m_realloc(ptr, nmemb * size);
 }
 
+/*
+ * is_pow2 — true iff `value` is a non-zero power of two. Used to
+ * validate the alignment argument of every aligned-alloc entry.
+ */
+static bool is_pow2(size_t value)
+{
+	return value != 0U && (value & (value - 1U)) == 0U;
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT void *v8m_aligned_alloc(size_t alignment, size_t size)
+{
+	if (!is_pow2(alignment)) {
+		errno = EINVAL;
+		return NULL;
+	}
+	if (!dispatch_ready()) {
+		/* Pre-init allocations cannot honour custom alignment;
+		 * the bootstrap pointer is only 16-byte aligned. */
+		if (alignment <= 16U) {
+			return v8m_bootstrap_alloc(size > 0U ? size : 1U);
+		}
+		errno = ENOMEM;
+		return NULL;
+	}
+	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	if (ptr == NULL) {
+		errno = ENOMEM;
+	}
+	return ptr;
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT int v8m_posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+	if (memptr == NULL) {
+		return EINVAL;
+	}
+	/* posix_memalign requires alignment to be a power of two AND a
+	 * multiple of sizeof(void *). */
+	if (!is_pow2(alignment) || (alignment % sizeof(void *)) != 0U) {
+		return EINVAL;
+	}
+	if (!dispatch_ready()) {
+		if (alignment <= 16U) {
+			void *ptr = v8m_bootstrap_alloc(size > 0U ? size : 1U);
+			if (ptr == NULL) {
+				return ENOMEM;
+			}
+			*memptr = ptr;
+			return 0;
+		}
+		return ENOMEM;
+	}
+	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	if (ptr == NULL) {
+		return ENOMEM;
+	}
+	*memptr = ptr;
+	return 0;
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT void *v8m_memalign(size_t alignment, size_t size)
+{
+	/* memalign(3) is the looser glibc cousin of aligned_alloc — it
+	 * doesn't require size to be a multiple of alignment. The C11
+	 * relaxation made aligned_alloc match this behaviour, so the two
+	 * are functionally identical here. */
+	return v8m_aligned_alloc(alignment, size);
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT void *v8m_valloc(size_t size)
+{
+	long page = sysconf(_SC_PAGESIZE);
+	if (page <= 0) {
+		page = 4096; /* defensive default */
+	}
+	return v8m_aligned_alloc((size_t)page, size);
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT void *v8m_pvalloc(size_t size)
+{
+	long page_signed = sysconf(_SC_PAGESIZE);
+	size_t page = (page_signed > 0) ? (size_t)page_signed : 4096U;
+	/* pvalloc rounds size up to the next page boundary. Treat 0 as
+	 * one page, matching glibc. */
+	if (size == 0U) {
+		size = page;
+	}
+	if (size > SIZE_MAX - (page - 1U)) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	size_t rounded = (size + page - 1U) & ~(page - 1U);
+	return v8m_aligned_alloc(page, rounded);
+}
+
 /* --- POSIX malloc family overrides -------------------------------- */
 
 V8M_EXPORT void *malloc(size_t size)
@@ -207,4 +309,29 @@ V8M_EXPORT void *reallocarray(void *ptr, size_t nmemb, size_t size)
 V8M_EXPORT size_t malloc_usable_size(void *ptr)
 {
 	return v8m_malloc_usable_size(ptr);
+}
+
+V8M_EXPORT void *aligned_alloc(size_t alignment, size_t size)
+{
+	return v8m_aligned_alloc(alignment, size);
+}
+
+V8M_EXPORT int posix_memalign(void **memptr, size_t alignment, size_t size)
+{
+	return v8m_posix_memalign(memptr, alignment, size);
+}
+
+V8M_EXPORT void *memalign(size_t alignment, size_t size)
+{
+	return v8m_memalign(alignment, size);
+}
+
+V8M_EXPORT void *valloc(size_t size)
+{
+	return v8m_valloc(size);
+}
+
+V8M_EXPORT void *pvalloc(size_t size)
+{
+	return v8m_pvalloc(size);
 }

@@ -18,6 +18,11 @@ V8MALLOC_1.0 {
 		v8m_realloc;
 		v8m_reallocarray;
 		v8m_malloc_usable_size;
+		v8m_aligned_alloc;
+		v8m_posix_memalign;
+		v8m_memalign;
+		v8m_valloc;
+		v8m_pvalloc;
 
 		malloc;
 		free;
@@ -25,6 +30,11 @@ V8MALLOC_1.0 {
 		realloc;
 		reallocarray;
 		malloc_usable_size;
+		aligned_alloc;
+		posix_memalign;
+		memalign;
+		valloc;
+		pvalloc;
 	local:
 		*;
 };

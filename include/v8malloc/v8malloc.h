@@ -84,6 +84,21 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size);
 V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size);
 V8M_EXPORT size_t v8m_malloc_usable_size(void *ptr);
 
+/*
+ * Aligned-allocation family. Same routing as v8m_malloc but the
+ * returned pointer is `alignment`-aligned. `alignment` must be a
+ * power of two; `posix_memalign` additionally requires `alignment`
+ * to be a multiple of sizeof(void *). The largest alignment v0
+ * supports is V8M_BUDDY_MAX_BLOCK (256 KiB) for size requests in
+ * the slab/buddy range and V8M_PAGE_SIZE / 2 (32 KiB) for larger
+ * sizes — requests beyond that return NULL with errno = EINVAL.
+ */
+V8M_EXPORT void *v8m_aligned_alloc(size_t alignment, size_t size);
+V8M_EXPORT int v8m_posix_memalign(void **memptr, size_t alignment, size_t size);
+V8M_EXPORT void *v8m_memalign(size_t alignment, size_t size);
+V8M_EXPORT void *v8m_valloc(size_t size);
+V8M_EXPORT void *v8m_pvalloc(size_t size);
+
 #ifdef __cplusplus
 }
 #endif

@@ -57,21 +57,32 @@ static_assert(sizeof(struct v8m_large_page_meta) <= V8M_SLAB_HEADER_SIZE,
  */
 #define V8M_LARGE_HUGE_TAG UINT16_MAX
 
-/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
-void *v8m_large_alloc(size_t size, uint64_t owner_thread)
+/*
+ * Round `value` up to the next multiple of `multiple`. `multiple`
+ * must be a power of two; the caller checks that.
+ */
+static size_t round_up_pow2(size_t value, size_t multiple)
 {
-	if (size == 0) {
-		return NULL;
-	}
+	return (value + multiple - 1U) & ~(multiple - 1U);
+}
+
+/*
+ * Shared backend used by v8m_large_alloc / v8m_large_alloc_aligned.
+ * `alignment` is a power of two, < V8M_PAGE_SIZE, or 0 for the
+ * default V8M_SLAB_HEADER_SIZE offset.
+ */
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+static void *large_alloc_with_offset(size_t size, size_t header_offset,
+				     uint64_t owner_thread)
+{
 	/* Overflow guard: need room for the header + size, then round
 	 * up to a page multiple. */
-	if (size > SIZE_MAX - V8M_SLAB_HEADER_SIZE - V8M_PAGE_SIZE) {
+	if (size > SIZE_MAX - header_offset - V8M_PAGE_SIZE) {
 		return NULL;
 	}
 
-	size_t total = V8M_SLAB_HEADER_SIZE + size;
-	size_t mmap_size =
-	    (total + V8M_PAGE_SIZE - 1U) & ~(size_t)(V8M_PAGE_SIZE - 1U);
+	size_t total = header_offset + size;
+	size_t mmap_size = round_up_pow2(total, V8M_PAGE_SIZE);
 
 	void *region = v8m_page_heap_alloc(mmap_size, V8M_PAGE_SIZE);
 	if (region == NULL) {
@@ -94,7 +105,43 @@ void *v8m_large_alloc(size_t size, uint64_t owner_thread)
 	meta->next = NULL;
 	meta->mmap_size = mmap_size;
 
-	return (unsigned char *)region + V8M_SLAB_HEADER_SIZE;
+	return (unsigned char *)region + header_offset;
+}
+
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+void *v8m_large_alloc(size_t size, uint64_t owner_thread)
+{
+	if (size == 0) {
+		return NULL;
+	}
+	return large_alloc_with_offset(size, V8M_SLAB_HEADER_SIZE,
+				       owner_thread);
+}
+
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+void *v8m_large_alloc_aligned(size_t size, size_t alignment,
+			      uint64_t owner_thread)
+{
+	if (size == 0) {
+		return NULL;
+	}
+	if (alignment == 0 || alignment <= V8M_SLAB_HEADER_SIZE) {
+		/* Default header offset already satisfies alignment <=
+		 * V8M_SLAB_HEADER_SIZE (which is a power of two). */
+		return large_alloc_with_offset(size, V8M_SLAB_HEADER_SIZE,
+					       owner_thread);
+	}
+	/* The header sits at region offset 0; the user pointer is at
+	 * offset header_offset. v8m_ptr_to_meta masks away the low
+	 * V8M_PAGE_SHIFT bits, so the meta is recoverable iff
+	 * header_offset < V8M_PAGE_SIZE. */
+	if (alignment >= V8M_PAGE_SIZE) {
+		return NULL;
+	}
+	/* alignment is a power of two > V8M_SLAB_HEADER_SIZE, so the
+	 * smallest multiple of alignment that admits the header is
+	 * `alignment` itself. */
+	return large_alloc_with_offset(size, alignment, owner_thread);
 }
 
 void v8m_large_free(const void *obj)
@@ -125,5 +172,11 @@ size_t v8m_large_usable_size(const void *obj)
 	const struct v8m_page_meta *common = v8m_ptr_to_meta(obj);
 	const struct v8m_large_page_meta *meta =
 	    (const struct v8m_large_page_meta *)common;
-	return meta->mmap_size - V8M_SLAB_HEADER_SIZE;
+	/* The user pointer sits at offset header_offset from the page
+	 * base; recover that offset from the pointer's low bits. For the
+	 * default path header_offset == V8M_SLAB_HEADER_SIZE, for the
+	 * aligned variant it equals the requested alignment. Both fit in
+	 * the page (< V8M_PAGE_SIZE), so the low-bits trick is exact. */
+	uintptr_t header_offset = (uintptr_t)obj & (V8M_PAGE_SIZE - 1U);
+	return meta->mmap_size - header_offset;
 }

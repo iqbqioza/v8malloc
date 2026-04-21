@@ -110,6 +110,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Aligned allocation family (`aligned_alloc`, `posix_memalign`,
+  `memalign`, `valloc`, `pvalloc`) plus matching `v8m_*`
+  variants. `v8m_dispatch_alloc_aligned` is the new entry
+  point: requests with alignment ≤ 16 collapse to the regular
+  malloc path; larger alignments either pick the smallest slab
+  class whose object size is divisible by the alignment, route
+  to the buddy pool (whose blocks are inherently power-of-two
+  aligned), or fall through to the new `v8m_large_alloc_aligned`
+  which widens the Large/Huge header offset to the requested
+  alignment while keeping the meta page-base-recoverable. The
+  supported alignment cap is V8M_BUDDY_MAX_BLOCK (256 KiB) for
+  buddy-eligible sizes and V8M_PAGE_SIZE/2 (32 KiB) for
+  Large/Huge sizes; requests beyond return NULL with errno set
+  to EINVAL or ENOMEM. `v8m_large_usable_size` now recovers the
+  header offset from the user pointer's low bits so the new
+  variable-offset allocations report correct sizes. Test suite
+  covers slab/buddy/large alignment paths, posix_memalign's
+  `EINVAL` paths (zero / non-power-of-two / non-`sizeof(void *)`
+  alignment, NULL memptr), the `*memptr` non-clobber on failure,
+  and valloc/pvalloc page-rounding behaviour.
+
 - Public POSIX allocation API (`malloc`, `free`, `calloc`,
   `realloc`, `reallocarray`, `malloc_usable_size`) plus the
   matching `v8m_`-prefixed variants. Both name groups route

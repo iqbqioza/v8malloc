@@ -62,6 +62,22 @@ void v8m_dispatch_destroy(struct v8m_dispatch *dispatch);
 void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size);
 
 /*
+ * Aligned variant. `alignment` must be a power of two; passing 0 or
+ * a value <= the natural malloc alignment behaves identically to
+ * v8m_dispatch_alloc. Routing:
+ *   - Slab path when a size class exists whose object size is at
+ *     least max(size, alignment) and is divisible by `alignment`.
+ *   - Buddy path when the rounded-up effective size fits and the
+ *     buddy level inherently satisfies the alignment.
+ *   - Large path with a widened header offset for alignments
+ *     between V8M_SLAB_HEADER_SIZE and V8M_PAGE_SIZE/2.
+ *   - Returns NULL when alignment exceeds the largest supported
+ *     value (V8M_BUDDY_MAX_BLOCK in v0).
+ */
+void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
+				 size_t alignment);
+
+/*
  * Free a previously-issued pointer. Tolerates NULL. Pointers that
  * neither pool owns are dropped silently in this cycle; the libc
  * fallback lands with the public API / init cycle.
