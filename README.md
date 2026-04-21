@@ -127,6 +127,19 @@ across eight sizes spanning every backend (8 B through 2 MiB).
 It links statically against the library so the numbers reflect
 the same code path direct consumers see.
 
+`bench/mb_02_scalability.c` sweeps thread counts at the
+spec's 64 B fixed size and reports total throughput,
+per-thread throughput, and the scalability ratio versus the
+1-thread baseline. The thread sweep is capped to
+`min(nproc, 32)` by default so small CI boxes do not thrash;
+set `V8M_BENCH_MAX_THREADS=128` to honour the spec exactly.
+
+```bash
+./build/bench/bench/mb_02_scalability
+V8M_BENCH_DURATION_MS=10000 \
+    ./build/bench/bench/mb_02_scalability   # 10s/config (spec)
+```
+
 LD_PRELOAD-style comparison runs (v8malloc vs glibc / jemalloc /
 mimalloc / tcmalloc) drop in cleanly because the bench links
 against the standard `malloc` / `free` symbols:
@@ -138,8 +151,14 @@ LD_PRELOAD=$(pwd)/path/to/libjemalloc.so \
 ```
 
 Knobs (env vars):
-- `V8M_BENCH_DURATION_MS` — per-size timing budget (default 250)
-- `V8M_BENCH_WARMUP_MS`   — warmup before timing (default 50)
+- `V8M_BENCH_DURATION_MS` — per-size / per-config timing budget
+  (MB-01 default 250, MB-02 default 1000)
+- `V8M_BENCH_WARMUP_MS`   — warmup before timing (MB-01 default
+  50, MB-02 default 100)
+- `V8M_BENCH_SIZE`        — MB-02 only, per-op allocation size
+  (default 64)
+- `V8M_BENCH_MAX_THREADS` — MB-02 only, cap on the thread sweep
+  (default `min(nproc, 32)`)
 
 Output is space-separated columns (size_bytes / iters /
 elapsed_us / ns_per_op / ops_per_sec) — easy to ingest into a

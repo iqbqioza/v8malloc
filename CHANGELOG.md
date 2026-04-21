@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- MB-02 multi-thread scalability benchmark
+  (`bench/mb_02_scalability.c`, benchmarks.md §2.2). Sweeps the
+  spec's 1 / 2 / 4 / 8 / 16 / 32 / 64 / 128 thread counts at the
+  fixed 64 B common-case size, reports total throughput,
+  per-thread throughput, and the scalability ratio anchored on
+  the 1-thread number. Each per-thread-count run barriers the
+  workers in, runs the alloc / write / free loop for the shared
+  duration, barriers them out, sums per-thread iters. The thread
+  sweep is capped to `min(nproc, 32)` by default so small CI
+  boxes do not spend wall time thrashing 128 contended threads;
+  `V8M_BENCH_MAX_THREADS=128` opts back into the spec range.
+  Knobs (env vars): `V8M_BENCH_DURATION_MS` (default 1000),
+  `V8M_BENCH_WARMUP_MS` (default 100), `V8M_BENCH_SIZE` (default
+  64), `V8M_BENCH_MAX_THREADS`. Reuses the `v8malloc_add_bench`
+  scaffolding from MB-01; CMakeLists explicitly links pthread.
+
 - Library project layout (`include/`, `src/`, `tests/`, `bench/`,
   `cmake/`, `man/`).
 - CMake build producing both shared and static libraries with semver

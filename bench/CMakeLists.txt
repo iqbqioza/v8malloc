@@ -36,3 +36,5 @@ function(v8malloc_add_bench name)
 endfunction()
 
 v8malloc_add_bench(mb_01_throughput)
+v8malloc_add_bench(mb_02_scalability)
+target_link_libraries(mb_02_scalability PRIVATE pthread)
