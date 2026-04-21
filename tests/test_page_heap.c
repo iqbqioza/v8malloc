@@ -170,6 +170,54 @@ static int check_advise_and_free_tolerate_null(void)
 	return 0;
 }
 
+static int check_owns_predicate(void)
+{
+	if (v8m_page_heap_owns(NULL)) {
+		return fail("owns(NULL) returned true");
+	}
+
+	void *ptr = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+	if (ptr == NULL) {
+		return fail("alloc for owns check returned NULL");
+	}
+	if (!v8m_page_heap_owns(ptr)) {
+		v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+		return fail("owns(start of region) returned false");
+	}
+	/* Mid-region and last byte must both register as owned. */
+	const unsigned char *mid =
+	    (const unsigned char *)ptr + (V8M_PAGE_SIZE / 2U);
+	if (!v8m_page_heap_owns(mid)) {
+		v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+		return fail("owns(mid) returned false");
+	}
+	const unsigned char *last =
+	    (const unsigned char *)ptr + (V8M_PAGE_SIZE - 1U);
+	if (!v8m_page_heap_owns(last)) {
+		v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+		return fail("owns(last byte) returned false");
+	}
+	/* The first byte just past the end is unowned. */
+	const unsigned char *past = (const unsigned char *)ptr + V8M_PAGE_SIZE;
+	if (v8m_page_heap_owns(past)) {
+		v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+		return fail("owns(end-exclusive) returned true");
+	}
+
+	/* A stack address — definitely never v8malloc-owned. */
+	int stack_local = 0;
+	if (v8m_page_heap_owns(&stack_local)) {
+		v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+		return fail("owns(stack address) returned true");
+	}
+
+	v8m_page_heap_free(ptr, V8M_PAGE_SIZE);
+	if (v8m_page_heap_owns(ptr)) {
+		return fail("owns(freed pointer) returned true");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_alignment();
@@ -192,5 +240,8 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_advise_and_free_tolerate_null();
+	/* check_advise_and_free_tolerate_null only ever returns 0;
+	 * cppcheck flags the post-call status check as dead code. */
+	(void)check_advise_and_free_tolerate_null();
+	return check_owns_predicate();
 }

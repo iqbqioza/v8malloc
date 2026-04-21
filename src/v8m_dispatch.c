@@ -17,7 +17,9 @@
 #include "v8m_dispatch.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
+#include "v8m_libc_fallback.h"
 #include "v8m_page.h"
+#include "v8m_page_heap.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
 
@@ -139,6 +141,15 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 		return;
 	}
 
+	/* Safe foreign-vs-ours decision via the page-heap region
+	 * map. Without this, the magic-check read below could fault
+	 * on a foreign pointer whose page-aligned base sits in an
+	 * unmapped page. */
+	if (!v8m_page_heap_owns(ptr)) {
+		v8m_libc_free(ptr);
+		return;
+	}
+
 	struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
 	if (v8m_page_meta_valid(meta)) {
 		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
@@ -152,21 +163,11 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 		return;
 	}
 
-	/* No magic at the page base — could be a buddy allocation
-	 * (buddy arenas don't stamp v8m_page_meta) or a foreign
-	 * pointer. Try the buddy pool's range check. */
-	if (v8m_buddy_pool_free(&dispatch->buddy, ptr)) {
-		return;
-	}
-
-	/* Foreign pointer — silently dropped for v0. The libc
-	 * fallback (v8m_libc_free) is captured at constructor time
-	 * but cannot be used safely from this branch yet: the magic
-	 * check above reads through `meta`, which faults if the
-	 * truly-foreign pointer's page-aligned base sits in an
-	 * unmapped page. Wiring the fallback in here requires the
-	 * page-heap region map (open question #1 in TODO.md) so the
-	 * foreign-vs-ours decision is made before any read. */
+	/* No magic at the page base — must be a buddy allocation
+	 * (buddy arenas don't stamp v8m_page_meta). The page-heap
+	 * ownership check above already excluded foreign pointers,
+	 * so this is the only remaining backend. */
+	(void)v8m_buddy_pool_free(&dispatch->buddy, ptr);
 }
 
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)

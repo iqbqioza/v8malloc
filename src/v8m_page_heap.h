@@ -5,16 +5,17 @@
  * architecture.md §2.4.
  *
  * This module provides the raw allocation / free / advise primitives
- * plus lifetime statistics. Region tracking for foreign-pointer
- * detection (the v8m_region_map referenced in architecture.md) is
- * open question #1 in TODO.md and is deferred to a dedicated cycle;
- * until then, foreign-pointer detection relies on bootstrap
- * range-check + page-metadata magic check.
+ * plus lifetime statistics, and a region map that records every live
+ * (start, length) range so foreign-pointer detection on the free
+ * path can decide ownership without reading at the pointer's
+ * page-aligned base — that read faults for truly-foreign pointers
+ * whose page base sits in an unmapped page.
  */
 
 #ifndef V8M_PAGE_HEAP_H
 #define V8M_PAGE_HEAP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -65,5 +66,20 @@ struct v8m_page_heap_stats {
  * inconsistent by a small amount.
  */
 void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
+
+/*
+ * Region map — every successful v8m_page_heap_alloc records the
+ * returned (start, length) range in an internal table; v8m_page_heap_free
+ * removes the matching entry. v8m_page_heap_owns is a safe predicate
+ * that callers consult before reading at a pointer's page-aligned
+ * base on the free path — without ownership confirmation, the
+ * read can fault on truly-foreign pointers whose base sits in an
+ * unmapped page.
+ *
+ * The lookup is a linear scan under a per-process mutex (≤ a few
+ * thousand live regions in v0); a radix-tree replacement is the
+ * follow-on optimization once region count grows.
+ */
+bool v8m_page_heap_owns(const void *ptr);
 
 #endif /* V8M_PAGE_HEAP_H */

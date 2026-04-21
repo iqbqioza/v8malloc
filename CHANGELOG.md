@@ -110,6 +110,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Page-heap region map (`v8m_page_heap_owns`). Every successful
+  `v8m_page_heap_alloc` now records its returned range in a
+  bounded array (cap: 4096 live regions; mutex-protected linear
+  scan on lookup), and `v8m_page_heap_free` removes the matching
+  entry via swap-remove. The new `v8m_page_heap_owns` predicate
+  lets the dispatcher decide foreign-vs-ours on the free path
+  without reading at the pointer's page-aligned base — the magic
+  check that would follow faults on truly-foreign pointers whose
+  base lies in an unmapped page. On region-table overflow the
+  page-heap alloc rolls the mmap back and returns NULL, keeping
+  the invariant that every live pointer is classifiable.
+
+- Foreign-pointer free is safe again. `v8m_dispatch_free` now
+  calls `v8m_page_heap_owns` first: if the pointer never came
+  from our mmap, it is forwarded to the captured
+  `v8m_libc_free`, resolving the crash risk that forced last
+  cycle's silent-drop revert. The dispatcher's doc comment now
+  reflects the three-step routing (owns → magic check → buddy).
+  Tests that were held back last cycle re-enter the suite — the
+  check for libc-allocated pointers fed through the overridden
+  free() runs four size buckets that span libc's small/large-bin
+  split without crashing.
+
+- Open question #1 (region map representation) resolved in
+  favor of a bounded array + linear scan for v0; upgrade to a
+  radix tree deferred until live-region count or foreign-free
+  rate make the O(N) cost visible.
+
 - Fork safety via `pthread_atfork`. The library constructor now
   registers a triple of handlers that acquire the slab pool and
   buddy pool mutexes (in fixed slab→buddy order) before fork()

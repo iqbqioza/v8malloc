@@ -6,17 +6,16 @@
  * pool that owns the pointer.
  *
  * Free dispatch goes:
- *   1. v8m_ptr_to_meta + magic check. If valid, the page belongs to
+ *   1. v8m_page_heap_owns. If false, the pointer never came from
+ *      our mmap, so forward it to the captured libc free without
+ *      reading through it. This guards step 2 against faults on
+ *      truly-foreign pointers whose page-aligned base is unmapped.
+ *   2. v8m_ptr_to_meta + magic check. If valid, the page belongs to
  *      either the slab pool (size_class < V8M_MEDIUM_FIRST_CLASS) or
  *      the Large/Huge direct path. Route accordingly.
- *   2. Otherwise try the buddy pool's range-check ownership; on
- *      success it owned and freed.
- *   3. Otherwise the pointer is foreign — silently dropped for v0.
- *      The libc fallback captured by v8m_libc_fallback_init is
- *      ready, but routing here is unsafe until the page-heap
- *      region map (TODO.md open question #1) lands: the magic
- *      check in step 1 reads at the page base, which faults for
- *      truly-foreign pointers whose page-aligned base is unmapped.
+ *   3. Otherwise the page-heap-owned pointer must belong to a buddy
+ *      arena (buddy arenas don't stamp v8m_page_meta), so the
+ *      buddy pool's range-check free is invoked unconditionally.
  *
  * This is the single-threaded baseline — every operation goes
  * through the slab/buddy pools' per-pool mutexes. The TLC + L2 core

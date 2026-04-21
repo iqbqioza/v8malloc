@@ -6,6 +6,7 @@
  * tuning purposes.
  */
 
+#include <pthread.h> /* IWYU pragma: keep */
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,6 +22,76 @@ static _Atomic uint64_t v8m_munmap_calls = 0;
 static _Atomic uint64_t v8m_advise_calls = 0;
 static _Atomic uint64_t v8m_bytes_mapped = 0;
 static _Atomic uint64_t v8m_bytes_unmapped = 0;
+
+/*
+ * Region map. Bounded array of (start, end) tuples kept in
+ * arbitrary order. Linear scan on lookup; O(N) is acceptable while
+ * N stays under ~a few thousand. The cap is sized for v0; the
+ * radix-tree replacement comes when production workloads start
+ * crossing it.
+ */
+#define V8M_REGION_MAP_CAPACITY 4096
+
+struct region_entry {
+	uintptr_t start;
+	uintptr_t end; /* exclusive */
+};
+
+static struct region_entry g_regions[V8M_REGION_MAP_CAPACITY];
+static size_t g_region_count;
+/* pthread.h is the conventional provider for pthread_mutex_t;
+ * clang-tidy's IWYU rule prefers the deeper bits/pthreadtypes.h
+ * which is an internal glibc header. */
+static pthread_mutex_t g_region_lock = /* NOLINT(misc-include-cleaner) */
+    PTHREAD_MUTEX_INITIALIZER;
+
+static int region_register(void *ptr, size_t bytes)
+{
+	(void)pthread_mutex_lock(&g_region_lock);
+	if (g_region_count >= V8M_REGION_MAP_CAPACITY) {
+		(void)pthread_mutex_unlock(&g_region_lock);
+		return -1;
+	}
+	uintptr_t start = (uintptr_t)ptr;
+	g_regions[g_region_count].start = start;
+	g_regions[g_region_count].end = start + bytes;
+	g_region_count++;
+	(void)pthread_mutex_unlock(&g_region_lock);
+	return 0;
+}
+
+static void region_unregister(const void *ptr)
+{
+	uintptr_t start = (uintptr_t)ptr;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 0; i < g_region_count; i++) {
+		if (g_regions[i].start == start) {
+			/* Swap-remove to keep the lookup scan
+			 * compact. Order in the array does not matter. */
+			g_regions[i] = g_regions[--g_region_count];
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+}
+
+bool v8m_page_heap_owns(const void *ptr)
+{
+	if (ptr == NULL) {
+		return false;
+	}
+	uintptr_t addr = (uintptr_t)ptr;
+	(void)pthread_mutex_lock(&g_region_lock);
+	bool owned = false;
+	for (size_t i = 0; i < g_region_count; i++) {
+		if (addr >= g_regions[i].start && addr < g_regions[i].end) {
+			owned = true;
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+	return owned;
+}
 
 static bool is_power_of_two(size_t value)
 {
@@ -79,7 +150,18 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 	}
 
 	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-	return (void *)aligned;
+	void *result = (void *)aligned;
+	if (region_register(result, bytes) != 0) {
+		/* Region table is full — undo the mmap so the caller
+		 * never sees a pointer the foreign-detection path
+		 * can't classify. The cap is generous (4096 live
+		 * regions) and crossing it points at either a leak or a
+		 * workload that needs the radix-tree replacement. */
+		(void)munmap(result, bytes);
+		record_munmap(bytes);
+		return NULL;
+	}
+	return result;
 }
 
 void v8m_page_heap_free(void *ptr, size_t bytes)
@@ -87,6 +169,7 @@ void v8m_page_heap_free(void *ptr, size_t bytes)
 	if (ptr == NULL || bytes == 0) {
 		return;
 	}
+	region_unregister(ptr);
 	(void)munmap(ptr, bytes);
 	record_munmap(bytes);
 }
