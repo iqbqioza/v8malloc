@@ -30,6 +30,7 @@
 #include "v8m_config.h"
 #include "v8m_dispatch.h"
 #include "v8m_libc_fallback.h"
+#include "v8m_numa.h"
 #include "v8m_page_heap.h"
 #include "v8malloc/v8malloc.h"
 
@@ -82,6 +83,7 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	 * to the bootstrap path. */
 	v8m_libc_fallback_init();
 	v8m_config_init();
+	v8m_numa_init();
 	if (v8m_dispatch_init(&g_dispatch) != 0) {
 		abort_with("v8malloc: dispatch init failed\n");
 	}

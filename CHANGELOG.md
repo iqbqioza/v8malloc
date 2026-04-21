@@ -110,6 +110,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- NUMA topology detection (`v8m_numa_init`,
+  `v8m_numa_node_count`, `v8m_numa_node_for_cpu`,
+  `v8m_numa_current_node`). The library constructor scans
+  `/sys/devices/system/node/nodeN/cpulist` once and populates a
+  static cpu→node table; readers are lock-free constant-time
+  array lookups, with `v8m_numa_current_node` wrapping
+  `sched_getcpu()` and the cached map. The vDSO fast-path /
+  refresh-on-N-th-call optimization called for in
+  `.claude/docs/numa.md` §2.2 lands later. When sysfs is
+  absent (containers, NUMA disabled in the kernel) the module
+  reports a single uniform node so every caller follows the
+  non-NUMA code path. Caps: 64 nodes, 4096 CPUs (well above any
+  current Linux box). New `test_numa` validates idempotent init,
+  out-of-range fallbacks, and the invariant that every cpu→node
+  result is < node count. Per-NUMA pool sharding and
+  `mbind(MPOL_BIND, …)` build on top of this in a follow-on
+  cycle.
+
 - glibc statistics & tuning extensions: `mallinfo`, `mallinfo2`,
   `mallopt`, `malloc_stats`, `malloc_info`, and `malloc_trim`.
   All routed through a shared `v8m_collect_live_stats` snapshot of
