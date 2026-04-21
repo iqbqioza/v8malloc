@@ -72,6 +72,30 @@ V8MALLOC_1.0 {
 		__libc_memalign;
 		__libc_valloc;
 		__libc_pvalloc;
+
+		/* C++ Itanium-ABI mangled names: non-throwing
+		 * variants of operator new / delete. The throwing
+		 * forms (_Znwm, _Znam, _ZnwmSt11align_val_t,
+		 * _ZnamSt11align_val_t) stay in libstdc++ because we
+		 * can't construct std::bad_alloc from C; libstdc++'s
+		 * implementations call malloc internally and pick up
+		 * v8malloc transparently. */
+		_ZdlPv;
+		_ZdaPv;
+		_ZdlPvm;
+		_ZdaPvm;
+		_ZdlPvSt11align_val_t;
+		_ZdaPvSt11align_val_t;
+		_ZdlPvmSt11align_val_t;
+		_ZdaPvmSt11align_val_t;
+		_ZnwmRKSt9nothrow_t;
+		_ZnamRKSt9nothrow_t;
+		_ZdlPvRKSt9nothrow_t;
+		_ZdaPvRKSt9nothrow_t;
+		_ZnwmSt11align_val_tRKSt9nothrow_t;
+		_ZnamSt11align_val_tRKSt9nothrow_t;
+		_ZdlPvSt11align_val_tRKSt9nothrow_t;
+		_ZdaPvSt11align_val_tRKSt9nothrow_t;
 	local:
 		*;
 };

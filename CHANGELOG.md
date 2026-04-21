@@ -110,6 +110,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- C++ Itanium-ABI mangled aliases for the non-throwing operator
+  new / delete variants. Sixteen new exports under V8MALLOC_1.0
+  cover sized delete (C++14), aligned new/delete (C++17),
+  nothrow new/delete (`std::nothrow_t` overloads), and the
+  combined sized+aligned and nothrow+aligned deletes:
+
+      _ZdlPv  _ZdaPv  _ZdlPvm  _ZdaPvm
+      _ZdlPvSt11align_val_t  _ZdaPvSt11align_val_t
+      _ZdlPvmSt11align_val_t _ZdaPvmSt11align_val_t
+      _ZnwmRKSt9nothrow_t    _ZnamRKSt9nothrow_t
+      _ZdlPvRKSt9nothrow_t   _ZdaPvRKSt9nothrow_t
+      _ZnwmSt11align_val_tRKSt9nothrow_t
+      _ZnamSt11align_val_tRKSt9nothrow_t
+      _ZdlPvSt11align_val_tRKSt9nothrow_t
+      _ZdaPvSt11align_val_tRKSt9nothrow_t
+
+  All implemented as thin wrappers around `v8m_free` /
+  `v8m_malloc` / `v8m_aligned_alloc` (the void-pointer-only
+  delete forms use `__attribute__((alias("v8m_free")))` directly).
+  The throwing forms (`_Znwm`, `_Znam`,
+  `_ZnwmSt11align_val_t`, `_ZnamSt11align_val_t`) intentionally
+  stay in libstdc++ — they need to construct `std::bad_alloc` on
+  failure and that requires the C++ runtime; libstdc++'s
+  shipping implementations call `malloc` internally and pick up
+  v8malloc transparently through the LD_PRELOAD chain.
+
+- Memory-pressure stress test (`tests/test_memory_pressure.c`,
+  benchmarks.md §4 ST-02). Five-phase scenario: build a working
+  set of Large-class allocations, plant a soft limit at the
+  current `live_bytes` (zero headroom), assert the next sizeable
+  allocation fails with `errno = ENOMEM`, free part of the set
+  and confirm the same allocation succeeds, install an OOM
+  handler that releases a working-set slot on demand and verify
+  the retry path lets the request through, then drain everything
+  and confirm `live_bytes` returns within 1 MiB of the
+  pre-test baseline. Working-set slots use the Large direct-mmap
+  path (> 256 KiB) so freeing one slot drops `live_bytes`
+  immediately — buddy-pool sizes wouldn't release until the
+  whole arena drained, which would defeat the recovery check.
+
 - libFuzzer driver (`tests/fuzz_alloc.c` +
   `V8MALLOC_BUILD_FUZZ`). Each `LLVMFuzzerTestOneInput` call
   interprets the input bytes as an instruction stream over a

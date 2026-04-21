@@ -54,6 +54,7 @@ v8malloc_add_test(test_fork)
 v8malloc_add_test(test_numa)
 v8malloc_add_test(test_threading)
 v8malloc_add_test(test_thread_churn)
+v8malloc_add_test(test_memory_pressure)
 
 # libFuzzer driver. clang-only; the top-level CMakeLists guards
 # the option with a fatal error on non-clang compilers, so we just
