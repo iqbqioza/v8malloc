@@ -7,6 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Exhaustive alignment-sweep test (`tests/test_alignment.c`).
+  Walks every power-of-two alignment from 16 (max_align_t) up to
+  V8M_BUDDY_MAX_BLOCK across five representative request sizes
+  that hit each backend (slab Tiny, slab Small, buddy Medium,
+  buddy boundary, Large mmap), covering `aligned_alloc`,
+  `posix_memalign`, `memalign`, `valloc`, and `pvalloc`. For every
+  accepted (alignment, size) pair, asserts the returned pointer
+  satisfies the alignment, round-trips a `memset` + `free`, and
+  (for posix_memalign) leaves `*memptr` unclobbered on every
+  EINVAL path. A `combo_supported` predicate skips combinations
+  the dispatcher rejects (alignment > V8M_BUDDY_MAX_BLOCK overall,
+  alignment > V8M_PAGE_SIZE/2 for Large); the over-cap behaviour
+  is exercised by a separate oversize-rejection check.
+  Complements the basic happy-path coverage in `test_api.c` —
+  test_alignment is the contract: a future refactor of the buddy /
+  large routing cannot weaken the alignment guarantee on any cell
+  of the matrix without this test catching it.
+
 - MB-02 multi-thread scalability benchmark
   (`bench/mb_02_scalability.c`, benchmarks.md §2.2). Sweeps the
   spec's 1 / 2 / 4 / 8 / 16 / 32 / 64 / 128 thread counts at the
