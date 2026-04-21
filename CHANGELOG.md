@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- ST-01 stability soak test (`tests/test_soak.c`). Runs the
+  MB-04 mixed-size workload for a configurable budget — 2 s by
+  default so every PR run pays for it, env-override
+  (`V8M_SOAK_DURATION_MS`) up to the spec's 24 hours — sampling
+  `v8m_get_stats.live_regions` every 500 ms against a cap that
+  scales with `live_count` (leak-induced growth surfaces within
+  seconds, not days). After a full post-run drain the test
+  asserts `live_bytes` returns within 1 MiB of baseline and
+  `live_regions` matches baseline exactly; both would flag a
+  per-cycle leak. Knobs: `V8M_SOAK_DURATION_MS` (default 2000),
+  `V8M_SOAK_LIVE_COUNT` (default 2000, capped at 1 M),
+  `V8M_SOAK_SEED` (default 0x5041). Ran 10 M ops in the default
+  2 s budget with peak live_regions = 97 (cap = 4 064) and
+  zero leak on drain.
+
 - MB-07 NUMA local-allocation-rate benchmark
   (`bench/mb_07_numa_local.c`, benchmarks.md §2.7).
   Single-thread; for each allocation, touches the first byte to
