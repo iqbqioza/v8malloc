@@ -76,6 +76,25 @@ make cppcheck       # cppcheck
 make lint           # all of the above
 ```
 
+## Fuzzing
+
+```bash
+make fuzz                   # 60-second smoke run (clang + UBSan)
+FUZZ_TIME=600 make fuzz     # 10-minute campaign
+```
+
+Builds a libFuzzer driver (`tests/fuzz_alloc.c`) that drives the
+public allocation API with random sequences of malloc / calloc /
+realloc / free / aligned_alloc, verifying byte patterns across
+calls so a use-after-free or two-slot aliasing bug aborts the
+run. The default configuration combines `V8MALLOC_BUILD_FUZZ` with
+`V8MALLOC_BUILD_UBSAN` so undefined behaviour discovered along
+any explored path also fails the run.
+
+Requires clang plus the libFuzzer runtime (`libclang-rt-N-dev` on
+Debian-derived distros). v0 fuzzes the driver only; instrumenting
+the full library for coverage-guided fuzzing is a follow-on cycle.
+
 ## Coverage
 
 ```bash

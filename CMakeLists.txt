@@ -57,6 +57,13 @@ option(V8MALLOC_BUILD_TSAN "Build with ThreadSanitizer" OFF)
 # should be enabled at once.
 option(V8MALLOC_BUILD_COVERAGE "Instrument for gcov / lcov coverage" OFF)
 
+# libFuzzer-based randomized allocator driver. Requires clang;
+# adds `-fsanitize=fuzzer` to the fuzz target only and combines
+# cleanly with V8MALLOC_BUILD_UBSAN (the typical configuration is
+# both flags on at once so the fuzzer catches UB on misshapen
+# alloc/free sequences).
+option(V8MALLOC_BUILD_FUZZ "Build the libFuzzer driver (requires clang)" OFF)
+
 if(NOT V8MALLOC_BUILD_SHARED AND NOT V8MALLOC_BUILD_STATIC)
 	message(FATAL_ERROR
 		"At least one of V8MALLOC_BUILD_SHARED / V8MALLOC_BUILD_STATIC must be ON")
@@ -92,6 +99,17 @@ if(V8MALLOC_BUILD_COVERAGE)
 	# Clang; CMake propagates it through to both compile and link.
 	add_compile_options(--coverage -O0 -g)
 	add_link_options(--coverage)
+endif()
+
+if(V8MALLOC_BUILD_FUZZ)
+	if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+		message(FATAL_ERROR
+			"V8MALLOC_BUILD_FUZZ requires clang (libfuzzer is clang-only)")
+	endif()
+	if(V8MALLOC_BUILD_TSAN)
+		message(FATAL_ERROR
+			"V8MALLOC_BUILD_FUZZ is incompatible with V8MALLOC_BUILD_TSAN")
+	endif()
 endif()
 
 # --- Per-architecture compile flags (platform-abstraction.md §5.2) ------------
@@ -288,6 +306,15 @@ file(GLOB_RECURSE V8MALLOC_C_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
 	"${CMAKE_CURRENT_SOURCE_DIR}/tests/*.c"
 	"${CMAKE_CURRENT_SOURCE_DIR}/bench/*.c"
+)
+
+# fuzz_alloc.c only compiles under -fsanitize=fuzzer, which is
+# off in the dev/tidy build, so it's absent from
+# compile_commands.json — clang-tidy reports it as "file not
+# found". The format / format-check targets still cover it via
+# V8MALLOC_ALL_SOURCES; only the tidy entry needs to skip.
+list(REMOVE_ITEM V8MALLOC_C_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz_alloc.c"
 )
 
 add_custom_target(format

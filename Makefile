@@ -1,4 +1,4 @@
-.PHONY: all dev release test format format-check tidy cppcheck lint coverage clean
+.PHONY: all dev release test format format-check tidy cppcheck lint coverage fuzz clean
 
 all: dev
 
@@ -56,6 +56,23 @@ coverage:
 	else \
 		echo "lcov / genhtml not found; raw .gcda files in build/coverage/"; \
 	fi
+
+# Fuzz flow: configure with V8MALLOC_BUILD_FUZZ=ON + UBSan via
+# clang, build the driver, run a 60-second smoke iteration. Longer
+# campaigns drop FUZZ_TIME on the command line:
+#     FUZZ_TIME=600 make fuzz
+FUZZ_TIME ?= 60
+fuzz:
+	cmake -S . -B build/fuzz \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_BUILD_TYPE=Debug \
+		-DV8MALLOC_BUILD_FUZZ=ON \
+		-DV8MALLOC_BUILD_UBSAN=ON
+	cmake --build build/fuzz --target fuzz_alloc
+	./build/fuzz/tests/fuzz_alloc \
+		-max_total_time=$(FUZZ_TIME) \
+		-rss_limit_mb=2048 \
+		-print_final_stats=1
 
 clean:
 	rm -rf build

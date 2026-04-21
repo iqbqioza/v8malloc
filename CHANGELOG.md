@@ -110,6 +110,32 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- libFuzzer driver (`tests/fuzz_alloc.c` +
+  `V8MALLOC_BUILD_FUZZ`). Each `LLVMFuzzerTestOneInput` call
+  interprets the input bytes as an instruction stream over a
+  table of 32 live pointer slots; supported ops cover every
+  backend-routed entry — `malloc`, `free`, `realloc`, `calloc`,
+  `aligned_alloc` — with sizes derived from the input so the
+  fuzzer naturally explores every size class, the buddy boundary,
+  the Large/Huge cutoff, and the alignment guard rails. Per-slot
+  byte patterns are stamped after every alloc / realloc and
+  re-verified before any subsequent op on the same slot, so a
+  use-after-free or two-slot aliasing bug surfaces as a pattern
+  mismatch. State persists across invocations to deepen the
+  search space.
+
+  New `make fuzz` target rebuilds with clang + UBSan + libFuzzer
+  and runs a 60-second smoke (`FUZZ_TIME=600 make fuzz` for
+  longer campaigns). Initial 30 008-iteration smoke run completed
+  in 31 seconds with no crashes and no UB. Requires
+  `libclang-rt-N-dev` for the libFuzzer runtime — gcc is rejected
+  with a fatal CMake error since libFuzzer is clang-only.
+
+  README §Fuzzing documents the workflow. fuzz_alloc.c is excluded
+  from the dev tidy run (it only compiles with `-fsanitize=fuzzer`
+  so it's absent from the dev compile_commands.json); format /
+  format-check still cover it.
+
 - Distance-ordered NUMA fallback (numa.md §5.2). The library
   constructor now also reads
   `/sys/devices/system/node/nodeN/distance` for every detected

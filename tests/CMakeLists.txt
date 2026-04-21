@@ -55,6 +55,21 @@ v8malloc_add_test(test_numa)
 v8malloc_add_test(test_threading)
 v8malloc_add_test(test_thread_churn)
 
+# libFuzzer driver. clang-only; the top-level CMakeLists guards
+# the option with a fatal error on non-clang compilers, so we just
+# add the target when the option is on. The fuzzer flag goes on
+# both the compile and link line of the driver only — the rest of
+# the test suite uses regular compilation.
+if(V8MALLOC_BUILD_FUZZ)
+	add_executable(fuzz_alloc fuzz_alloc.c)
+	target_link_libraries(fuzz_alloc PRIVATE ${V8MALLOC_TEST_LIBRARY})
+	target_compile_options(fuzz_alloc PRIVATE
+		-Wall -Wextra -Wpedantic -Wshadow
+		-fsanitize=fuzzer
+	)
+	target_link_options(fuzz_alloc PRIVATE -fsanitize=fuzzer)
+endif()
+
 # LD_PRELOAD interposition test. preload_target is a standalone
 # program with no compile-time link to v8malloc; the test runner
 # injects libv8malloc.so via LD_PRELOAD and the program verifies
