@@ -99,6 +99,75 @@ V8M_EXPORT void *v8m_memalign(size_t alignment, size_t size);
 V8M_EXPORT void *v8m_valloc(size_t size);
 V8M_EXPORT void *v8m_pvalloc(size_t size);
 
+/* --- Runtime configuration -------------------------------------- */
+
+#include <stdint.h>
+
+/*
+ * Tunables. Values are seeded from the V8M_* environment variables
+ * at library init (see man v8malloc(3)) and can be overridden at
+ * runtime through v8m_set_option. The integer ids are stable
+ * across v0; new options may be appended within a major release.
+ */
+enum v8m_option {
+	V8M_OPT_VERBOSE = 0,	   /* 0 / 1 — emit diagnostics to stderr */
+	V8M_OPT_PURGE_INTERVAL,	   /* seconds between background purges */
+	V8M_OPT_THREAD_CACHE_MAX,  /* max objects held per TLC bin */
+	V8M_OPT_HUGE_PAGES,	   /* 0 / 1 — try MAP_HUGETLB / MADV_HUGEPAGE */
+	V8M_OPT_NUMA_AWARE,	   /* 0 / 1 — bind allocations to local node */
+	V8M_OPT_DEBUG,		   /* 0 / 1 — guard pages, double-free checks */
+	V8M_OPT_PROFILE,	   /* 0 / 1 — emit allocation profile */
+	V8M_OPT_COMPACT_THRESHOLD, /* page utilization % below which a
+				    * page becomes a compaction candidate */
+	V8M_OPT_COUNT
+};
+
+/*
+ * Set the tunable identified by `opt` to `value`. Returns 0 on
+ * success or -1 with errno set to EINVAL if `opt` is out-of-range.
+ * Pre-init (before our constructor runs) the call always returns
+ * -1 with EAGAIN — callers should defer until after main() starts
+ * or set the corresponding V8M_* environment variable.
+ */
+V8M_EXPORT int v8m_set_option(int opt, int64_t value);
+
+/*
+ * Read a tunable into `*out`. Same return semantics as
+ * v8m_set_option. `out` must be non-NULL.
+ */
+V8M_EXPORT int v8m_get_option(int opt, int64_t *out);
+
+/* --- Runtime statistics ----------------------------------------- */
+
+/*
+ * Snapshot of allocator-wide counters. All fields are monotonic
+ * across the process lifetime except `live_regions` and
+ * `live_bytes`, which reflect the current set of mmap'd regions.
+ */
+struct v8m_stats {
+	uint64_t mmap_calls;
+	uint64_t munmap_calls;
+	uint64_t advise_calls;
+	uint64_t bytes_mapped;
+	uint64_t bytes_unmapped;
+	uint64_t live_regions;
+	uint64_t live_bytes;
+};
+
+/*
+ * Snapshot the statistics into `*out`. Tolerates a NULL pointer
+ * by no-op'ing. Pre-init returns all zeroes.
+ */
+V8M_EXPORT void v8m_get_stats(struct v8m_stats *out);
+
+/*
+ * Print a human-readable summary to stderr — equivalent to
+ * malloc_stats(), kept under the v8m_ namespace so users can
+ * call it explicitly without relying on glibc's deprecated
+ * mallinfo path.
+ */
+V8M_EXPORT void v8m_dump_stats(void);
+
 #ifdef __cplusplus
 }
 #endif

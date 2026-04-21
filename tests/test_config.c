@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "v8m_config.h"
+#include "v8malloc/v8malloc.h"
 
 static int fail(const char *msg)
 {

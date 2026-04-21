@@ -110,6 +110,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Public configuration & statistics API. New `v8m_set_option` /
+  `v8m_get_option` thin-forward to `v8m_config_set/get`; new
+  `v8m_get_stats(struct v8m_stats *)` exposes the page-heap
+  counters and live-region count via the public header without
+  the caller having to go through the glibc-deprecated
+  `mallinfo` path. `v8m_dump_stats` is the namespaced sibling of
+  `malloc_stats`. The `enum v8m_option` (V8M_OPT_VERBOSE,
+  V8M_OPT_PURGE_INTERVAL, …) moves to the public header as the
+  canonical definition; the internal `src/v8m_config.h`
+  re-includes it instead of redefining, so internal code keeps
+  the same V8M_OPT_* names with no duplication. Out-of-range
+  option ids return -1 with `errno = EINVAL`; pre-init calls to
+  the setter / getter return -1 with `errno = EAGAIN`. All four
+  symbols ship in the V8MALLOC_1.0 linker version node. Tests
+  in `test_api` cover the round-trip, error paths, NULL out
+  pointer, and that `v8m_get_stats.live_regions` advances after
+  a Large allocation.
+
 - NUMA topology detection (`v8m_numa_init`,
   `v8m_numa_node_count`, `v8m_numa_node_for_cpu`,
   `v8m_numa_current_node`). The library constructor scans

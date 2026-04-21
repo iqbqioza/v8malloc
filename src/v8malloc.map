@@ -23,6 +23,10 @@ V8MALLOC_1.0 {
 		v8m_memalign;
 		v8m_valloc;
 		v8m_pvalloc;
+		v8m_set_option;
+		v8m_get_option;
+		v8m_get_stats;
+		v8m_dump_stats;
 
 		malloc;
 		free;

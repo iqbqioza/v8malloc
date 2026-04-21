@@ -22,18 +22,13 @@
 
 #include <stdint.h>
 
-enum v8m_option {
-	V8M_OPT_VERBOSE = 0,	  /* 0 / 1 — emit diagnostics to stderr */
-	V8M_OPT_PURGE_INTERVAL,	  /* seconds between background purges */
-	V8M_OPT_THREAD_CACHE_MAX, /* max objects held per bin in the TLC */
-	V8M_OPT_HUGE_PAGES, /* 0 / 1 — try MAP_HUGETLB / madvise(HUGEPAGE) */
-	V8M_OPT_NUMA_AWARE, /* 0 / 1 — bind allocations to local node */
-	V8M_OPT_DEBUG,	    /* 0 / 1 — guard pages, double-free checks, ... */
-	V8M_OPT_PROFILE,    /* 0 / 1 — emit allocation profile */
-	V8M_OPT_COMPACT_THRESHOLD, /* page utilization % below which a
-				    * page is a compaction candidate */
-	V8M_OPT_COUNT
-};
+/*
+ * The option identifiers (V8M_OPT_*) are the canonical public
+ * enum, defined in <v8malloc/v8malloc.h>. The internal config
+ * layer uses the same set so that v8m_set_option / v8m_get_option
+ * are pure forwarders without an id translation step.
+ */
+#include "v8malloc/v8malloc.h"
 
 /*
  * Read every V8M_* environment variable and apply the value (or its

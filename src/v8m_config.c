@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "v8m_config.h"
+#include "v8malloc/v8malloc.h"
 
 static const int64_t v8m_config_defaults[V8M_OPT_COUNT] = {
     [V8M_OPT_VERBOSE] = 0,

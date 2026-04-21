@@ -327,6 +327,74 @@ V8M_EXPORT void *v8m_pvalloc(size_t size)
 	return v8m_aligned_alloc(page, rounded);
 }
 
+/* --- v8m_-prefixed configuration & stats -------------------------- */
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT int v8m_set_option(int opt, int64_t value)
+{
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
+	if (opt < 0 || opt >= V8M_OPT_COUNT) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (v8m_config_set((enum v8m_option)opt, value) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT int v8m_get_option(int opt, int64_t *out)
+{
+	if (out == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (opt < 0 || opt >= V8M_OPT_COUNT) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
+	*out = v8m_config_get((enum v8m_option)opt);
+	return 0;
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT void v8m_get_stats(struct v8m_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	struct v8m_page_heap_stats stats = {0};
+	size_t live_regions = 0;
+	if (dispatch_ready()) {
+		v8m_page_heap_get_stats(&stats);
+		live_regions = v8m_page_heap_live_region_count();
+	}
+	out->mmap_calls = stats.mmap_calls;
+	out->munmap_calls = stats.munmap_calls;
+	out->advise_calls = stats.advise_calls;
+	out->bytes_mapped = stats.bytes_mapped;
+	out->bytes_unmapped = stats.bytes_unmapped;
+	out->live_regions = (uint64_t)live_regions;
+	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
+}
+
+V8M_EXPORT void v8m_dump_stats(void)
+{
+	malloc_stats();
+}
+
 /* --- glibc statistics / tuning extensions -------------------------- */
 /*
  * The functions below are not part of the POSIX core; they exist so

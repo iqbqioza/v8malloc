@@ -486,6 +486,78 @@ static int check_glibc_compat_surface(void)
 	return 0;
 }
 
+static int check_v8m_option_api(void)
+{
+	int64_t value = 0;
+	if (v8m_get_option(V8M_OPT_VERBOSE, &value) != 0) {
+		return fail("v8m_get_option(VERBOSE) failed");
+	}
+	int64_t original = value;
+
+	if (v8m_set_option(V8M_OPT_VERBOSE, original ^ 1) != 0) {
+		return fail("v8m_set_option(VERBOSE) failed");
+	}
+	if (v8m_get_option(V8M_OPT_VERBOSE, &value) != 0 ||
+	    value != (original ^ 1)) {
+		(void)v8m_set_option(V8M_OPT_VERBOSE, original);
+		return fail("v8m_get_option did not see the new value");
+	}
+	(void)v8m_set_option(V8M_OPT_VERBOSE, original);
+
+	/* Out-of-range option ids must yield -1 / EINVAL on both
+	 * setter and getter. */
+	errno = 0;
+	if (v8m_set_option(-1, 0) != -1 || errno != EINVAL) {
+		return fail("v8m_set_option(-1) did not fail with EINVAL");
+	}
+	errno = 0;
+	if (v8m_set_option(V8M_OPT_COUNT, 0) != -1 || errno != EINVAL) {
+		return fail(
+		    "v8m_set_option(OPT_COUNT) did not fail with EINVAL");
+	}
+	errno = 0;
+	if (v8m_get_option(V8M_OPT_COUNT, &value) != -1 || errno != EINVAL) {
+		return fail(
+		    "v8m_get_option(OPT_COUNT) did not fail with EINVAL");
+	}
+	errno = 0;
+	if (v8m_get_option(V8M_OPT_VERBOSE, NULL) != -1 || errno != EINVAL) {
+		return fail("v8m_get_option(NULL) did not fail with EINVAL");
+	}
+	return 0;
+}
+
+static int check_v8m_stats_api(void)
+{
+	struct v8m_stats before = {0};
+	v8m_get_stats(&before);
+
+	void *anchor = malloc((size_t)512 * 1024);
+	if (anchor == NULL) {
+		return fail("anchor malloc returned NULL");
+	}
+	struct v8m_stats after = {0};
+	v8m_get_stats(&after);
+	if (after.live_regions <= before.live_regions) {
+		free(anchor);
+		return fail("live_regions did not increase after malloc");
+	}
+	if (after.live_bytes <= before.live_bytes) {
+		free(anchor);
+		return fail("live_bytes did not increase after malloc");
+	}
+	free(anchor);
+
+	/* NULL out is a no-op, not a crash. */
+	v8m_get_stats(NULL);
+
+	/* v8m_dump_stats writes the same digest as malloc_stats; just
+	 * confirm it does not crash. The malloc_stats output check
+	 * already lives in check_glibc_compat_surface. */
+	v8m_dump_stats();
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -524,5 +596,13 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_glibc_compat_surface();
+	status = check_glibc_compat_surface();
+	if (status != 0) {
+		return status;
+	}
+	status = check_v8m_option_api();
+	if (status != 0) {
+		return status;
+	}
+	return check_v8m_stats_api();
 }
