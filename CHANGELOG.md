@@ -88,6 +88,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `UINT16_MAX` sentinel in the `size_class` field so a later cycle's
   `MAP_HUGETLB` optimization can specialize without breaking the
   common-prefix layout.
+- Buddy allocator for Medium-class allocations
+  (`v8m_buddy_init/alloc/free`): 7-level buddy spanning 4 KiB to
+  256 KiB over a single 256 KiB-aligned arena. Free blocks are
+  threaded into per-level doubly-linked lists by overlaying
+  `v8m_buddy_node` (next/prev) on the block's own first 16 bytes;
+  per-level `alloc_bitmap` and `split_bitmap` each fit in a single
+  `uint64_t` (level 0 has at most 64 blocks). Allocation rounds the
+  request up to the next level, walks upward to the smallest
+  available level, then splits down placing each right child on
+  the lower level's free list. Free does immediate coalescing via
+  `idx ^ 1` whenever the buddy is free and not split.
 - OSS scaffolding: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, GitHub issue and pull-request templates,
   `man/v8malloc.3`.
