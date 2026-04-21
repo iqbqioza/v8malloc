@@ -27,11 +27,15 @@
 #include <unistd.h>
 
 #include "v8m_bootstrap.h"
+#include "v8m_buddy_pool.h"
 #include "v8m_config.h"
 #include "v8m_dispatch.h"
+#include "v8m_large.h"
 #include "v8m_libc_fallback.h"
 #include "v8m_numa.h"
+#include "v8m_page.h"
 #include "v8m_page_heap.h"
+#include "v8m_size_class.h"
 #include "v8malloc/v8malloc.h"
 
 /* 0 = uninitialized, 1 = ready, 2 = shutting down. The constructor
@@ -471,6 +475,71 @@ V8M_EXPORT void v8m_set_soft_limit(size_t bytes)
 V8M_EXPORT size_t v8m_get_soft_limit(void)
 {
 	return atomic_load_explicit(&g_soft_limit, memory_order_relaxed);
+}
+
+/* cppcheck-suppress staticFunction
+ * — the function is part of the public ABI exported by v8malloc.map. */
+V8M_EXPORT int v8m_ptr_info(const void *ptr, struct v8m_ptr_info *out)
+{
+	if (out == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	out->backend = V8M_PTR_FOREIGN;
+	out->usable_size = 0;
+	out->size_class = -1;
+
+	if (ptr == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (v8m_ptr_is_bootstrap(ptr)) {
+		out->backend = V8M_PTR_BOOTSTRAP;
+		/* Bootstrap doesn't track per-allocation sizes; report
+		 * an upper bound so callers see a non-zero value. */
+		out->usable_size = v8m_bootstrap_remaining(ptr);
+		return 0;
+	}
+	if (!dispatch_ready() || !v8m_page_heap_owns(ptr)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
+	if (v8m_page_meta_valid(meta)) {
+		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+			out->backend = V8M_PTR_SLAB;
+			out->usable_size = meta->object_size;
+			out->size_class = meta->size_class;
+		} else {
+			out->backend = V8M_PTR_LARGE;
+			out->usable_size = v8m_large_usable_size(ptr);
+		}
+		return 0;
+	}
+
+	/* Owned by the page heap with no slab/large header → buddy.
+	 * v8m_buddy_pool_block_size returns the enclosing block size
+	 * for any pointer inside a live allocation, which is what
+	 * dispatch_free wants. For introspection we want stricter
+	 * start-of-block semantics, so reject pointers that aren't
+	 * `bytes`-aligned (every buddy arena is V8M_BUDDY_MAX_BLOCK-
+	 * aligned, so block starts are inherently bytes-aligned and
+	 * the check is exact). */
+	size_t bytes = v8m_buddy_pool_block_size(&g_dispatch.buddy, ptr);
+	if (bytes > 0U && ((uintptr_t)ptr & (bytes - 1U)) == 0U) {
+		out->backend = V8M_PTR_BUDDY;
+		out->usable_size = bytes;
+		return 0;
+	}
+	errno = EINVAL;
+	return -1;
+}
+
+V8M_EXPORT bool v8m_is_valid_ptr(const void *ptr)
+{
+	struct v8m_ptr_info info;
+	return v8m_ptr_info(ptr, &info) == 0;
 }
 
 /* --- glibc statistics / tuning extensions -------------------------- */

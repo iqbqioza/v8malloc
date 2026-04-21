@@ -66,6 +66,7 @@ V8M_EXPORT int v8m_version_patch(void);
 
 /* --- Allocation API (v8m_-prefixed, namespaced) ------------------- */
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /*
@@ -208,6 +209,48 @@ V8M_EXPORT void v8m_set_soft_limit(size_t bytes);
  * Read the current soft limit. Returns 0 when no limit is set.
  */
 V8M_EXPORT size_t v8m_get_soft_limit(void);
+
+/* --- Pointer introspection -------------------------------------- */
+
+/*
+ * Backend that issued a given pointer. The ordering is stable
+ * across v0; new backends are appended.
+ */
+enum v8m_ptr_backend {
+	V8M_PTR_FOREIGN = 0, /* not v8malloc-issued (or NULL) */
+	V8M_PTR_BOOTSTRAP,   /* served from the pre-init bootstrap buffer */
+	V8M_PTR_SLAB,	     /* slab pool — Tiny + Small classes */
+	V8M_PTR_BUDDY,	     /* buddy pool — Medium classes */
+	V8M_PTR_LARGE	     /* direct mmap path — Large + Huge */
+};
+
+/*
+ * Snapshot of what v8malloc knows about a pointer. `usable_size`
+ * matches what `malloc_usable_size(ptr)` would report; `size_class`
+ * is the slab class id (0..31) for SLAB-backed pointers and -1
+ * everywhere else.
+ */
+struct v8m_ptr_info {
+	int backend; /* enum v8m_ptr_backend */
+	size_t usable_size;
+	int size_class; /* -1 if backend != V8M_PTR_SLAB */
+};
+
+/*
+ * Quick predicate: true iff `ptr` was issued by v8malloc and is
+ * recognized by the dispatcher. NULL is not a valid pointer.
+ * Mid-allocation pointers (offsets inside a v8malloc region but
+ * not the start of any individual allocation) are not recognized.
+ */
+V8M_EXPORT bool v8m_is_valid_ptr(const void *ptr);
+
+/*
+ * Fill `*out` with everything v8malloc knows about `ptr`. Returns
+ * 0 on success, -1 with `errno = EINVAL` for NULL `out`, NULL
+ * `ptr`, or a foreign / mid-allocation `ptr`. On failure `*out`
+ * is left in a defined zero state with backend = V8M_PTR_FOREIGN.
+ */
+V8M_EXPORT int v8m_ptr_info(const void *ptr, struct v8m_ptr_info *out);
 
 #ifdef __cplusplus
 }

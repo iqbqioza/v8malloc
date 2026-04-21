@@ -110,6 +110,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Pointer introspection: `v8m_is_valid_ptr` and
+  `v8m_ptr_info(ptr, &out)`. Both reuse the existing region map +
+  page-meta + buddy machinery, so no new tracking — they just
+  surface what the dispatcher already knows. The new
+  `enum v8m_ptr_backend` (FOREIGN / BOOTSTRAP / SLAB / BUDDY /
+  LARGE) and `struct v8m_ptr_info` (backend, usable_size,
+  size_class) live in the public header. `v8m_ptr_info` returns
+  -1/EINVAL for NULL `out`, NULL `ptr`, foreign pointers, and
+  mid-allocation pointers; on failure `*out` is left in a
+  defined zero state with `backend = V8M_PTR_FOREIGN` so callers
+  can branch on the field without checking the return code.
+  Mid-allocation strictness on the buddy path is enforced by an
+  alignment check (every buddy block is naturally `block_size`-
+  aligned within its V8M_BUDDY_MAX_BLOCK-aligned arena, so
+  `((uintptr_t)ptr & (size - 1U)) == 0` is exact).
+  test_api covers all four backends plus invalid-input paths.
+
 - Transparent huge page hint for Large/Huge regions. Every
   `v8m_page_heap_alloc` of >= 2 MiB now emits
   `madvise(MADV_HUGEPAGE)` after the mmap+trim, asking the kernel

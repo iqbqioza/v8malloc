@@ -713,6 +713,107 @@ static int check_oom_handler_no_retry(void)
 	return 0;
 }
 
+static int check_ptr_info_per_backend(void)
+{
+	struct v8m_ptr_info info;
+
+	/* SLAB: a 64 B request lands in size class 7. */
+	void *slab = malloc(64);
+	if (slab == NULL) {
+		return fail("slab malloc returned NULL");
+	}
+	if (!v8m_is_valid_ptr(slab) || v8m_ptr_info(slab, &info) != 0) {
+		free(slab);
+		return fail("v8m_ptr_info(slab) reported foreign");
+	}
+	if (info.backend != V8M_PTR_SLAB || info.usable_size < 64U ||
+	    info.size_class < 0) {
+		free(slab);
+		return fail("v8m_ptr_info(slab) returned wrong fields");
+	}
+	free(slab);
+
+	/* BUDDY: 8 KiB request lands in the buddy pool. */
+	void *buddy = malloc(8192);
+	if (buddy == NULL) {
+		return fail("buddy malloc returned NULL");
+	}
+	if (v8m_ptr_info(buddy, &info) != 0 || info.backend != V8M_PTR_BUDDY) {
+		free(buddy);
+		return fail("v8m_ptr_info(buddy) wrong backend");
+	}
+	if (info.usable_size < 8192U || info.size_class != -1) {
+		free(buddy);
+		return fail("v8m_ptr_info(buddy) wrong fields");
+	}
+	free(buddy);
+
+	/* LARGE: > 256 KiB hits the direct mmap path. */
+	void *large = malloc((size_t)512 * 1024);
+	if (large == NULL) {
+		return fail("large malloc returned NULL");
+	}
+	if (v8m_ptr_info(large, &info) != 0 || info.backend != V8M_PTR_LARGE) {
+		free(large);
+		return fail("v8m_ptr_info(large) wrong backend");
+	}
+	if (info.usable_size < (size_t)512 * 1024 || info.size_class != -1) {
+		free(large);
+		return fail("v8m_ptr_info(large) wrong fields");
+	}
+	free(large);
+	return 0;
+}
+
+static int check_ptr_info_invalid(void)
+{
+	struct v8m_ptr_info info;
+
+	/* NULL out pointer. */
+	errno = 0;
+	if (v8m_ptr_info(NULL, NULL) != -1 || errno != EINVAL) {
+		return fail("v8m_ptr_info(NULL out) did not fail");
+	}
+
+	/* NULL ptr — out is filled with FOREIGN, returns -1. */
+	errno = 0;
+	if (v8m_ptr_info(NULL, &info) != -1 || errno != EINVAL) {
+		return fail("v8m_ptr_info(NULL ptr) did not fail");
+	}
+	if (info.backend != V8M_PTR_FOREIGN || info.usable_size != 0U ||
+	    info.size_class != -1) {
+		return fail("v8m_ptr_info(NULL ptr) did not zero out");
+	}
+
+	/* Stack address — definitely never v8malloc-issued. */
+	int local = 0;
+	errno = 0;
+	if (v8m_ptr_info(&local, &info) != -1 || errno != EINVAL) {
+		return fail("v8m_ptr_info(stack) did not fail");
+	}
+	if (v8m_is_valid_ptr(&local)) {
+		return fail("v8m_is_valid_ptr(stack) returned true");
+	}
+	if (v8m_is_valid_ptr(NULL)) {
+		return fail("v8m_is_valid_ptr(NULL) returned true");
+	}
+
+	/* Mid-allocation pointer inside a buddy block — not the start
+	 * of any allocation, so foreign as far as the API cares. */
+	void *buddy = malloc(8192);
+	if (buddy == NULL) {
+		return fail("buddy alloc for mid-ptr check returned NULL");
+	}
+	const void *mid = (const unsigned char *)buddy + 16;
+	errno = 0;
+	if (v8m_ptr_info(mid, &info) != -1 || errno != EINVAL) {
+		free(buddy);
+		return fail("v8m_ptr_info(mid-buddy) accepted offset");
+	}
+	free(buddy);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_malloc_free();
@@ -771,5 +872,13 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_oom_handler_no_retry();
+	status = check_oom_handler_no_retry();
+	if (status != 0) {
+		return status;
+	}
+	status = check_ptr_info_per_backend();
+	if (status != 0) {
+		return status;
+	}
+	return check_ptr_info_invalid();
 }
