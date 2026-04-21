@@ -32,6 +32,20 @@ static uint32_t g_node_count = 1;
 static uint32_t g_cpu_to_node[V8M_NUMA_MAX_CPUS];
 
 /*
+ * Per-thread node cache. sched_getcpu is itself vDSO-fast on Linux
+ * (one rdtscp + a memory load on x86_64), but the allocator hot
+ * path will call v8m_numa_current_node millions of times per
+ * second once the per-NUMA pool sharding lands. Refreshing once
+ * every V8M_NUMA_REFRESH_INTERVAL calls amortizes the syscall to
+ * effectively free while still tracking thread migrations within
+ * a few microseconds. The interval is a power of two so the
+ * refresh check collapses to a single AND.
+ */
+#define V8M_NUMA_REFRESH_INTERVAL 1024U
+static __thread uint32_t t_cached_node;
+static __thread uint32_t t_call_count;
+
+/*
  * Read up to `max - 1` bytes from `path` into `buf`, NUL-terminate,
  * and return the number of bytes read. Returns -1 on open/read
  * failure. Uses the syscall-level `open`/`read` pair instead of
@@ -180,9 +194,16 @@ uint32_t v8m_numa_node_for_cpu(uint32_t cpu)
 
 uint32_t v8m_numa_current_node(void)
 {
-	int cpu = sched_getcpu();
-	if (cpu < 0) {
-		return 0;
+	/* `count == 0` on the very first call in a thread (TLS init
+	 * zero-fills t_call_count) and on every multiple of the
+	 * refresh interval thereafter, so the first reader always
+	 * gets a fresh sched_getcpu and subsequent fast-path calls
+	 * use the cached value. */
+	uint32_t count = t_call_count++;
+	if ((count & (V8M_NUMA_REFRESH_INTERVAL - 1U)) == 0U) {
+		int cpu = sched_getcpu();
+		t_cached_node =
+		    (cpu < 0) ? 0U : v8m_numa_node_for_cpu((uint32_t)cpu);
 	}
-	return v8m_numa_node_for_cpu((uint32_t)cpu);
+	return t_cached_node;
 }

@@ -76,6 +76,20 @@ make cppcheck       # cppcheck
 make lint           # all of the above
 ```
 
+## Coverage
+
+```bash
+make coverage   # configure + build + ctest + lcov + genhtml
+```
+
+Builds the library and tests with `--coverage` (gcov) and runs
+the suite. If `lcov` and `genhtml` are installed, the script
+post-processes the `.gcda` files into an HTML report under
+`build/coverage/html/index.html`. Without lcov / genhtml the raw
+`.gcda` data lives under `build/coverage/` for IDE-driven coverage
+tooling. Coverage instrumentation is mutually exclusive with the
+sanitizers.
+
 ## Sanitizers
 
 v8malloc ships with two sanitizer build variants:

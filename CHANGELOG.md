@@ -110,6 +110,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Per-thread cached `v8m_numa_current_node` with 1-in-1024
+  refresh (numa.md §2.2). Two new `__thread` slots cache the
+  resolved node id and a call counter; only every 1024-th call
+  pays for `sched_getcpu` plus the cpu→node lookup. The interval
+  is a power of two so the refresh check collapses to a single
+  AND. Picks up thread migrations within a few microseconds while
+  amortizing the syscall to effectively free on the allocator hot
+  path. test_numa hammers the cached path with 4096 iterations
+  (four refresh cycles) to exercise both branches.
+
+- Coverage build variant. New `V8MALLOC_BUILD_COVERAGE` CMake
+  option adds `--coverage -O0 -g` to compile and link, mutually
+  exclusive with the sanitizers. New `coverage` CMake preset
+  configures `build/coverage`, and `make coverage` runs the
+  preset, executes the suite, and post-processes `.gcda` files
+  through `lcov` + `genhtml` into
+  `build/coverage/html/index.html` when those tools are
+  installed. Without lcov / genhtml the raw gcov data still
+  lives under `build/coverage/` for IDE tooling. README
+  §Coverage documents the workflow.
+
 - Sanitizer build variants. New `V8MALLOC_BUILD_UBSAN` and
   `V8MALLOC_BUILD_TSAN` CMake options propagate `-fsanitize=...`
   to both library and tests. UBSan is the supported configuration

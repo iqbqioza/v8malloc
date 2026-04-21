@@ -70,6 +70,28 @@ static int check_current_node(void)
 	return 0;
 }
 
+static int check_current_node_cache(void)
+{
+	/* Hammer the cached path with several refresh cycles' worth of
+	 * calls. Every result must remain a valid node id; a stale
+	 * cache that drifted out of [0, node_count) would fail this
+	 * loop. The 4096-iteration bound covers four refreshes at the
+	 * default 1024 interval, exercising both the cache-hit and
+	 * cache-refresh branches. */
+	uint32_t count = v8m_numa_node_count();
+	for (int i = 0; i < 4096; i++) {
+		uint32_t node = v8m_numa_current_node();
+		if (node >= count) {
+			(void)fprintf(stderr,
+				      "test_numa: cached current_node %u "
+				      "exceeded node count %u at iter %d\n",
+				      node, count, i);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_node_count();
@@ -80,5 +102,9 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_current_node();
+	status = check_current_node();
+	if (status != 0) {
+		return status;
+	}
+	return check_current_node_cache();
 }

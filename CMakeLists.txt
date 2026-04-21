@@ -50,6 +50,13 @@ option(V8MALLOC_BUILD_BENCH "Build benchmark harness" OFF)
 option(V8MALLOC_BUILD_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
 option(V8MALLOC_BUILD_TSAN "Build with ThreadSanitizer" OFF)
 
+# Coverage instrumentation. Adds --coverage (i.e. -fprofile-arcs
+# -ftest-coverage on GCC, equivalent on Clang) to compile and link
+# flags so a follow-on `lcov` / `genhtml` run can produce the
+# usual HTML report. Only one sanitizer or coverage variant
+# should be enabled at once.
+option(V8MALLOC_BUILD_COVERAGE "Instrument for gcov / lcov coverage" OFF)
+
 if(NOT V8MALLOC_BUILD_SHARED AND NOT V8MALLOC_BUILD_STATIC)
 	message(FATAL_ERROR
 		"At least one of V8MALLOC_BUILD_SHARED / V8MALLOC_BUILD_STATIC must be ON")
@@ -74,6 +81,17 @@ endif()
 if(V8MALLOC_SANITIZER_FLAGS)
 	add_compile_options(${V8MALLOC_SANITIZER_FLAGS})
 	add_link_options(${V8MALLOC_SANITIZER_FLAGS})
+endif()
+
+if(V8MALLOC_BUILD_COVERAGE)
+	if(V8MALLOC_BUILD_UBSAN OR V8MALLOC_BUILD_TSAN)
+		message(FATAL_ERROR
+			"V8MALLOC_BUILD_COVERAGE is mutually exclusive with the sanitizers")
+	endif()
+	# `--coverage` is the portable flag spelling shared by GCC and
+	# Clang; CMake propagates it through to both compile and link.
+	add_compile_options(--coverage -O0 -g)
+	add_link_options(--coverage)
 endif()
 
 # --- Per-architecture compile flags (platform-abstraction.md §5.2) ------------
