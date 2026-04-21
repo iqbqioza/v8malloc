@@ -11,8 +11,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_page_heap.h"
+#include "v8malloc/v8malloc.h"
 
 static int fail(const char *msg)
 {
@@ -22,7 +24,8 @@ static int fail(const char *msg)
 
 enum {
 	BIG_ALIGNMENT = 2 * 1024 * 1024, /* 2 MiB (HugePage-sized) */
-	MANY_REGIONS = 16
+	MANY_REGIONS = 16,
+	HUGEPAGE_BYTES = 2 * 1024 * 1024,
 };
 
 static bool is_aligned(const void *ptr, size_t alignment)
@@ -218,6 +221,64 @@ static int check_owns_predicate(void)
 	return 0;
 }
 
+static int check_hugepage_advice(void)
+{
+	/* Make sure config_init has run (the constructor does this; the
+	 * test still depends on V8M_OPT_HUGE_PAGES being its default of
+	 * 1, which the loader guarantees in absence of an env var). */
+	v8m_config_init();
+
+	struct v8m_page_heap_stats before = {0};
+	struct v8m_page_heap_stats after = {0};
+
+	/* Sub-threshold allocation must NOT trigger the hugepage hint. */
+	v8m_page_heap_get_stats(&before);
+	void *small = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+	if (small == NULL) {
+		return fail("sub-threshold alloc returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	if (after.hugepage_advise_calls != before.hugepage_advise_calls) {
+		v8m_page_heap_free(small, V8M_PAGE_SIZE);
+		return fail("sub-threshold alloc emitted MADV_HUGEPAGE hint");
+	}
+	v8m_page_heap_free(small, V8M_PAGE_SIZE);
+
+	/* At-threshold allocation must emit the hint. */
+	v8m_page_heap_get_stats(&before);
+	void *huge = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	if (huge == NULL) {
+		return fail("at-threshold alloc returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	if (after.hugepage_advise_calls <= before.hugepage_advise_calls) {
+		v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+		return fail(
+		    "hugepage_advise_calls did not advance at threshold");
+	}
+	v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+
+	/* Disabling V8M_OPT_HUGE_PAGES suppresses the hint even at
+	 * threshold. Restore the default before returning. */
+	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 0);
+	v8m_page_heap_get_stats(&before);
+	void *huge_off = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	if (huge_off == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
+		return fail("alloc with HUGE_PAGES=0 returned NULL");
+	}
+	v8m_page_heap_get_stats(&after);
+	bool suppressed =
+	    after.hugepage_advise_calls == before.hugepage_advise_calls;
+	v8m_page_heap_free(huge_off, HUGEPAGE_BYTES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
+	if (!suppressed) {
+		return fail("HUGE_PAGES=0 did not suppress the hint");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_alignment();
@@ -243,5 +304,9 @@ int main(void)
 	/* check_advise_and_free_tolerate_null only ever returns 0;
 	 * cppcheck flags the post-call status check as dead code. */
 	(void)check_advise_and_free_tolerate_null();
-	return check_owns_predicate();
+	status = check_owns_predicate();
+	if (status != 0) {
+		return status;
+	}
+	return check_hugepage_advice();
 }

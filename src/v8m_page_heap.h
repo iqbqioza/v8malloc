@@ -57,6 +57,10 @@ struct v8m_page_heap_stats {
 	uint64_t advise_calls;
 	uint64_t bytes_mapped;
 	uint64_t bytes_unmapped;
+	/* Number of MADV_HUGEPAGE hints emitted to the kernel for
+	 * allocations large enough (>= 2 MiB) to benefit from being
+	 * backed by transparent huge pages. */
+	uint64_t hugepage_advise_calls;
 };
 
 /*

@@ -110,6 +110,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   suite covers defaults, env overrides for every option, fallback
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
+- Transparent huge page hint for Large/Huge regions. Every
+  `v8m_page_heap_alloc` of >= 2 MiB now emits
+  `madvise(MADV_HUGEPAGE)` after the mmap+trim, asking the kernel
+  to back the region with one or more 2 MiB transparent huge
+  pages. The hint is best-effort — if THP is disabled
+  system-wide, the kernel ignores it and the allocation falls
+  back to ordinary 4 KiB pages without any allocator-side
+  difference. Honors `V8M_OPT_HUGE_PAGES`: setting it to 0
+  suppresses the hint while keeping the allocation correct. The
+  page-heap stats grow a `hugepage_advise_calls` counter so
+  callers can verify the optimization is firing.
+
+- Open question #7 (fallback policy when `MAP_HUGETLB` fails)
+  resolved: honor `V8M_OPT_HUGE_PAGES`. The env-var contract
+  acts as the single opt-out for both the future MAP_HUGETLB
+  attempt and the MADV_HUGEPAGE hint emitted on the fallback
+  path; the eventual MAP_HUGETLB attempt will share the same
+  gate.
+
 - Failure-path hooks: `v8m_set_oom_handler`,
   `v8m_set_soft_limit`, `v8m_get_soft_limit`. The OOM handler is
   invoked from `v8m_malloc` whenever the dispatcher returns NULL

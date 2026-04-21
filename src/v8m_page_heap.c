@@ -14,14 +14,25 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 
+#include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_page_heap.h"
+#include "v8malloc/v8malloc.h"
 
 static _Atomic uint64_t v8m_mmap_calls = 0;
 static _Atomic uint64_t v8m_munmap_calls = 0;
 static _Atomic uint64_t v8m_advise_calls = 0;
 static _Atomic uint64_t v8m_bytes_mapped = 0;
 static _Atomic uint64_t v8m_bytes_unmapped = 0;
+static _Atomic uint64_t v8m_hugepage_advise_calls = 0;
+
+/*
+ * Allocations at or above this size are candidates for the
+ * MADV_HUGEPAGE hint. 2 MiB matches the standard transparent-
+ * huge-page size on x86_64 and aarch64 — the kernel can back the
+ * entire mapping with a single 2 MiB page when memory is available.
+ */
+#define V8M_HUGEPAGE_HINT_MIN_BYTES ((size_t)2 * 1024 * 1024)
 
 /*
  * Region map. Bounded array of (start, end) tuples kept in
@@ -169,6 +180,18 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		record_munmap(bytes);
 		return NULL;
 	}
+	/* Hint the kernel toward 2 MiB transparent huge pages for
+	 * Large/Huge-class regions. Honours V8M_OPT_HUGE_PAGES — set
+	 * to 0 to suppress the hint (resolves TODO open question #7
+	 * in favour of opt-out via the env-var contract). The advise
+	 * is best-effort: failure here doesn't change the allocator's
+	 * behaviour, so we don't even check the return value. */
+	if (bytes >= V8M_HUGEPAGE_HINT_MIN_BYTES &&
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
+		(void)madvise(result, bytes, MADV_HUGEPAGE);
+		atomic_fetch_add_explicit(&v8m_hugepage_advise_calls, 1U,
+					  memory_order_relaxed);
+	}
 	return result;
 }
 
@@ -206,4 +229,6 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&v8m_bytes_mapped, memory_order_relaxed);
 	out->bytes_unmapped =
 	    atomic_load_explicit(&v8m_bytes_unmapped, memory_order_relaxed);
+	out->hugepage_advise_calls = atomic_load_explicit(
+	    &v8m_hugepage_advise_calls, memory_order_relaxed);
 }
