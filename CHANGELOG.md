@@ -7,7 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- ST-01 stability soak test (`tests/test_soak.c`). Runs the
+- AAL primitives test (`tests/test_arch.c`). Covers the
+  architecture-abstraction-layer surface the library actually
+  exposes today: V8M_ARCH_* detection (exactly one defined,
+  plus a cross-check against the compiler's predefined
+  `__x86_64__` / `__aarch64__` / `__riscv` / `__powerpc64__` /
+  `__s390x__` / `__loongarch64`), V8M_CACHE_LINE_SIZE (power
+  of two + matches the spec's 64 / 128 / 256 per arch from
+  platform-abstraction.md §5.3), V8M_CACHELINE_ALIGNED +
+  V8M_ALIGNED(N) (stack structs land on the requested
+  boundary), V8M_LIKELY / V8M_UNLIKELY (hints only — both
+  branches produce identical observable outcomes),
+  V8M_PAGE_SIZE / V8M_PAGE_SHIFT / V8M_PAGE_MASK
+  (power-of-two + cross-consistent + masks correctly), and
+  the `__builtin_ctzll / clzll / popcountll` intrinsics the
+  slab-bitmap and buddy-level hot paths rely on (hand-built
+  inputs to catch a broken cross toolchain). The
+  per-primitive split the spec calls for
+  (test_atomics.c / test_bitops.c / test_tls.c /
+  test_prefetch.c) lands when the matching v8m_* wrappers
+  actually ship — today those operations are consumed
+  directly from `<stdatomic.h>` and `__builtin_*`, so there
+  is nothing in the AAL surface to split across. (`tests/test_soak.c`). Runs the
   MB-04 mixed-size workload for a configurable budget — 2 s by
   default so every PR run pays for it, env-override
   (`V8M_SOAK_DURATION_MS`) up to the spec's 24 hours — sampling
