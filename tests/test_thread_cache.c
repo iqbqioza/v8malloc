@@ -631,6 +631,95 @@ static int check_size_class_histogram(void)
 	return 0;
 }
 
+/*
+ * Lifetime tracker (fragmentation.md §5.2). Off by default — turn it
+ * on, run a sampled allocation burst, free the pointers, and verify
+ * the snapshot reflects the recorded + completed samples and at
+ * least one classified bucket. Restores the option to its prior
+ * value so unrelated suites are unaffected.
+ */
+static int check_lifetime_tracker_records(void)
+{
+	int64_t prior = 0;
+	(void)v8m_get_option(V8M_OPT_LIFETIME_TRACKING, &prior);
+	if (v8m_set_option(V8M_OPT_LIFETIME_TRACKING, 1) != 0) {
+		return fail("could not enable lifetime tracking");
+	}
+
+	struct v8m_lifetime_stats before = {0};
+	v8m_get_lifetime_stats(&before);
+
+	enum { N = 4096 };
+	void *ptrs[N];
+	for (int i = 0; i < N; i++) {
+		ptrs[i] = malloc(32);
+	}
+	for (int i = 0; i < N; i++) {
+		free(ptrs[i]);
+	}
+
+	struct v8m_lifetime_stats after = {0};
+	v8m_get_lifetime_stats(&after);
+	(void)v8m_set_option(V8M_OPT_LIFETIME_TRACKING, prior);
+
+	uint64_t recorded_delta =
+	    after.samples_recorded - before.samples_recorded;
+	if (recorded_delta == 0U) {
+		return fail("samples_recorded did not advance — sampling did "
+			    "not fire across 4096 allocations");
+	}
+	uint64_t completed_delta =
+	    after.samples_completed - before.samples_completed;
+	if (completed_delta == 0U) {
+		return fail("samples_completed did not advance — record_free "
+			    "did not match any ring entry");
+	}
+	uint64_t classified_delta =
+	    (after.ephemeral_count - before.ephemeral_count) +
+	    (after.short_count - before.short_count) +
+	    (after.long_count - before.long_count);
+	if (classified_delta == 0U) {
+		return fail("no completed sample landed in a lifetime class");
+	}
+	return 0;
+}
+
+/*
+ * With the option off the tracker stays inert: counters do not
+ * advance and the public stats accessor reflects that. Locks the
+ * "off by default → zero overhead" contract.
+ */
+static int check_lifetime_tracker_off_is_inert(void)
+{
+	int64_t prior = 0;
+	(void)v8m_get_option(V8M_OPT_LIFETIME_TRACKING, &prior);
+	(void)v8m_set_option(V8M_OPT_LIFETIME_TRACKING, 0);
+
+	struct v8m_lifetime_stats before = {0};
+	v8m_get_lifetime_stats(&before);
+
+	enum { N = 4096 };
+	void *ptrs[N];
+	for (int i = 0; i < N; i++) {
+		ptrs[i] = malloc(32);
+	}
+	for (int i = 0; i < N; i++) {
+		free(ptrs[i]);
+	}
+
+	struct v8m_lifetime_stats after = {0};
+	v8m_get_lifetime_stats(&after);
+	(void)v8m_set_option(V8M_OPT_LIFETIME_TRACKING, prior);
+
+	if (after.samples_recorded != before.samples_recorded) {
+		return fail("samples_recorded advanced with the option off");
+	}
+	if (after.samples_completed != before.samples_completed) {
+		return fail("samples_completed advanced with the option off");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -645,6 +734,8 @@ int main(void)
 	result |= check_predict_table_round_trip();
 	result |= check_numa_migration_records_node();
 	result |= check_size_class_histogram();
+	result |= check_lifetime_tracker_off_is_inert();
+	result |= check_lifetime_tracker_records();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

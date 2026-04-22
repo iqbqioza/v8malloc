@@ -7,6 +7,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Caller-address-based lifetime tracker
+  (`v8m_get_lifetime_stats`, TODO P2 row 154 —
+  fragmentation.md §5.2). Foundation for the
+  ephemeral/short/long arena routing the spec calls for.
+  Opt-in via `V8M_OPT_LIFETIME_TRACKING` (env
+  `V8M_LIFETIME_TRACKING`, default 0); when on,
+  `v8m_malloc` samples 1-in-`V8M_LIFETIME_SAMPLE_RATE`
+  (256 today) and writes (caller PC, alloc TSC) into a
+  per-TLC ring of 64 slots; the matching `v8m_free`
+  linearly scans the ring on every call (cheap — 64
+  pointer comparisons), measures the elapsed TSC ticks,
+  folds the sample into a per-caller-PC EMA bucket
+  (32 buckets per TLC, linear-probe lookup), and
+  classifies the sample into ephemeral / short / long
+  by comparison against thresholds derived once from
+  `v8m_arch_tsc_frequency_mhz()` (100 µs and 100 ms in
+  ticks). Aggregate counters: `samples_recorded`,
+  `samples_completed`, `samples_evicted`,
+  `ephemeral_count`, `short_count`, `long_count`. Per-TLC
+  storage uses no atomics on the hot path; a global
+  carry-over (atomic) absorbs the per-cache fold-in at
+  thread exit. Public `struct v8m_lifetime_stats` +
+  `v8m_get_lifetime_stats(out)` exported under
+  V8MALLOC_1.0; option ABI extends `enum v8m_option`.
+  Off by default — the per-free ring scan costs ~50 ns
+  per call when on, only worth it for diagnostic runs
+  that inform the future class-routing cycle. Coverage
+  in `tests/test_thread_cache.c::check_lifetime_tracker_records`
+  + `check_lifetime_tracker_off_is_inert`.
 - Size-class request histogram + public snapshot API
   (`v8m_get_size_class_histogram`, TODO P2 row 153 —
   size-classes.md §9 "workload-adaptive size classes").

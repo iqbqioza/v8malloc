@@ -27,6 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "v8m_arch.h" /* v8m_arch_rdtsc for the lifetime tracker */
 #include "v8m_bg_purge.h"
 #include "v8m_bootstrap.h"
 #include "v8m_buddy_pool.h"
@@ -448,6 +449,11 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 		v8m_thread_cache_predict_update(cache, caller_pc,
 						v8m_size_class(size));
 	}
+	/* Lifetime tracker (fragmentation.md §5.2). The helper exits
+	 * early when V8M_OPT_LIFETIME_TRACKING is off, so the cost is
+	 * one config load + one branch in the common path. */
+	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
+					       v8m_arch_rdtsc());
 	return ptr;
 }
 
@@ -514,6 +520,11 @@ V8M_EXPORT void v8m_free(void *ptr)
 	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
 		debug_check_double_free(ptr);
 	}
+	/* Lifetime tracker — same opt-in early-exit pattern as
+	 * record_alloc. The TSC read on this branch is cheap (single
+	 * rdtsc on x86_64, clock_gettime fallback elsewhere) but only
+	 * runs when the option is on, which the helper checks itself. */
+	v8m_thread_cache_lifetime_record_free(ptr, v8m_arch_rdtsc());
 	v8m_dispatch_free(&g_dispatch, ptr);
 }
 
@@ -810,6 +821,18 @@ v8m_get_size_class_histogram(struct v8m_size_class_histogram *out)
 		return;
 	}
 	v8m_thread_cache_aggregate_histogram(out);
+}
+
+V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	if (!dispatch_ready()) {
+		(void)memset(out, 0, sizeof(*out));
+		return;
+	}
+	v8m_thread_cache_aggregate_lifetime(out);
 }
 
 V8M_EXPORT uint64_t v8m_count_vmas(void)

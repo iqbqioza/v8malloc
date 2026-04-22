@@ -148,6 +148,20 @@ enum v8m_option {
 				    * the immediate-coalesce baseline is
 				    * still the better fit for most
 				    * workloads. */
+	V8M_OPT_LIFETIME_TRACKING, /* 0 / 1 — when on, sample 1-in-N
+				    * allocations and record (caller PC,
+				    * alloc TSC) into a per-thread ring
+				    * buffer; the matching free measures
+				    * the elapsed lifetime and folds it
+				    * into the per-caller-PC EMA bucket
+				    * (fragmentation.md §5.2). Aggregate
+				    * stats surface via
+				    * v8m_get_lifetime_stats. Off by
+				    * default — the per-free ring scan
+				    * costs ~50ns per call when on, only
+				    * worth it for diagnostic runs that
+				    * inform the future class-routing
+				    * cycle. */
 	V8M_OPT_COUNT
 };
 
@@ -290,6 +304,44 @@ struct v8m_size_class_histogram {
  */
 V8M_EXPORT void
 v8m_get_size_class_histogram(struct v8m_size_class_histogram *out);
+
+/*
+ * Lifetime-class tracker (fragmentation.md §5.2 — caller-address-based
+ * lifetime separation). Foundation row: opt-in via
+ * V8M_OPT_LIFETIME_TRACKING; off by default. When on, sample one in
+ * every N allocations, record (caller PC, alloc TSC) into a per-thread
+ * ring buffer; the matching free locates the entry, measures the
+ * elapsed TSC ticks, and folds the lifetime into a per-caller-PC EMA
+ * bucket. Each completed sample is also classified into one of three
+ * lifetime classes by EMA-vs-threshold comparison and the global
+ * counters bumped. Class routing (allocate ephemeral / short / long
+ * objects to distinct arenas) is the future cycle this tracker
+ * unblocks.
+ *
+ * `samples_recorded` counts allocation-side ring writes;
+ * `samples_completed` counts ring entries the matching free found and
+ * resolved; `samples_evicted` counts entries the next sampled
+ * allocation overwrote because the original allocation outlived the
+ * 64-slot ring. The three class counters partition `samples_completed`
+ * (sum of the three equals `samples_completed` minus a small
+ * post-classification race window).
+ */
+struct v8m_lifetime_stats {
+	uint64_t samples_recorded;
+	uint64_t samples_completed;
+	uint64_t samples_evicted;
+	uint64_t ephemeral_count;
+	uint64_t short_count;
+	uint64_t long_count;
+};
+
+/*
+ * Snapshot the aggregated lifetime tracker into `*out`. Tolerates
+ * NULL. Pre-init or with the option off returns all zeroes (no
+ * samples accumulated). Aggregates across every live thread cache
+ * plus a process-wide carry-over for caches that have already exited.
+ */
+V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out);
 
 /*
  * Fragmentation snapshot. Reports the page-heap-derived metrics plus

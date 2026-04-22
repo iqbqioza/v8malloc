@@ -25,6 +25,8 @@
 
 #include "v8m_arch.h" /* V8M_CACHE_LINE_SIZE for aligned_alloc */
 #include "v8m_config.h" /* v8m_config_get for the migration opt-in */
+/* v8m_arch_rdtsc + tsc_frequency_mhz live in v8m_arch.h via the
+ * same include above — no extra include needed. */
 #include "v8m_internal.h" /* V8M_PAGE_MASK */
 #include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_page.h" /* v8m_ptr_to_meta — meta recovery on flush */
@@ -133,6 +135,96 @@ static _Atomic uint64_t g_global_huge_request_bytes;
 static _Atomic uint64_t g_global_histogram_tick;
 
 /*
+ * Lifetime tracker — global carry-over counters (cache fold-in
+ * absorbs each TLC's stats at thread exit so the snapshot retains
+ * full history across the process lifetime). All atomic so the
+ * cross-thread folds and the aggregator's reads stay race-free.
+ */
+static _Atomic uint64_t g_global_lifetime_recorded;
+static _Atomic uint64_t g_global_lifetime_completed;
+static _Atomic uint64_t g_global_lifetime_evicted;
+static _Atomic uint64_t g_global_lifetime_ephemeral;
+static _Atomic uint64_t g_global_lifetime_short;
+static _Atomic uint64_t g_global_lifetime_long;
+
+/*
+ * Lazily-initialized lifetime classification thresholds in TSC
+ * ticks. EPHEMERAL means lifetime < 100 microseconds (function
+ * scope), LONG means lifetime > 100 milliseconds (close to
+ * application lifetime), SHORT covers the gap. Computed from
+ * v8m_arch_tsc_frequency_mhz() the first time a sample completes;
+ * the atomic store/load resolves the racy double-init harmlessly
+ * (every initializer computes the same value).
+ */
+static _Atomic uint64_t g_lifetime_short_threshold_ticks;
+static _Atomic uint64_t g_lifetime_long_threshold_ticks;
+
+static void ensure_lifetime_thresholds(void)
+{
+	if (atomic_load_explicit(&g_lifetime_long_threshold_ticks,
+				 memory_order_relaxed) != 0U) {
+		return;
+	}
+	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
+	if (mhz == 0U) {
+		mhz = 1000U; /* defensive — non-x86_64 arch helper returns
+			      * 1000 (ticks-per-µs basis) by contract. */
+	}
+	/* 100 µs and 100 ms in TSC ticks. */
+	atomic_store_explicit(&g_lifetime_short_threshold_ticks, mhz * 100U,
+			      memory_order_relaxed);
+	atomic_store_explicit(&g_lifetime_long_threshold_ticks,
+			      mhz * 100U * 1000U, memory_order_relaxed);
+}
+
+/*
+ * Map a caller PC to a per-cache bucket. Linear-probe over a small
+ * (V8M_LIFETIME_BUCKETS) array; on a fresh PC the first empty slot
+ * claims it. When the array fills, returns NULL — at that point the
+ * tracker silently drops new PCs (the existing buckets keep refining
+ * their EMA, the dropped PC's samples still count toward
+ * `samples_completed` and the per-class totals via the aggregate
+ * classifier below).
+ */
+static struct v8m_lifetime_bucket *
+lifetime_bucket_for(struct v8m_thread_cache *cache, uintptr_t caller_pc)
+{
+	if (caller_pc == 0U) {
+		caller_pc = 1U; /* reserve 0 as the empty marker */
+	}
+	uint32_t start =
+	    (uint32_t)((caller_pc >> 4U) & (V8M_LIFETIME_BUCKETS - 1U));
+	for (uint32_t step = 0; step < V8M_LIFETIME_BUCKETS; step++) {
+		uint32_t idx = (start + step) & (V8M_LIFETIME_BUCKETS - 1U);
+		struct v8m_lifetime_bucket *bucket =
+		    &cache->lifetime_buckets[idx];
+		if (bucket->caller_pc == caller_pc) {
+			return bucket;
+		}
+		if (bucket->caller_pc == 0U) {
+			bucket->caller_pc = caller_pc;
+			return bucket;
+		}
+	}
+	return NULL;
+}
+
+static void classify_and_count(struct v8m_thread_cache *cache, uint64_t ticks)
+{
+	uint64_t short_thr = atomic_load_explicit(
+	    &g_lifetime_short_threshold_ticks, memory_order_relaxed);
+	uint64_t long_thr = atomic_load_explicit(
+	    &g_lifetime_long_threshold_ticks, memory_order_relaxed);
+	if (ticks < short_thr) {
+		cache->lifetime_ephemeral_count++;
+	} else if (ticks < long_thr) {
+		cache->lifetime_short_count++;
+	} else {
+		cache->lifetime_long_count++;
+	}
+}
+
+/*
  * Unlink `cache` from the registry list and fold its accumulated
  * histogram counters into the global carry-over. Called from the
  * destructor + module-shutdown paths so the snapshot does not lose
@@ -176,6 +268,36 @@ static void registry_unregister_and_fold(struct v8m_thread_cache *cache)
 	if (cache->huge_request_bytes != 0U) {
 		atomic_fetch_add_explicit(&g_global_huge_request_bytes,
 					  cache->huge_request_bytes,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_samples_recorded != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_recorded,
+					  cache->lifetime_samples_recorded,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_samples_completed != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_completed,
+					  cache->lifetime_samples_completed,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_samples_evicted != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_evicted,
+					  cache->lifetime_samples_evicted,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_ephemeral_count != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_ephemeral,
+					  cache->lifetime_ephemeral_count,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_short_count != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_short,
+					  cache->lifetime_short_count,
+					  memory_order_relaxed);
+	}
+	if (cache->lifetime_long_count != 0U) {
+		atomic_fetch_add_explicit(&g_global_lifetime_long,
+					  cache->lifetime_long_count,
 					  memory_order_relaxed);
 	}
 }
@@ -739,6 +861,119 @@ void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out)
 		}
 		out->huge_request_count += cache->huge_request_count;
 		out->huge_request_bytes += cache->huge_request_bytes;
+	}
+	(void)pthread_mutex_unlock(&g_registry_lock);
+}
+
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
+					    uint64_t tsc)
+{
+	if (ptr == NULL || tsc == 0U) {
+		return;
+	}
+	if (v8m_config_get(V8M_OPT_LIFETIME_TRACKING) == 0) {
+		return;
+	}
+	struct v8m_thread_cache *cache = t_cache;
+	if (cache == NULL || cache->initialized == 0U) {
+		/* No TLC available; the very first allocation per thread
+		 * lands here (the cache itself is allocated through
+		 * malloc). Drop the sample silently — the next allocation
+		 * has a TLC. */
+		return;
+	}
+	cache->lifetime_sample_tick++;
+	if ((cache->lifetime_sample_tick & (V8M_LIFETIME_SAMPLE_RATE - 1U)) !=
+	    0U) {
+		return;
+	}
+	uint32_t pos = cache->lifetime_ring_pos;
+	struct v8m_lifetime_ring_entry *entry = &cache->lifetime_ring[pos];
+	if (entry->ptr != NULL) {
+		cache->lifetime_samples_evicted++;
+	}
+	entry->ptr = ptr;
+	entry->caller_pc = (uintptr_t)caller_pc;
+	entry->alloc_tsc = tsc;
+	cache->lifetime_ring_pos = (pos + 1U) & (V8M_LIFETIME_RING_SIZE - 1U);
+	cache->lifetime_samples_recorded++;
+}
+
+void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc)
+{
+	if (ptr == NULL) {
+		return;
+	}
+	if (v8m_config_get(V8M_OPT_LIFETIME_TRACKING) == 0) {
+		return;
+	}
+	struct v8m_thread_cache *cache = t_cache;
+	if (cache == NULL || cache->initialized == 0U) {
+		return;
+	}
+	for (uint32_t i = 0; i < V8M_LIFETIME_RING_SIZE; i++) {
+		struct v8m_lifetime_ring_entry *entry =
+		    &cache->lifetime_ring[i];
+		if (entry->ptr != ptr) {
+			continue;
+		}
+		uint64_t alloc_tsc = entry->alloc_tsc;
+		uintptr_t caller_pc = entry->caller_pc;
+		entry->ptr = NULL;
+		entry->caller_pc = 0;
+		entry->alloc_tsc = 0;
+		if (tsc == 0U || alloc_tsc == 0U || tsc < alloc_tsc) {
+			/* Wrap or unknown TSC — bump completed but skip
+			 * the EMA / classification update. */
+			cache->lifetime_samples_completed++;
+			return;
+		}
+		uint64_t ticks = tsc - alloc_tsc;
+		struct v8m_lifetime_bucket *bucket =
+		    lifetime_bucket_for(cache, caller_pc);
+		if (bucket != NULL) {
+			/* α = 0.25, matches the bin-capacity controller. */
+			uint64_t prev = bucket->ema_lifetime_ticks;
+			bucket->ema_lifetime_ticks =
+			    (prev == 0U) ? ticks : ((prev * 3U + ticks) / 4U);
+			bucket->sample_count++;
+		}
+		ensure_lifetime_thresholds();
+		classify_and_count(cache, ticks);
+		cache->lifetime_samples_completed++;
+		return;
+	}
+}
+
+void v8m_thread_cache_aggregate_lifetime(struct v8m_lifetime_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0, sizeof(*out));
+	out->samples_recorded = atomic_load_explicit(
+	    &g_global_lifetime_recorded, memory_order_relaxed);
+	out->samples_completed = atomic_load_explicit(
+	    &g_global_lifetime_completed, memory_order_relaxed);
+	out->samples_evicted = atomic_load_explicit(&g_global_lifetime_evicted,
+						    memory_order_relaxed);
+	out->ephemeral_count = atomic_load_explicit(
+	    &g_global_lifetime_ephemeral, memory_order_relaxed);
+	out->short_count = atomic_load_explicit(&g_global_lifetime_short,
+						memory_order_relaxed);
+	out->long_count =
+	    atomic_load_explicit(&g_global_lifetime_long, memory_order_relaxed);
+
+	(void)pthread_mutex_lock(&g_registry_lock);
+	for (struct v8m_thread_cache *cache = g_registry_head; cache != NULL;
+	     cache = cache->registry_next) {
+		out->samples_recorded += cache->lifetime_samples_recorded;
+		out->samples_completed += cache->lifetime_samples_completed;
+		out->samples_evicted += cache->lifetime_samples_evicted;
+		out->ephemeral_count += cache->lifetime_ephemeral_count;
+		out->short_count += cache->lifetime_short_count;
+		out->long_count += cache->lifetime_long_count;
 	}
 	(void)pthread_mutex_unlock(&g_registry_lock);
 }

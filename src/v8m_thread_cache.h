@@ -86,6 +86,44 @@
 #define V8M_HISTOGRAM_SAMPLE_RATE 64U
 
 /*
+ * Lifetime tracker (fragmentation.md §5.2). Sample one in every
+ * V8M_LIFETIME_SAMPLE_RATE allocations into a per-TLC ring of
+ * V8M_LIFETIME_RING_SIZE slots; the matching free linearly scans
+ * the ring (cheap — 64 8-byte comparisons) and on a hit folds the
+ * elapsed TSC ticks into the per-caller-PC EMA bucket. Bucket count
+ * is small + linear-scan because lookup is on the cold (sampled)
+ * path — only a tiny fraction of callers contribute distinct PCs.
+ */
+#define V8M_LIFETIME_SAMPLE_RATE 256U
+#define V8M_LIFETIME_RING_SIZE 64U
+#define V8M_LIFETIME_BUCKETS 32U
+
+/*
+ * Per-caller-PC lifetime bucket. `caller_pc == 0` marks an unused
+ * slot (the bucket array is zero-initialized at cache create). The
+ * EMA uses α = 0.25 (`new = (3 * old + sample) / 4`), matching the
+ * adaptive bin-capacity controller above.
+ */
+struct v8m_lifetime_bucket {
+	uintptr_t caller_pc;
+	uint64_t sample_count;
+	uint64_t ema_lifetime_ticks;
+};
+
+/*
+ * Per-allocation ring entry — `ptr == NULL` marks the slot empty.
+ * The next sampled allocation overwrites slot at `lifetime_ring_pos`
+ * regardless of whether it's empty or holds a still-live entry; the
+ * eviction count surfaces as the `samples_evicted` field of the
+ * public stats so a caller can detect a too-small ring.
+ */
+struct v8m_lifetime_ring_entry {
+	void *ptr;
+	uintptr_t caller_pc;
+	uint64_t alloc_tsc;
+};
+
+/*
  * Forward decl — the slab-class fast path needs to flush back to
  * the slab pool on overflow / module shutdown, but the cache header
  * does not pull v8m_slab_pool.h in. The .c file's include set
@@ -243,13 +281,30 @@ struct v8m_thread_cache {
 	 */
 	uint64_t histogram_tick;
 	/*
-	 * Registry list link (size-class histogram aggregation).
+	 * Registry list link (size-class histogram aggregation +
+	 * lifetime stats aggregation share the same registry).
 	 * Manipulated only at cache create / destroy under
 	 * g_registry_lock; the aggregation walk reads it under the
 	 * same lock. Plain pointer (not atomic) because every
 	 * touch is lock-protected.
 	 */
 	struct v8m_thread_cache *registry_next;
+	/*
+	 * Lifetime tracker (fragmentation.md §5.2). All fields are
+	 * single-thread-write (the owning thread); aggregation reads
+	 * them under the registry lock with stale-read tolerance, the
+	 * same model the size-class histogram uses.
+	 */
+	struct v8m_lifetime_ring_entry lifetime_ring[V8M_LIFETIME_RING_SIZE];
+	uint32_t lifetime_ring_pos;
+	uint64_t lifetime_sample_tick;
+	struct v8m_lifetime_bucket lifetime_buckets[V8M_LIFETIME_BUCKETS];
+	uint64_t lifetime_samples_recorded;
+	uint64_t lifetime_samples_completed;
+	uint64_t lifetime_samples_evicted;
+	uint64_t lifetime_ephemeral_count;
+	uint64_t lifetime_short_count;
+	uint64_t lifetime_long_count;
 };
 
 /*
@@ -478,5 +533,32 @@ void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size);
  * snapshot value may be stale by one increment.
  */
 void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out);
+
+/*
+ * Lifetime tracker (fragmentation.md §5.2). Both record helpers
+ * exit early when V8M_OPT_LIFETIME_TRACKING is off, so the cost of
+ * being-disabled is one config load + one branch on the malloc /
+ * free fast paths. When on, record_alloc samples 1-in-N allocations
+ * into the calling thread's TLC ring, and record_free linearly
+ * scans the ring on every free, classifying matches by EMA and
+ * bumping the per-TLC counters.
+ *
+ * `caller_pc` should be the value `__builtin_return_address(0)`
+ * captured by the callsite; the tracker hashes it down to a small
+ * bucket index. `tsc` should be `v8m_arch_rdtsc()` from the same
+ * callsite — both helpers tolerate a tsc of 0 by treating the
+ * sample as "lifetime unknown" and skipping the EMA update.
+ */
+void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
+					    uint64_t tsc);
+void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc);
+
+/*
+ * Snapshot the lifetime-tracker stats across every live cache plus
+ * the global carry-over into `*out`. Tolerates NULL. Pre-init or
+ * with the option off returns the all-zero baseline.
+ */
+struct v8m_lifetime_stats; /* declared in v8malloc.h */
+void v8m_thread_cache_aggregate_lifetime(struct v8m_lifetime_stats *out);
 
 #endif /* V8M_THREAD_CACHE_H */
