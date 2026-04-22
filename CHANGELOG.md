@@ -7,6 +7,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Time-based EMA refill controller module
+  (`src/v8m_refill_controller.{h,c}`, TODO P1 row 132 —
+  winning-algorithms.md §4.2). Implements the spec
+  algorithm verbatim: per-class EMA of actual demand
+  (α = 0.25), rate predictor that divides by elapsed
+  TSC ticks since the previous refill, batch sized so
+  the next refill lands ≈ V8M_REFILL_TARGET_HOLD_MICROS
+  (100 µs) into the future, clamped to
+  [V8M_REFILL_BATCH_MIN, V8M_REFILL_BATCH_MAX] = [4,
+  256]. Ships standalone because L3 / L4 do not yet
+  exist as discrete tiers in the v0 dispatcher (the
+  controller's spec scope is the L2↔L3 / L3↔L4
+  boundary, where the rdtsc + EMA cost is amortized
+  across an L3/L4 lock + TLB round trip; the L1↔L2
+  boundary uses the simpler capacity-based sizing per
+  thread-cache.md §3.2 and cannot afford the rdtsc
+  work). A future cycle that introduces a per-NUMA L3
+  pool will instance the controller and consume the
+  computed batch on its refill path. Test-only
+  `v8m_refill_controller_set_last_refill_tsc` knob
+  drives the elapsed-time divisor deterministically.
+  Coverage in `tests/test_refill_controller.c` (init
+  state, first-call MIN, high-demand MAX clamp,
+  zero-demand MIN clamp, EMA smoothing of a single
+  spike, NULL/out-of-range tolerance).
 - Per-NUMA-node memory balance snapshot
   (`v8m_get_numa_balance`, TODO P2 row 157 — numa.md
   §6.1 inter-node rebalancing detection). The page heap
