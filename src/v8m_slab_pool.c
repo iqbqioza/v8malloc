@@ -238,7 +238,8 @@ static void *try_partials(struct v8m_slab_pool_class *cls)
 /* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
 static void *acquire_fresh_page(const struct v8m_slab_pool *pool,
 				struct v8m_slab_pool_class *cls,
-				uint32_t size_class, uint64_t owner_thread)
+				uint32_t size_class, uint64_t owner_thread,
+				uint8_t arena_id)
 /* NOLINTEND(bugprone-easily-swappable-parameters) */
 {
 	void *page = acquire_slab_page(pool);
@@ -246,13 +247,15 @@ static void *acquire_fresh_page(const struct v8m_slab_pool *pool,
 		return NULL;
 	}
 	slab_init_dispatch(page, size_class, owner_thread);
+	((struct v8m_page_meta *)page)->arena_id = arena_id;
 	cls->current = page;
 	return slab_alloc_dispatch(cls->current);
 }
 
-/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
-void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
-			  uint64_t owner_thread)
+/* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
+void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
+				uint64_t owner_thread, uint8_t arena_id)
+/* NOLINTEND(bugprone-easily-swappable-parameters) */
 {
 	if (size_class >= V8M_MEDIUM_FIRST_CLASS) {
 		return NULL;
@@ -266,11 +269,18 @@ void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
 		obj = try_partials(cls);
 	}
 	if (obj == NULL) {
-		obj = acquire_fresh_page(pool, cls, size_class, owner_thread);
+		obj = acquire_fresh_page(pool, cls, size_class, owner_thread,
+					 arena_id);
 	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
 	return obj;
+}
+
+void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
+			  uint64_t owner_thread)
+{
+	return v8m_slab_pool_alloc_arena(pool, size_class, owner_thread, 0U);
 }
 
 /* Find and unlink `meta` from `cls`'s lists. Tolerates `meta` being

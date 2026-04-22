@@ -6,6 +6,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Public `v8m_estimate_lifetime(caller_pc)` and the
+  `enum v8m_lifetime_class { EPHEMERAL, SHORT, LONG, UNKNOWN }`
+  it returns. Backed by `v8m_thread_cache_lifetime_classify`
+  which walks the calling thread's per-caller-PC EMA bucket.
+  Exported under V8MALLOC_1.0.
+- Public `v8m_install_size_class_table(const uint32_t *)` and
+  `v8m_size_class_to_bytes(int cls)` for runtime size-class
+  hot-reload. The new `_Atomic(const uint32_t *) v8m_active_class_table`
+  is the swappable indirection slab-init paths now read; the
+  `v8m_size_class_size(cls)` inline helper performs the relaxed
+  load on the hot path. Exported under V8MALLOC_1.0.
+
+### Performance
+- Lifetime-class arena routing (the spec's `v8m_estimate_lifetime`
+  → distinct-arena placement). The dispatcher gained 3 lifetime
+  arenas (`slab_lifetime[3]`) initialized alongside the default
+  `slab` pool; `v8m_dispatch_alloc` consults the classifier (via
+  the per-thread `t_dispatch_caller_pc` hint set by `v8m_malloc`
+  with `__builtin_return_address(0)`) and routes EPHEMERAL /
+  SHORT / LONG allocations to their dedicated pools. Lifetime
+  arenas bypass the TLC. Free path reads the new `arena_id` field
+  on `v8m_page_meta` (and `v8m_tiny_page_meta` at the same offset
+  for layout parity) to return the page to its source pool. New
+  `v8m_slab_pool_alloc_arena(pool, cls, owner, arena_id)` is the
+  arena-aware variant; the original `v8m_slab_pool_alloc` calls
+  it with `V8M_ARENA_DEFAULT`. Off when `V8M_OPT_LIFETIME_TRACKING`
+  is off or the per-PC EMA hasn't accumulated enough samples to
+  classify (returns UNKNOWN → default arena).
+- Per-region THP age sweep. Each `region_entry` stamps
+  `promoted_at_tsc` when alloc-time advised MADV_HUGEPAGE; the
+  bg purge tick now calls `v8m_page_heap_thp_age_sweep()` which
+  walks every region and applies MADV_NOHUGEPAGE to those whose
+  stamp is older than the cold threshold. Diagnostic counter
+  `v8m_thp_age_demote_calls` (accessor:
+  `v8m_page_heap_thp_age_demote_calls()`). A workload with one
+  hot huge-eligible region and many cold ones now gets the right
+  per-region advice — the prior global EMA could only pick one
+  side for every subsequent alloc.
+
 ### Performance
 - Production wiring of four primitive modules that previously
   shipped standalone:

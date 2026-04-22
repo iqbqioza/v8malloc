@@ -90,6 +90,15 @@ void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
 			  uint64_t owner_thread);
 
 /*
+ * Same contract as v8m_slab_pool_alloc but stamps the page's
+ * arena_id field so the free path can route the page back to the
+ * matching pool. The default-arena variant above is implemented
+ * as `v8m_slab_pool_alloc_arena(pool, cls, owner, V8M_ARENA_DEFAULT)`.
+ */
+void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
+				uint64_t owner_thread, uint8_t arena_id);
+
+/*
  * Return one object to the pool. `meta` must be the result of
  * v8m_ptr_to_meta(obj) and must have already passed
  * v8m_page_meta_valid. Returns true iff the page became empty

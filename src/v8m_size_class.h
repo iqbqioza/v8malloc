@@ -10,6 +10,7 @@
 #ifndef V8M_SIZE_CLASS_H
 #define V8M_SIZE_CLASS_H
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -46,10 +47,46 @@ enum {
 #define V8M_CLASS_HUGE UINT32_MAX
 
 /*
- * Exact byte size of each size class, indexed by class id 0..40.
- * Must not be indexed with V8M_CLASS_HUGE.
+ * Exact byte size of each size class — the v0 baseline table.
+ * Direct indexing is supported but does NOT honour the hot-reload
+ * override below; consumers that need the live size should call
+ * `v8m_size_class_size(cls)` instead. Must not be indexed with
+ * V8M_CLASS_HUGE.
  */
 extern const uint32_t v8m_class_to_size[V8M_NUM_SIZE_CLASSES];
+
+/*
+ * Active class-size table — initialized to point at
+ * `v8m_class_to_size` and swappable at runtime via
+ * `v8m_size_class_install_table`. Allocations after a swap format
+ * new slab pages with the new sizes; live pages retain the size
+ * baked into their `meta->object_size` at init time so existing
+ * allocations stay safe (the hot-reload is per-spec a forward
+ * transition only — old pages "leave as-is").
+ */
+extern _Atomic(const uint32_t *) v8m_active_class_table;
+
+/*
+ * Resolve the live byte size for `cls`. Reads the active table
+ * with relaxed memory order — stale reads are safe because each
+ * slab page records its own object_size at init time, so a swap
+ * never reaches across already-allocated pages.
+ */
+static inline uint32_t v8m_size_class_size(uint32_t cls)
+{
+	const uint32_t *table =
+	    atomic_load_explicit(&v8m_active_class_table, memory_order_relaxed);
+	return table[cls];
+}
+
+/*
+ * Hot-reload entry point. Atomically swaps the active table to
+ * `new_table`. The pointer must remain valid for the lifetime of
+ * the process — the size class machinery does not copy the table.
+ * Pass `NULL` to revert to the v0 baseline. Returns the previously
+ * active table so callers can chain.
+ */
+const uint32_t *v8m_size_class_install_table(const uint32_t *new_table);
 
 /*
  * Map a request size to the smallest size class whose byte size is

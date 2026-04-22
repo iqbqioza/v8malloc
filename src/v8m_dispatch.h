@@ -35,8 +35,35 @@
 #include "v8m_buddy_pool.h"
 #include "v8m_slab_pool.h"
 
+/*
+ * Lifetime arenas (fragmentation.md §5.2). The default arena
+ * (`V8M_ARENA_DEFAULT = 0`) backs every allocation that doesn't
+ * have a known lifetime classification — pre-init, lifetime
+ * tracking off, the per-PC EMA hasn't accumulated enough samples
+ * yet, or the classifier returned UNKNOWN. The three other arenas
+ * back allocations the classifier confidently labelled as
+ * EPHEMERAL / SHORT / LONG. A single allocation's arena id
+ * persists in its slab page's `arena_id` field so the matching
+ * free knows which pool to return to.
+ */
+enum {
+	V8M_ARENA_DEFAULT = 0,
+	V8M_ARENA_EPHEMERAL = 1,
+	V8M_ARENA_SHORT = 2,
+	V8M_ARENA_LONG = 3,
+	V8M_ARENA_COUNT = 4
+};
+
 struct v8m_dispatch {
 	struct v8m_slab_pool slab;
+	/* Per-lifetime-class slab arenas. Indexed by `arena_id - 1`
+	 * (arena 0 is the default `slab` above). Only used when the
+	 * dispatcher's caller opts in (see `v8m_dispatch_alloc`'s
+	 * lifetime-classify path) and the classifier returned a
+	 * known class. Test fixtures that create their own dispatcher
+	 * never engage this path — the classifier requires a TLC,
+	 * which test fixtures don't drive. */
+	struct v8m_slab_pool slab_lifetime[V8M_ARENA_COUNT - 1];
 	struct v8m_buddy_pool buddy;
 	/*
 	 * Opt-in TLC routing. The thread cache is a per-thread
@@ -169,5 +196,15 @@ size_t v8m_dispatch_drain_local_l2(struct v8m_dispatch *dispatch);
  * fast-path entry but not synchronized.
  */
 void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled);
+
+/*
+ * Per-thread "caller PC for the next alloc" hint. v8m_malloc
+ * captures the user's caller PC and stores it here before
+ * invoking v8m_dispatch_alloc; the dispatcher consults it to pick
+ * the lifetime arena. Reset to NULL on entry/exit so a stale hint
+ * never leaks. Tests that call v8m_dispatch_alloc directly leave
+ * the hint NULL and route to the default arena.
+ */
+void v8m_dispatch_set_caller_pc(const void *caller_pc);
 
 #endif /* V8M_DISPATCH_H */

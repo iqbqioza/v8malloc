@@ -306,6 +306,28 @@ V8M_EXPORT void
 v8m_get_size_class_histogram(struct v8m_size_class_histogram *out);
 
 /*
+ * Hot-reload the active size-class size table. Atomically swaps
+ * the pointer the slab-init paths read on every fresh-page
+ * formatting. Already-allocated pages keep the size baked into
+ * their meta header at init time, so the swap only affects future
+ * allocations — matching the spec's "leave old pages as-is" rule.
+ *
+ * `new_table` must be non-NULL and must contain
+ * V8M_PUBLIC_NUM_SIZE_CLASSES (41) entries; the size at index `cls`
+ * replaces `v8m_class_to_size[cls]` for new slab-page formatting.
+ * The caller retains ownership of the table — the size class
+ * machinery does not copy. Pass `NULL` to revert to the v0
+ * baseline. Returns 0 on success or -EINVAL on a malformed
+ * argument (size at index 0 must be ≥ 8 bytes).
+ */
+V8M_EXPORT int v8m_install_size_class_table(const uint32_t *new_table);
+
+/*
+ * Read the live size for `cls`. Returns 0 for out-of-range cls.
+ */
+V8M_EXPORT uint32_t v8m_size_class_to_bytes(int cls);
+
+/*
  * Lifetime-class tracker (fragmentation.md §5.2 — caller-address-based
  * lifetime separation). Foundation row: opt-in via
  * V8M_OPT_LIFETIME_TRACKING; off by default. When on, sample one in
@@ -342,6 +364,23 @@ struct v8m_lifetime_stats {
  * plus a process-wide carry-over for caches that have already exited.
  */
 V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out);
+
+/*
+ * Lifetime classification of a caller-PC. EPHEMERAL when the
+ * per-PC EMA is below 100 µs (function scope), SHORT below 100
+ * ms, LONG above. UNKNOWN when the calling thread has no TLC,
+ * the option is off, or the caller PC has no recorded samples
+ * yet. The arena-routing layer consults this to place
+ * allocations on a lifetime-class-specific arena.
+ */
+enum v8m_lifetime_class {
+	V8M_LIFETIME_EPHEMERAL = 0,
+	V8M_LIFETIME_SHORT = 1,
+	V8M_LIFETIME_LONG = 2,
+	V8M_LIFETIME_UNKNOWN = 3
+};
+
+V8M_EXPORT enum v8m_lifetime_class v8m_estimate_lifetime(const void *caller_pc);
 
 /*
  * Per-NUMA-node memory balance snapshot (numa.md §6.1 — inter-node

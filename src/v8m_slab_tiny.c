@@ -68,7 +68,7 @@ void v8m_slab_tiny_init(void *page_base, uint32_t size_class,
 			uint64_t owner_thread)
 {
 	struct v8m_tiny_page_meta *meta = page_base;
-	uint16_t object_size = (uint16_t)v8m_class_to_size[size_class];
+	uint16_t object_size = (uint16_t)v8m_size_class_size(size_class);
 	uint32_t capacity = v8m_slab_tiny_capacity_for(object_size);
 
 	meta->magic = V8M_MAGIC;

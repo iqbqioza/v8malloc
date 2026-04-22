@@ -7,6 +7,8 @@
  * branchless formula in test_size_class.
  */
 
+#include <stdatomic.h>
+#include <stddef.h> /* NULL */
 #include <stdint.h>
 
 #include "v8m_size_class.h"
@@ -63,3 +65,22 @@ const uint32_t v8m_class_to_size[V8M_NUM_SIZE_CLASSES] = {
     1048576,
     2097152,
 };
+
+/*
+ * Active class-size table. Initialized to point at
+ * `v8m_class_to_size`; the runtime swap via
+ * `v8m_size_class_install_table` updates this pointer
+ * atomically. Slab-page init reads through `v8m_size_class_size`
+ * to format new pages with the live size; live pages keep their
+ * frozen `meta->object_size` so older allocations stay safe.
+ */
+_Atomic(const uint32_t *) v8m_active_class_table = v8m_class_to_size;
+
+const uint32_t *v8m_size_class_install_table(const uint32_t *new_table)
+{
+	if (new_table == NULL) {
+		new_table = v8m_class_to_size;
+	}
+	return atomic_exchange_explicit(&v8m_active_class_table, new_table,
+					memory_order_release);
+}

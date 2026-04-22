@@ -64,6 +64,15 @@ static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
  */
 static _Atomic uint64_t v8m_thp_promote_calls = 0;
 static _Atomic uint64_t v8m_thp_demote_calls = 0;
+/*
+ * Bg-sweep age demotes — counts regions whose alloc-time PROMOTE
+ * advice was reversed by the bg purge thread when the region
+ * outlasted `g_thp_cold_threshold_ticks` without re-promotion.
+ * Distinct from `v8m_thp_demote_calls` which counts alloc-time
+ * demote decisions; this counter measures the per-region tracker's
+ * effect.
+ */
+static _Atomic uint64_t v8m_thp_age_demote_calls = 0;
 
 /*
  * Process-wide anchor reservation. Lazy-initialized on first
@@ -174,6 +183,18 @@ struct region_entry {
 	 * the virtual slot stays inside the anchor's PROT_NONE VMA
 	 * and is not reclaimable (bump-only). */
 	bool is_anchor;
+	/* Per-region THP age tracker (huge-pages.md §5.1 "recently
+	 * accessed" condition). Set to `v8m_arch_rdtsc()` when the
+	 * alloc-time THP advice was PROMOTE; cleared to 0 when the
+	 * bg sweep observes the region has aged past
+	 * `g_thp_cold_threshold_ticks` and applies MADV_NOHUGEPAGE.
+	 * 0 means either "never promoted" or "already aged out", in
+	 * both cases the sweep skips the region. Per-region tracking
+	 * lets a workload with one hot huge-eligible region and many
+	 * cold ones get the right per-region advice — the global
+	 * EMA decision could only choose one or the other for every
+	 * subsequent alloc. */
+	_Atomic uint64_t promoted_at_tsc;
 };
 
 #define V8M_REGION_NODE_UNBOUND UINT16_MAX
@@ -228,9 +249,32 @@ static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 	g_regions[g_region_count].end = start + bytes;
 	g_regions[g_region_count].node = V8M_REGION_NODE_UNBOUND;
 	g_regions[g_region_count].is_anchor = is_anchor;
+	atomic_store_explicit(&g_regions[g_region_count].promoted_at_tsc, 0U,
+			      memory_order_relaxed);
 	g_region_count++;
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return 0;
+}
+
+/*
+ * Stamp the region rooted at `ptr` as PROMOTED at `tsc`. Called
+ * from the alloc path right after the THP-advice decision returns
+ * V8M_THP_PROMOTE; the bg sweep later compares this against the
+ * cold threshold to decide whether the region has aged out and
+ * should be demoted to MADV_NOHUGEPAGE.
+ */
+static void region_record_promote(const void *ptr, uint64_t tsc)
+{
+	uintptr_t start = (uintptr_t)ptr;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 0; i < g_region_count; i++) {
+		if (g_regions[i].start == start) {
+			atomic_store_explicit(&g_regions[i].promoted_at_tsc,
+					      tsc, memory_order_relaxed);
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
 }
 
 static int region_register(void *ptr, size_t bytes)
@@ -728,6 +772,14 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 						  1U, memory_order_relaxed);
 			atomic_fetch_add_explicit(&v8m_thp_promote_calls, 1U,
 						  memory_order_relaxed);
+			/* Stamp the region's promote timestamp so the bg
+			 * sweep can age it out and demote when it goes
+			 * cold. Anchor-carved regions can't be re-advised
+			 * later (they share one VMA), so skip the stamp
+			 * for those. */
+			if (!used_anchor) {
+				region_record_promote(result, v8m_arch_rdtsc());
+			}
 		}
 	}
 	bind_and_account(result, bytes);
@@ -808,6 +860,48 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&v8m_anchor_carve_calls, memory_order_relaxed);
 	out->anchor_carve_failures = atomic_load_explicit(
 	    &v8m_anchor_carve_failures, memory_order_relaxed);
+}
+
+size_t v8m_page_heap_thp_age_sweep(void)
+{
+	uint64_t threshold = thp_cold_threshold_ticks();
+	uint64_t now = v8m_arch_rdtsc();
+	size_t demoted = 0;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 0; i < g_region_count; i++) {
+		struct region_entry *region = &g_regions[i];
+		uint64_t promoted_at = atomic_load_explicit(
+		    &region->promoted_at_tsc, memory_order_relaxed);
+		if (promoted_at == 0U || now <= promoted_at ||
+		    now - promoted_at < threshold) {
+			continue;
+		}
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		void *ptr = (void *)region->start;
+		size_t bytes = region->end - region->start;
+		atomic_store_explicit(&region->promoted_at_tsc, 0U,
+				      memory_order_relaxed);
+		(void)pthread_mutex_unlock(&g_region_lock);
+		(void)madvise(ptr, bytes, MADV_NOHUGEPAGE);
+		atomic_fetch_add_explicit(&v8m_thp_age_demote_calls, 1U,
+					  memory_order_relaxed);
+		demoted++;
+		(void)pthread_mutex_lock(&g_region_lock);
+		/* Region table may have shrunk under us during the
+		 * mprotect/madvise window; recheck the index. The
+		 * worst case is we revisit the same slot if a free
+		 * happened to swap-remove into it — harmless because
+		 * the new tenant's promoted_at_tsc is either 0 or
+		 * very recent. */
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+	return demoted;
+}
+
+uint64_t v8m_page_heap_thp_age_demote_calls(void)
+{
+	return atomic_load_explicit(&v8m_thp_age_demote_calls,
+				    memory_order_relaxed);
 }
 
 size_t v8m_page_heap_numa_rebalance(void)

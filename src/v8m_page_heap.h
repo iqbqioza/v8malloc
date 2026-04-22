@@ -159,6 +159,25 @@ size_t v8m_page_heap_numa_rebalance(void);
 uint64_t v8m_page_heap_numa_rebalance_diversions(void);
 
 /*
+ * Per-region THP age sweep (huge-pages.md §5.1 cold detection).
+ * Walks every registered region and demotes (MADV_NOHUGEPAGE) any
+ * region whose alloc-time PROMOTE stamp has aged past
+ * `g_thp_cold_threshold_ticks`. Returns the count of regions
+ * demoted on this pass — useful for the bg-purge tick to log when
+ * the action fires. Called periodically by the bg purge thread;
+ * tests can call it directly to drive the sweep.
+ */
+size_t v8m_page_heap_thp_age_sweep(void);
+
+/*
+ * Total regions the age sweep has demoted since process start.
+ * Diagnostic; distinct from the alloc-time demote counter
+ * (`thp_demote_calls`) which counts the global EMA's decision to
+ * demote at allocation time.
+ */
+uint64_t v8m_page_heap_thp_age_demote_calls(void);
+
+/*
  * Test-only: tear down the global anchor reservation. Tests that
  * want a clean baseline call this between phases; production
  * callers should never touch it (the anchor lives for the process

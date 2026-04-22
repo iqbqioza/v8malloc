@@ -43,6 +43,13 @@ struct v8m_page_meta {
 	uint64_t owner_thread;
 	void *free_list_head;
 	struct v8m_page_meta *next;
+	/* Lifetime arena id (fragmentation.md §5.2). 0 = default
+	 * arena, non-zero = the lifetime-class arena the dispatcher
+	 * routed this page to (V8M_ARENA_EPHEMERAL / SHORT / LONG).
+	 * The free path reads this to return the page to the right
+	 * pool. Padding from the alignment of `next` covers the
+	 * remaining 7 bytes. */
+	uint8_t arena_id;
 };
 
 /*
@@ -61,6 +68,7 @@ struct v8m_tiny_page_meta {
 	uint64_t owner_thread;
 	void *free_list_head; /* unused for Tiny; kept for layout parity */
 	struct v8m_page_meta *next;
+	uint8_t arena_id; /* same offset as v8m_page_meta.arena_id */
 	/* Tiny-only fields. */
 	uint64_t search_hint;
 	uint64_t bitmap[128];

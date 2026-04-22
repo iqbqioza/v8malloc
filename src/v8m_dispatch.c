@@ -15,6 +15,7 @@
 
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
+#include "v8m_config.h"
 #include "v8m_core_cache.h"
 #include "v8m_dispatch.h"
 #include "v8m_internal.h"
@@ -26,6 +27,7 @@
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
 #include "v8m_thread_cache.h"
+#include "v8malloc/v8malloc.h" /* enum v8m_lifetime_class, V8M_OPT_LIFETIME_TRACKING */
 
 /*
  * Default batch size for the TLC↔L2 plumbing. The runtime batch
@@ -56,6 +58,67 @@
  * couple of divides, acceptable for the slow path.
  */
 static struct v8m_refill_controller g_l2_refill;
+
+/*
+ * Pick the slab pool for a given arena id. Returns the default
+ * slab when the id is V8M_ARENA_DEFAULT (0) or out of range; the
+ * lifetime arena otherwise. Centralizes the index arithmetic so
+ * the alloc / free paths don't repeat the `arena - 1` indirection.
+ */
+static struct v8m_slab_pool *slab_pool_for_arena(struct v8m_dispatch *dispatch,
+						 uint8_t arena_id)
+{
+	if (arena_id == V8M_ARENA_DEFAULT || arena_id >= V8M_ARENA_COUNT) {
+		return &dispatch->slab;
+	}
+	return &dispatch->slab_lifetime[arena_id - 1U];
+}
+
+/*
+ * Per-thread "caller PC for the next alloc" hint. v8m_malloc
+ * captures the user's caller PC via __builtin_return_address(0)
+ * and stores it here before invoking v8m_dispatch_alloc; the
+ * dispatcher reads it to pick the lifetime arena. Reset to NULL
+ * on entry/exit so a stale hint never leaks into the next call.
+ * Tests that call v8m_dispatch_alloc directly leave the hint NULL
+ * — routing falls back to the default arena.
+ */
+static __thread const void *t_dispatch_caller_pc;
+
+void v8m_dispatch_set_caller_pc(const void *caller_pc)
+{
+	t_dispatch_caller_pc = caller_pc;
+}
+
+/*
+ * Map a public lifetime classifier result onto the dispatcher's
+ * arena id. Only routes when the dispatcher opted into TLC (which
+ * implies it's the global singleton with the lifetime arenas
+ * initialized) and when the option is on. Unknown / off paths
+ * fall through to the default arena.
+ */
+static uint8_t arena_for_caller(const struct v8m_dispatch *dispatch,
+				const void *caller_pc)
+{
+	if (!dispatch->use_tlc ||
+	    v8m_config_get(V8M_OPT_LIFETIME_TRACKING) == 0 ||
+	    caller_pc == NULL) {
+		return V8M_ARENA_DEFAULT;
+	}
+	enum v8m_lifetime_class cls =
+	    v8m_thread_cache_lifetime_classify(caller_pc);
+	switch (cls) {
+	case V8M_LIFETIME_EPHEMERAL:
+		return V8M_ARENA_EPHEMERAL;
+	case V8M_LIFETIME_SHORT:
+		return V8M_ARENA_SHORT;
+	case V8M_LIFETIME_LONG:
+		return V8M_ARENA_LONG;
+	case V8M_LIFETIME_UNKNOWN:
+	default:
+		return V8M_ARENA_DEFAULT;
+	}
+}
 
 /*
  * Slab-class fast path: try the TLC bin, drain the remote queue
@@ -136,8 +199,22 @@ int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 	if (ret != 0) {
 		return ret;
 	}
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		ret = v8m_slab_pool_init(&dispatch->slab_lifetime[i]);
+		if (ret != 0) {
+			for (uint32_t j = 0; j < i; j++) {
+				v8m_slab_pool_destroy(
+				    &dispatch->slab_lifetime[j]);
+			}
+			v8m_slab_pool_destroy(&dispatch->slab);
+			return ret;
+		}
+	}
 	ret = v8m_buddy_pool_init(&dispatch->buddy);
 	if (ret != 0) {
+		for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+			v8m_slab_pool_destroy(&dispatch->slab_lifetime[i]);
+		}
 		v8m_slab_pool_destroy(&dispatch->slab);
 		return ret;
 	}
@@ -157,6 +234,9 @@ void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled)
 void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
 {
 	v8m_buddy_pool_destroy(&dispatch->buddy);
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		v8m_slab_pool_destroy(&dispatch->slab_lifetime[i]);
+	}
 	v8m_slab_pool_destroy(&dispatch->slab);
 }
 
@@ -189,13 +269,25 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 		 * pushes to the queue); it lights up when the
 		 * thread-owned-slab refactor wires owner-thread
 		 * routing. */
-		if (dispatch->use_tlc) {
-			void *served = try_tlc_fast_paths(dispatch, cls);
-			if (served != NULL) {
-				return served;
+		uint8_t arena_id =
+		    arena_for_caller(dispatch, t_dispatch_caller_pc);
+		/* Lifetime arenas bypass the TLC: TLC bins are
+		 * per-thread and not arena-segregated, so caching
+		 * across arenas would mix slab pages from different
+		 * pools and break the arena invariant on free. The
+		 * default arena keeps the fast TLC path. */
+		if (arena_id == V8M_ARENA_DEFAULT) {
+			if (dispatch->use_tlc) {
+				void *served =
+				    try_tlc_fast_paths(dispatch, cls);
+				if (served != NULL) {
+					return served;
+				}
 			}
+			return v8m_slab_pool_alloc(&dispatch->slab, cls, 0);
 		}
-		return v8m_slab_pool_alloc(&dispatch->slab, cls, 0);
+		return v8m_slab_pool_alloc_arena(
+		    slab_pool_for_arena(dispatch, arena_id), cls, 0, arena_id);
 	}
 	if (size <= V8M_BUDDY_MAX_BLOCK) {
 		return v8m_buddy_pool_alloc(&dispatch->buddy, size);
@@ -247,7 +339,7 @@ void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 	    effective <= V8M_SMALL_MAX_SIZE) {
 		uint32_t cls = v8m_size_class(effective);
 		while (cls < V8M_MEDIUM_FIRST_CLASS) {
-			uint32_t obj_size = v8m_class_to_size[cls];
+			uint32_t obj_size = v8m_size_class_size(cls);
 			if ((obj_size & (alignment - 1U)) == 0U) {
 				return v8m_slab_pool_alloc(&dispatch->slab, cls,
 							   0);
@@ -304,10 +396,16 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 			 * see v8m_dispatch_alloc for the rationale).
 			 * Overflow triggers a half-bin batch flush back
 			 * to the slab pool so the cache cannot grow
-			 * unboundedly. */
+			 * unboundedly. Lifetime-arena pages bypass the
+			 * TLC and route directly back to their owning
+			 * arena pool — the meta's `arena_id` records
+			 * which one. */
+			struct v8m_slab_pool *target =
+			    slab_pool_for_arena(dispatch, meta->arena_id);
+			bool use_tlc = dispatch->use_tlc &&
+				       meta->arena_id == V8M_ARENA_DEFAULT;
 			struct v8m_thread_cache *cache =
-			    dispatch->use_tlc ? v8m_thread_cache_get_or_create()
-					      : NULL;
+			    use_tlc ? v8m_thread_cache_get_or_create() : NULL;
 			if (cache != NULL) {
 				bool overflowed = v8m_thread_cache_free(
 				    cache, meta->size_class, ptr);
@@ -316,8 +414,7 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 					    dispatch, cache, meta->size_class);
 				}
 			} else {
-				(void)v8m_slab_pool_free(&dispatch->slab, meta,
-							 ptr);
+				(void)v8m_slab_pool_free(target, meta, ptr);
 			}
 		} else {
 			/* size_class is a Large class (38..40) or the
@@ -391,6 +488,9 @@ size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch)
 	 * spec (numa.md §6.2 first item) — alloc-time diversion is
 	 * handled by `bind_to_local_node` consulting the flag. */
 	(void)v8m_page_heap_numa_rebalance();
+	/* Per-region THP age sweep: demote regions whose alloc-time
+	 * PROMOTE has aged past the cold threshold. */
+	(void)v8m_page_heap_thp_age_sweep();
 	return released;
 }
 

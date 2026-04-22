@@ -946,6 +946,49 @@ void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc)
 	}
 }
 
+enum v8m_lifetime_class
+v8m_thread_cache_lifetime_classify(const void *caller_pc)
+{
+	struct v8m_thread_cache *cache = t_cache;
+	if (cache == NULL || cache->initialized == 0U) {
+		return V8M_LIFETIME_UNKNOWN;
+	}
+	uintptr_t pc_bits = (uintptr_t)caller_pc;
+	if (pc_bits == 0U) {
+		pc_bits = 1U;
+	}
+	uint32_t start =
+	    (uint32_t)((pc_bits >> 4U) & (V8M_LIFETIME_BUCKETS - 1U));
+	for (uint32_t step = 0; step < V8M_LIFETIME_BUCKETS; step++) {
+		uint32_t idx = (start + step) & (V8M_LIFETIME_BUCKETS - 1U);
+		const struct v8m_lifetime_bucket *bucket =
+		    &cache->lifetime_buckets[idx];
+		if (bucket->caller_pc == 0U) {
+			return V8M_LIFETIME_UNKNOWN;
+		}
+		if (bucket->caller_pc != pc_bits) {
+			continue;
+		}
+		if (bucket->sample_count == 0U) {
+			return V8M_LIFETIME_UNKNOWN;
+		}
+		ensure_lifetime_thresholds();
+		uint64_t short_thr = atomic_load_explicit(
+		    &g_lifetime_short_threshold_ticks, memory_order_relaxed);
+		uint64_t long_thr = atomic_load_explicit(
+		    &g_lifetime_long_threshold_ticks, memory_order_relaxed);
+		uint64_t ema = bucket->ema_lifetime_ticks;
+		if (ema < short_thr) {
+			return V8M_LIFETIME_EPHEMERAL;
+		}
+		if (ema < long_thr) {
+			return V8M_LIFETIME_SHORT;
+		}
+		return V8M_LIFETIME_LONG;
+	}
+	return V8M_LIFETIME_UNKNOWN;
+}
+
 void v8m_thread_cache_aggregate_lifetime(struct v8m_lifetime_stats *out)
 {
 	if (out == NULL) {

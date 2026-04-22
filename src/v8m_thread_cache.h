@@ -561,4 +561,14 @@ void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc);
 struct v8m_lifetime_stats; /* declared in v8malloc.h */
 void v8m_thread_cache_aggregate_lifetime(struct v8m_lifetime_stats *out);
 
+/*
+ * Classify the per-caller-PC lifetime EMA accumulated by the
+ * tracker. Returns one of the public `enum v8m_lifetime_class`
+ * values. Tolerates NULL caller_pc, returning UNKNOWN. Reads only
+ * the calling thread's TLC bucket — no cross-thread lookup, so
+ * the per-thread observed lifetime is what drives the answer.
+ */
+enum v8m_lifetime_class
+v8m_thread_cache_lifetime_classify(const void *caller_pc);
+
 #endif /* V8M_THREAD_CACHE_H */

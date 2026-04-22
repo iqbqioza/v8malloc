@@ -442,10 +442,18 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 	if (cache != NULL) {
 		v8m_thread_cache_predict_prefetch(cache, caller_pc);
 	}
+	/* Lifetime arena routing: hand the dispatcher the user's
+	 * caller PC so it can classify and pick the matching slab
+	 * arena (default, ephemeral, short, long). The hint is reset
+	 * to NULL after the alloc so a stale value can't leak into a
+	 * subsequent allocation that runs without v8m_malloc on the
+	 * stack (e.g. internal v8malloc machinery). */
+	v8m_dispatch_set_caller_pc(caller_pc);
 	void *ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	if (ptr == NULL && oom_handler_says_retry(size)) {
 		ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	}
+	v8m_dispatch_set_caller_pc(NULL);
 	if (ptr == NULL) {
 		errno = ENOMEM;
 		return ptr;
@@ -832,6 +840,24 @@ v8m_get_size_class_histogram(struct v8m_size_class_histogram *out)
 	v8m_thread_cache_aggregate_histogram(out);
 }
 
+V8M_EXPORT int v8m_install_size_class_table(const uint32_t *new_table)
+{
+	if (new_table != NULL && new_table[0] < 8U) {
+		errno = EINVAL;
+		return -1;
+	}
+	(void)v8m_size_class_install_table(new_table);
+	return 0;
+}
+
+V8M_EXPORT uint32_t v8m_size_class_to_bytes(int cls)
+{
+	if (cls < 0 || (uint32_t)cls >= V8M_NUM_SIZE_CLASSES) {
+		return 0U;
+	}
+	return v8m_size_class_size((uint32_t)cls);
+}
+
 V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out)
 {
 	if (out == NULL) {
@@ -842,6 +868,14 @@ V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out)
 		return;
 	}
 	v8m_thread_cache_aggregate_lifetime(out);
+}
+
+V8M_EXPORT enum v8m_lifetime_class v8m_estimate_lifetime(const void *caller_pc)
+{
+	if (!dispatch_ready()) {
+		return V8M_LIFETIME_UNKNOWN;
+	}
+	return v8m_thread_cache_lifetime_classify(caller_pc);
 }
 
 V8M_EXPORT void v8m_get_numa_balance(struct v8m_numa_balance_stats *out)
