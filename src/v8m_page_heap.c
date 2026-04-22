@@ -166,6 +166,36 @@ static bool is_power_of_two(size_t value)
 	return value != 0 && (value & (value - 1U)) == 0;
 }
 
+/*
+ * OS page size, cached on first use. POSIX guarantees
+ * sysconf(_SC_PAGESIZE) is non-negative and constant for the
+ * process lifetime, so a one-shot atomic cache is sufficient.
+ *
+ * This matters for the over-allocate-and-trim path below: mmap
+ * always returns an OS-page-aligned address, so when the caller's
+ * requested alignment fits within one OS page the trim is pure
+ * overhead. On x86_64 the OS page is 4 KiB and our typical request
+ * is 64 KiB-aligned, so the optimization stays dormant. On
+ * ppc64le with the 64 KiB kernel page (Debian / Ubuntu / RHEL
+ * default — platform-abstraction.md §5.4) and on aarch64 with
+ * 16 KiB or 64 KiB kernel pages (Asahi / certain server kernels)
+ * the optimization fires for V8M_PAGE_SIZE-aligned requests,
+ * eliminating one mmap-region's worth of VMA churn and one or two
+ * trim munmap calls per allocation.
+ */
+static size_t v8m_os_page_size(void)
+{
+	static _Atomic size_t cached = 0;
+	size_t value = atomic_load_explicit(&cached, memory_order_relaxed);
+	if (value != 0) {
+		return value;
+	}
+	long ret = sysconf(_SC_PAGESIZE);
+	value = (ret > 0) ? (size_t)ret : 4096U;
+	atomic_store_explicit(&cached, value, memory_order_relaxed);
+	return value;
+}
+
 static void record_mmap(size_t bytes)
 {
 	atomic_fetch_add_explicit(&v8m_mmap_calls, 1U, memory_order_relaxed);
@@ -196,6 +226,55 @@ static void record_munmap(size_t bytes)
  * fault-ins land on the local node, which is the entire point
  * of the pin.
  */
+/*
+ * Reserve `bytes` bytes aligned to `alignment`. When the requested
+ * alignment fits within one OS page mmap's natural alignment is
+ * sufficient and we issue a single direct mmap; otherwise we
+ * over-allocate by `alignment` and trim the unaligned head and tail.
+ * Returns NULL on overflow or mmap failure.
+ */
+static void *reserve_aligned(size_t bytes, size_t alignment)
+{
+	if (alignment <= v8m_os_page_size()) {
+		void *direct = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+				    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (direct == MAP_FAILED) {
+			return NULL;
+		}
+		record_mmap(bytes);
+		return direct;
+	}
+
+	if (bytes > SIZE_MAX - alignment) {
+		return NULL;
+	}
+	size_t request = bytes + alignment;
+	void *raw = mmap(NULL, request, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (raw == MAP_FAILED) {
+		return NULL;
+	}
+	record_mmap(request);
+
+	uintptr_t raw_addr = (uintptr_t)raw;
+	uintptr_t aligned =
+	    (raw_addr + alignment - 1U) & ~(uintptr_t)(alignment - 1U);
+	size_t pre = (size_t)(aligned - raw_addr);
+	size_t post = request - pre - bytes;
+
+	if (pre > 0) {
+		(void)munmap(raw, pre);
+		record_munmap(pre);
+	}
+	if (post > 0) {
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		(void)munmap((void *)(aligned + bytes), post);
+		record_munmap(post);
+	}
+	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+	return (void *)aligned;
+}
+
 static void bind_to_local_node(void *addr, size_t bytes)
 {
 	if (v8m_config_get(V8M_OPT_NUMA_AWARE) == 0) {
@@ -305,39 +384,16 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		/* Fall through to the regular path. */
 	}
 
-	/* Over-allocate by `alignment` so we can slide up to the next
-	 * aligned boundary and trim whatever lies outside. Guard against
-	 * size_t overflow in the addition. */
-	if (bytes > SIZE_MAX - alignment) {
+	/* Regular path. reserve_aligned picks between a single direct
+	 * mmap (when alignment fits within one OS page — common on
+	 * ppc64le 64 KiB kernels and aarch64 16/64 KiB kernels) and the
+	 * over-allocate-and-trim fallback (the only option on x86_64
+	 * where the 4 KiB OS page is smaller than every
+	 * V8M_PAGE_SIZE-shaped request). */
+	void *result = reserve_aligned(bytes, alignment);
+	if (result == NULL) {
 		return NULL;
 	}
-	size_t request = bytes + alignment;
-
-	void *raw = mmap(NULL, request, PROT_READ | PROT_WRITE,
-			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (raw == MAP_FAILED) {
-		return NULL;
-	}
-	record_mmap(request);
-
-	uintptr_t raw_addr = (uintptr_t)raw;
-	uintptr_t aligned =
-	    (raw_addr + alignment - 1U) & ~(uintptr_t)(alignment - 1U);
-	size_t pre = (size_t)(aligned - raw_addr);
-	size_t post = request - pre - bytes;
-
-	if (pre > 0) {
-		(void)munmap(raw, pre);
-		record_munmap(pre);
-	}
-	if (post > 0) {
-		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-		(void)munmap((void *)(aligned + bytes), post);
-		record_munmap(post);
-	}
-
-	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-	void *result = (void *)aligned;
 	if (region_register(result, bytes) != 0) {
 		/* Region table is full — undo the mmap so the caller
 		 * never sees a pointer the foreign-detection path

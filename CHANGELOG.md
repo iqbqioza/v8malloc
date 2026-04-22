@@ -6,6 +6,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- `v8m_page_heap_alloc` skips the over-allocate-and-trim path
+  when the requested alignment fits within one OS page
+  (`src/v8m_page_heap.c`, platform-abstraction.md §5.4 /
+  TODO Tier 2 ppc64le entry). mmap returns an OS-page-aligned
+  address by definition, so for those requests a single direct
+  mmap is sufficient — saves one extra `alignment` bytes of VMA
+  reservation and the matching trim munmap call(s) per
+  allocation. Gated on a cached `sysconf(_SC_PAGESIZE)` result.
+  Active on ppc64le (64 KiB kernel pages — Debian / Ubuntu /
+  RHEL default) and on aarch64 with 16 KiB or 64 KiB kernel
+  pages (Asahi / certain server kernels). Dormant on x86_64,
+  where the 4 KiB OS page is always smaller than our
+  V8M_PAGE_SIZE-shaped requests, so the existing
+  over-allocate-and-trim path runs unchanged. Refactored the
+  reservation logic into a `reserve_aligned` helper so
+  `v8m_page_heap_alloc` retains a flat top-level structure
+  (kept clang-tidy's cognitive-complexity score under threshold).
+
 ### Added
 - `v8m_get_frag_metrics` now reports aggregate slab utilization
   alongside the page-heap-derived counters
