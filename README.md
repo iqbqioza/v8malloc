@@ -1,5 +1,7 @@
 ![v8malloc logo](./docs/v8malloc.png)
 
+[![CI](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml)
+
 # v8malloc
 
 A high-performance memory allocator for Linux, designed to outperform

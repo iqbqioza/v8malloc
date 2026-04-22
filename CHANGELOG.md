@@ -6,6 +6,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Background purge thread (`src/v8m_bg_purge.{h,c}`,
+  fragmentation.md §6.3). Spawned at the end of
+  `v8m_constructor` after the dispatcher is fully usable;
+  joined at the start of `v8m_destructor` before the init
+  state flips to TORN_DOWN. Sleeps via
+  `pthread_cond_timedwait` so shutdown is a single futex hop
+  regardless of the configured `V8M_OPT_PURGE_INTERVAL` —
+  no waiting out the full interval at process exit. The
+  period is re-read each tick so a runtime
+  `v8m_set_option(V8M_OPT_PURGE_INTERVAL, ...)` is picked up
+  on the next iteration. v0 scan body is a stub that emits
+  one stats line to stderr per tick when `V8M_OPT_VERBOSE`
+  is set, otherwise no-op (the slab and buddy pools already
+  release empty pages eagerly on free, so there is no actual
+  purge work today). Real per-NUMA empty-page sweep, TLC bin
+  shrink, and VMA-count threshold warning hook into the
+  same loop as those subsystems land. Spawn failure is
+  non-fatal: the constructor logs to stderr but the
+  allocator stays usable.
+
 ### Changed
 - Init lifecycle is now a four-state machine
   (`src/v8m_api.c`). `enum v8m_init_state` carries

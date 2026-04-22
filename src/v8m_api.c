@@ -27,6 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "v8m_bg_purge.h"
 #include "v8m_bootstrap.h"
 #include "v8m_buddy_pool.h"
 #include "v8m_config.h"
@@ -192,6 +193,17 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	}
 	atomic_store_explicit(&g_init_state, V8M_INIT_READY,
 			      memory_order_release);
+
+	/* Background purge thread spawns last so the dispatcher and
+	 * fork handlers are fully usable before the thread can run.
+	 * Failure to spawn is non-fatal: the allocator stays usable,
+	 * we just lose the periodic scan. */
+	int bg_rc = v8m_bg_purge_init();
+	if (bg_rc != 0) {
+		(void)write(
+		    STDERR_FILENO, "v8malloc: bg purge thread spawn failed\n",
+		    sizeof("v8malloc: bg purge thread spawn failed\n") - 1U);
+	}
 }
 
 __attribute__((destructor(101))) static void v8m_destructor(void)
@@ -216,6 +228,12 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 *   atexit-based teardown that defers munmaps until after
 	 *   stdio cleanup.
 	 */
+	/* Stop the bg purge thread before flipping state so the
+	 * thread's last loop body sees READY (avoids it spinning on
+	 * stale state during shutdown). The shutdown path uses a
+	 * condvar signal, so the join completes within a futex hop
+	 * regardless of the configured purge interval. */
+	v8m_bg_purge_shutdown();
 	(void)atomic_exchange_explicit(&g_init_state, V8M_INIT_TORN_DOWN,
 				       memory_order_acquire);
 }
