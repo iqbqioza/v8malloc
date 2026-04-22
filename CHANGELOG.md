@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Documented
+- Tier 2 RISC-V 64 support is explicit in the build system
+  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
+  — platform-abstraction.md §4.3 / TODO Tier 2 riscv64 entry.
+  Added a dedicated `elseif(... riscv64)` branch to
+  `V8MALLOC_ARCH_FLAGS` so a future tuning flag has a place to
+  drop in; the branch ships empty today because every spec
+  feature lowers from existing toolchain primitives:
+  `stdatomic` emits LR.D/SC.D on baseline rv64gc and AMOCAS when
+  the target advertises the Zacas extension; `__builtin_clzll` /
+  `ctzll` / `popcountll` lower to CLZ.D / CTZ.D / CPOP.D when
+  Zbb is on and to the documented software emulation otherwise;
+  the FENCE instructions stdatomic emits cover the RVWMO memory
+  model. Cache line is 64 B on the two parts most QEMU rootfses
+  model (SiFive U74, T-Head C910); a future cycle adds a runtime
+  probe via `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)` for hosts that
+  diverge. The spec'd runtime hwprobe ISA query is documented as
+  out-of-scope for v0 — the codegen choice is locked at compile
+  time, so a runtime probe would be purely diagnostic.
+
 - Tier 3 LoongArch 64 support is explicit in the build system
   (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
   — platform-abstraction.md §4.6 / TODO Tier 3 loongarch64

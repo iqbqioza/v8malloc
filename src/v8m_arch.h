@@ -29,6 +29,19 @@
 #define V8M_ARCH_AARCH64 1
 #define V8M_CACHE_LINE_SIZE 64
 #elif defined(__riscv) && (__riscv_xlen == 64)
+/*
+ * RISC-V 64. Tier 2. Toolchain-driven feature use: stdatomic
+ * lowers to LR.D/SC.D on baseline rv64gc and to AMOCAS when the
+ * target advertises the Zacas extension; __builtin_clzll /
+ * ctzll / popcountll lower to CLZ.D / CTZ.D / CPOP.D when Zbb
+ * is on, otherwise fall back to the documented software
+ * emulation. The cache line is implementation-defined (64 B on
+ * SiFive U74 and T-Head C910 — the two parts most QEMU rootfses
+ * model); a future cycle adds a runtime probe via
+ * sysconf(_SC_LEVEL1_DCACHE_LINESIZE) for hosts that diverge.
+ * Memory model is RVWMO; the FENCE instructions stdatomic
+ * emits cover the model.
+ */
 #define V8M_ARCH_RISCV64 1
 #define V8M_CACHE_LINE_SIZE 64
 #elif defined(__powerpc64__) && defined(__LITTLE_ENDIAN__)

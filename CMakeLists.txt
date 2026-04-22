@@ -140,6 +140,22 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le|powerpc64le")
 	set(V8MALLOC_ARCH_FLAGS -mcpu=power9)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
 	set(V8MALLOC_ARCH_FLAGS -march=z14)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+	# RISC-V 64. Tier 2. No fixed -march override here so the
+	# build picks up whatever the cross toolchain was configured
+	# with (typically rv64gc on Debian / Ubuntu cross images).
+	# When the target advertises the Zbb bit-manipulation
+	# extension (-march=rv64gc_zbb or richer), GCC >= 13 / Clang
+	# >= 16 emit CLZ.D / CTZ.D / CPOP.D for __builtin_*; the
+	# fallback when Zbb is absent is the documented software
+	# emulation. Atomics work the same way: stdatomic emits
+	# LR/SC sequences on baseline rv64gc and AMOCAS instructions
+	# when the target advertises the Zacas extension. The
+	# spec'd runtime hwprobe ISA query (numa.md / RISC-V
+	# `__NR_riscv_hwprobe`) is documented as out-of-scope for
+	# v0 — the codegen choice is already locked in at compile
+	# time, so a runtime probe is purely diagnostic.
+	set(V8MALLOC_ARCH_FLAGS)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "loongarch64")
 	# LoongArch: no per-arch flag override needed. The toolchain
 	# (GCC >= 13 / Clang >= 16, already gated above) emits DBAR
