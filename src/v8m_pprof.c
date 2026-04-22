@@ -480,7 +480,13 @@ static int stream_gzip_to_fd(int out_fd, const uint8_t *buf, size_t len)
 		block_hdr[0] = is_final ? 0x01U : 0x00U;
 		block_hdr[1] = (uint8_t)(block_len & 0xFFU);
 		block_hdr[2] = (uint8_t)((block_len >> 8U) & 0xFFU);
-		uint16_t nlen = (uint16_t)~(uint16_t)block_len;
+		/* gzip stored block carries len + ~len (one's complement
+		 * truncated to 16 bits). Compute via XOR-with-0xFFFF on a
+		 * named uint16_t so the formatter does not chain two casts
+		 * on one expression — clang-format 18 and 19 disagree on
+		 * the spacing of `(uint16_t)~(uint16_t)x`. */
+		uint16_t block_len_u16 = (uint16_t)block_len;
+		uint16_t nlen = (uint16_t)(block_len_u16 ^ 0xFFFFU);
 		block_hdr[3] = (uint8_t)(nlen & 0xFFU);
 		block_hdr[4] = (uint8_t)((nlen >> 8U) & 0xFFU);
 		if (stream_to_fd(out_fd, block_hdr, sizeof(block_hdr)) != 0) {
