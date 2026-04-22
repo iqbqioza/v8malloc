@@ -11,13 +11,43 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
 #include "v8m_huge_slab.h"
 #include "v8m_numa.h" /* V8M_NUMA_MAX_NODES — surfaces through the header */
 #include "v8m_page_heap.h" /* v8m_page_heap_alloc / _free for huge pages */
+
+/*
+ * Allocate / release a `v8m_huge_slab` descriptor via mmap. We avoid
+ * calling malloc here because the slab pool path (the pool's
+ * primary consumer) holds its own mutex while requesting a fresh
+ * huge page; routing through libc / v8m malloc would re-enter the
+ * same slab pool and deadlock. mmap returns kernel-page-aligned
+ * pages and the descriptor is small (~40 bytes), so each
+ * descriptor wastes about one OS page — acceptable given the rate
+ * is one descriptor per huge page (roughly one per V8M_HUGE_PAGE_SIZE
+ * bytes of slab capacity).
+ */
+static struct v8m_huge_slab *desc_alloc(void)
+{
+	void *raw =
+	    mmap(NULL, sizeof(struct v8m_huge_slab), PROT_READ | PROT_WRITE,
+		 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (raw == MAP_FAILED) {
+		return NULL;
+	}
+	return raw;
+}
+
+static void desc_free(struct v8m_huge_slab *desc)
+{
+	if (desc == NULL) {
+		return;
+	}
+	(void)munmap(desc, sizeof(*desc));
+}
 
 /*
  * Allocate a fresh huge page + its descriptor for `node`. Caller
@@ -31,7 +61,7 @@ static struct v8m_huge_slab *add_huge_page(struct v8m_numa_pool_node *node)
 	if (base == NULL) {
 		return NULL;
 	}
-	struct v8m_huge_slab *slab = malloc(sizeof(*slab));
+	struct v8m_huge_slab *slab = desc_alloc();
 	if (slab == NULL) {
 		v8m_page_heap_free(base, V8M_HUGE_PAGE_SIZE);
 		return NULL;
@@ -86,7 +116,7 @@ static void destroy_list(struct v8m_huge_slab *head)
 		if (head->base != NULL) {
 			v8m_page_heap_free(head->base, V8M_HUGE_PAGE_SIZE);
 		}
-		free(head);
+		desc_free(head);
 		head = next;
 	}
 }
@@ -206,7 +236,7 @@ bool v8m_numa_pool_release_slab(struct v8m_numa_pool *pool, void *slab)
 		if (v8m_huge_slab_is_empty(desc)) {
 			(void)list_unlink(&node->partials, desc);
 			void *base = desc->base;
-			free(desc);
+			desc_free(desc);
 			node->huge_pages_alive--;
 			node->huge_pages_released++;
 			(void)pthread_mutex_unlock(&node->lock);

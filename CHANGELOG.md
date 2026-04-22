@@ -6,6 +6,45 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- Production wiring of four primitive modules that previously
+  shipped standalone:
+  - **Anchor reservation**: the page heap's `anchor_or_mmap`
+    helper now carves THP-eligible allocations (≥
+    `V8M_HUGE_PAGE_SIZE`) from the global anchor's PROT_NONE
+    region before falling back to discrete mmap. The
+    `region_entry` carries an `is_anchor` flag so the matching
+    free routes through `v8m_anchor_reservation_release`
+    (`MADV_DONTNEED` + `mprotect(PROT_NONE)`) instead of munmap.
+    Saves one VMA per carve. Two new `struct v8m_page_heap_stats`
+    counters: `anchor_carve_calls`, `anchor_carve_failures`. The
+    anchor's carve path was extended to align on absolute address
+    (base + bump_offset) rather than just bump_offset, so 2 MiB
+    carves succeed on a 4 KiB-aligned anchor base.
+  - **Per-NUMA huge-page pool**: the slab pool's fresh-page
+    acquisition now routes through the global per-NUMA pool
+    (`g_slab_numa_pool`) when the dispatcher singleton's
+    `use_numa_pool` flag is set. Test fixtures that create their
+    own slab pools leave the flag false and stay on the discrete
+    page-heap path. Numa-pool descriptor allocations route
+    through mmap directly to avoid the malloc-recurse-into-slab
+    deadlock.
+  - **Time-based EMA refill controller**: the dispatcher
+    instances `g_l2_refill` and consults it for the L1↔L2 batch
+    size in both `try_tlc_fast_paths` (refill) and
+    `slab_overflow_to_l2_or_slab` (overflow), replacing the
+    fixed `V8M_DISPATCH_L2_BATCH = 32` constant. Frequent TLC
+    underflows push the batch up; sparse underflows shrink it.
+  - **NUMA imbalance action half**: the bg purge tick now calls
+    `v8m_page_heap_numa_rebalance` which toggles per-node atomic
+    `v8m_per_node_suppressed` flags based on the live balance
+    snapshot. `bind_to_local_node` consults the flag at
+    allocation time and diverts to the nearest non-suppressed
+    neighbour via `v8m_numa_fallback_node`. Diagnostic counter
+    `v8m_page_heap_numa_rebalance_diversions()` exposes how many
+    allocations the action rerouted.
+  All 38 tests pass with the wirings live.
+
 ### Added
 - Per-NUMA-node huge-page pool primitive
   (`src/v8m_numa_pool.{h,c}`). Owns a list of

@@ -22,18 +22,40 @@
 #include "v8m_libc_fallback.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
+#include "v8m_refill_controller.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
 #include "v8m_thread_cache.h"
 
 /*
- * Batch sizes for the TLC↔L2 plumbing. Bigger batches amortize
- * the L2 CAS over more nodes; smaller batches keep the
- * interactions short. 32 is a comfortable middle — enough to
- * cover a typical TLC overflow + a typical underflow refill in
- * one L2 round trip without overshooting bin capacity.
+ * Default batch size for the TLC↔L2 plumbing. The runtime batch
+ * size is computed by the time-based EMA refill controller below
+ * (`g_l2_refill`); this constant is the fallback used when the
+ * controller is unavailable (rare; only during the controller's
+ * first call before any inter-arrival data is seen).
  */
 #define V8M_DISPATCH_L2_BATCH 32U
+
+/*
+ * Time-based EMA refill controller for the TLC↔L2 boundary. One
+ * shared instance across every TLC because the L2 cache itself is
+ * per-CPU; per-class state inside the controller tracks demand
+ * separately for each size class. The controller's batch decision
+ * adapts to inter-arrival rate: frequent refills push the batch
+ * size up to amortize L2 CAS cost; sparse refills shrink the
+ * batch to avoid hoarding cached slots.
+ *
+ * The L2 boundary is not the spec's primary target (the spec
+ * scopes the controller to L2↔L3 / L3↔L4 where the per-refill
+ * cost is dominated by lock acquisition + TLB pressure), but the
+ * v0 dispatcher's L1↔L2 path is the closest production
+ * boundary — the L3 / L4 tiers don't yet exist as discrete
+ * refill destinations. Using the controller here delivers a real
+ * adaptive batch instead of the prior fixed `V8M_DISPATCH_L2_BATCH`
+ * constant; the rdtsc cost on the TLC-miss path is one rdtsc + a
+ * couple of divides, acceptable for the slow path.
+ */
+static struct v8m_refill_controller g_l2_refill;
 
 /*
  * Slab-class fast path: try the TLC bin, drain the remote queue
@@ -66,8 +88,14 @@ static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 	}
 	void *batch_head = NULL;
 	void *batch_tail = NULL;
-	size_t got = v8m_core_cache_pop_batch(
-	    l2_cache, cls, V8M_DISPATCH_L2_BATCH, &batch_head, &batch_tail);
+	/* Adaptive batch via the EMA refill controller. Each refill
+	 * counts as one demand event; the EMA tracks the inter-arrival
+	 * rate. Frequent TLC underflows push the batch up; sparse
+	 * underflows shrink it. */
+	uint32_t batch_size =
+	    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
+	size_t got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
+					      &batch_head, &batch_tail);
 	if (got == 0U) {
 		return NULL;
 	}
@@ -89,9 +117,10 @@ static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
 	if (l2_cache != NULL) {
 		void *chain_head = NULL;
 		void *chain_tail = NULL;
+		uint32_t batch_size =
+		    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
 		size_t drained = v8m_thread_cache_drain_chain(
-		    cache, cls, V8M_DISPATCH_L2_BATCH, &chain_head,
-		    &chain_tail);
+		    cache, cls, batch_size, &chain_head, &chain_tail);
 		if (drained > 0U) {
 			(void)v8m_core_cache_push_batch(l2_cache, cls,
 							chain_head, chain_tail);
@@ -113,6 +142,7 @@ int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 		return ret;
 	}
 	dispatch->use_tlc = false;
+	v8m_refill_controller_init(&g_l2_refill);
 	return 0;
 }
 
@@ -354,8 +384,14 @@ size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch)
 	if (dispatch == NULL) {
 		return 0;
 	}
-	return v8m_buddy_pool_sweep_idle(&dispatch->buddy,
-					 V8M_DISPATCH_BUDDY_IDLE_TICKS);
+	size_t released = v8m_buddy_pool_sweep_idle(
+	    &dispatch->buddy, V8M_DISPATCH_BUDDY_IDLE_TICKS);
+	/* NUMA rebalance action: re-evaluate per-node imbalance and
+	 * toggle each node's suppressed flag. The action half of the
+	 * spec (numa.md §6.2 first item) — alloc-time diversion is
+	 * handled by `bind_to_local_node` consulting the flag. */
+	(void)v8m_page_heap_numa_rebalance();
+	return released;
 }
 
 size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch)

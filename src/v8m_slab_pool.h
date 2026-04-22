@@ -56,6 +56,14 @@ struct v8m_slab_pool {
 	 * the slab.lock and the head of buddy.arenas[0] would share
 	 * a line on x86_64 (where V8M_CACHE_LINE_SIZE == 64). */
 	V8M_CACHELINE_ALIGNED pthread_mutex_t lock;
+	/* When true, fresh slab pages are sourced from the global
+	 * per-NUMA huge-page pool (`g_slab_numa_pool`) instead of
+	 * direct page-heap mmap. The dispatcher singleton sets this
+	 * in the constructor; isolated test pools leave it false so
+	 * their alloc/free path stays on the discrete page-heap path
+	 * (avoids cross-pool slab-page sharing through the global
+	 * numa_pool). */
+	bool use_numa_pool;
 };
 
 /*
@@ -110,5 +118,30 @@ struct v8m_slab_pool_aggregate_stats {
 
 void v8m_slab_pool_get_aggregate_stats(
     struct v8m_slab_pool *pool, struct v8m_slab_pool_aggregate_stats *out);
+
+/*
+ * Initialize the global per-NUMA huge-page pool that sources slab
+ * pages for any v8m_slab_pool instance with `use_numa_pool` set.
+ * Returns 0 on success or a negative errno on init failure.
+ * Idempotent: a second call returns 0 without re-initializing.
+ */
+int v8m_slab_pool_global_init(void);
+
+/*
+ * Tear down the global per-NUMA huge-page pool. Releases every
+ * huge page held by every node back to the page heap. Safe on a
+ * never-initialized global.
+ */
+void v8m_slab_pool_global_destroy(void);
+
+/*
+ * Opt the pool into routing fresh slab pages through the global
+ * per-NUMA huge-page pool (true) or keeping the discrete page-heap
+ * path (false). The dispatcher singleton's constructor sets this
+ * to true after `v8m_slab_pool_global_init` succeeds; isolated
+ * test pools stay on false.
+ */
+void v8m_slab_pool_set_use_numa_pool(struct v8m_slab_pool *pool,
+				     bool use_numa_pool);
 
 #endif /* V8M_SLAB_POOL_H */

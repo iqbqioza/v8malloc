@@ -218,6 +218,15 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	 * fixtures that create their own dispatcher leave use_tlc false
 	 * to avoid mixing slab pages from different pools. */
 	v8m_dispatch_set_use_tlc(&g_dispatch, true);
+	/* Wire the global per-NUMA huge-page pool and route the global
+	 * slab pool's fresh-page acquisitions through it. Failure to
+	 * init the per-NUMA pool is non-fatal — the slab pool falls
+	 * back to discrete page-heap allocation. Test fixtures that
+	 * create their own slab pools never opt in, so their pages
+	 * stay on the discrete path. */
+	if (v8m_slab_pool_global_init() == 0) {
+		v8m_slab_pool_set_use_numa_pool(&g_dispatch.slab, true);
+	}
 	/* Register fork handlers before publishing READY so that any
 	 * thread that calls fork() the moment we go live sees the
 	 * locks acquired in deterministic order. pthread_atfork itself

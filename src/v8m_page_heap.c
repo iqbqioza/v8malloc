@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "v8m_anchor_reservation.h"
 #include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
 #include "v8m_config.h"
 #include "v8m_internal.h"
@@ -63,6 +64,51 @@ static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
  */
 static _Atomic uint64_t v8m_thp_promote_calls = 0;
 static _Atomic uint64_t v8m_thp_demote_calls = 0;
+
+/*
+ * Process-wide anchor reservation. Lazy-initialized on first
+ * THP-eligible allocation that would otherwise mmap discretely.
+ * When the carve fits inside the anchor's remaining capacity we
+ * substitute the carve for the discrete mmap, saving one VMA per
+ * allocation. The anchor lives inside one PROT_NONE region — the
+ * kernel sees one VMA for the entire reservation regardless of how
+ * many sub-carves we issue.
+ */
+static struct v8m_anchor_reservation g_anchor;
+static atomic_bool g_anchor_initialized;
+/* pthread.h supplies pthread_once_t; the IWYU rule prefers the deeper
+ * bits/pthreadtypes.h which is an internal glibc header. */
+static pthread_once_t g_anchor_once = /* NOLINT(misc-include-cleaner) */
+    PTHREAD_ONCE_INIT;
+static _Atomic uint64_t v8m_anchor_carve_calls = 0;
+static _Atomic uint64_t v8m_anchor_carve_failures = 0;
+
+static void anchor_lazy_init(void)
+{
+	if (v8m_anchor_reservation_init(&g_anchor, 0U) == 0) {
+		atomic_store_explicit(&g_anchor_initialized, true,
+				      memory_order_release);
+	}
+}
+
+static struct v8m_anchor_reservation *anchor_get(void)
+{
+	(void)pthread_once(&g_anchor_once, anchor_lazy_init);
+	if (!atomic_load_explicit(&g_anchor_initialized,
+				  memory_order_acquire)) {
+		return NULL;
+	}
+	return &g_anchor;
+}
+
+void v8m_page_heap_anchor_destroy_for_test(void)
+{
+	if (atomic_load_explicit(&g_anchor_initialized, memory_order_acquire)) {
+		v8m_anchor_reservation_destroy(&g_anchor);
+		atomic_store_explicit(&g_anchor_initialized, false,
+				      memory_order_release);
+	}
+}
 static _Atomic uint64_t g_thp_last_alloc_tsc;
 static _Atomic uint64_t g_thp_ema_ticks;
 static _Atomic uint64_t g_thp_cold_threshold_ticks;
@@ -122,6 +168,12 @@ struct region_entry {
 	 * v8m_get_numa_balance — without it, the free path would
 	 * have no way to decrement the right counter. */
 	uint16_t node;
+	/* True when the region was carved from the global anchor
+	 * reservation rather than mmap'd discretely. Free routes
+	 * through `v8m_anchor_reservation_release` instead of munmap;
+	 * the virtual slot stays inside the anchor's PROT_NONE VMA
+	 * and is not reclaimable (bump-only). */
+	bool is_anchor;
 };
 
 #define V8M_REGION_NODE_UNBOUND UINT16_MAX
@@ -145,12 +197,26 @@ static pthread_mutex_t g_region_lock = /* NOLINT(misc-include-cleaner) */
  */
 static _Atomic uint64_t v8m_per_node_bytes[V8M_NUMA_MAX_NODES];
 
+/*
+ * Per-node "suppressed" flag (numa.md §6.2 first action). Set true
+ * by `v8m_page_heap_numa_rebalance` when the bg purge thread sees
+ * the node holding ≥ 150 % of the average across live nodes; new
+ * allocations on a suppressed node fall back to the nearest
+ * neighbour via `v8m_numa_fallback_node`. The flag clears when the
+ * imbalance subsides on a later tick. Atomic so the bg-thread
+ * writer and the alloc-path reader race-free.
+ */
+static _Atomic bool v8m_per_node_suppressed[V8M_NUMA_MAX_NODES];
+/* Counter of how many times the rebalance hook diverted an alloc
+ * away from the calling thread's overloaded node. Diagnostic. */
+static _Atomic uint64_t v8m_numa_rebalance_diversions;
+
 /* Lock-step the public ABI's per-node array width to the internal
  * NUMA cap so the snapshot helper never reads past either bound. */
 _Static_assert(V8M_NUMA_MAX_NODES == V8M_PUBLIC_NUMA_MAX_NODES,
 	       "public NUMA node cap must match internal cap");
 
-static int region_register(void *ptr, size_t bytes)
+static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 {
 	(void)pthread_mutex_lock(&g_region_lock);
 	if (g_region_count >= V8M_REGION_MAP_CAPACITY) {
@@ -161,9 +227,15 @@ static int region_register(void *ptr, size_t bytes)
 	g_regions[g_region_count].start = start;
 	g_regions[g_region_count].end = start + bytes;
 	g_regions[g_region_count].node = V8M_REGION_NODE_UNBOUND;
+	g_regions[g_region_count].is_anchor = is_anchor;
 	g_region_count++;
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return 0;
+}
+
+static int region_register(void *ptr, size_t bytes)
+{
+	return region_register_with_flags(ptr, bytes, false);
 }
 
 /*
@@ -191,14 +263,17 @@ static void region_record_node(const void *ptr, uint16_t node)
  * or V8M_REGION_NODE_UNBOUND if the region was never bound or is
  * not present.
  */
-static uint16_t region_unregister(const void *ptr)
+static uint16_t region_unregister_with_flags(const void *ptr,
+					     bool *out_is_anchor)
 {
 	uintptr_t start = (uintptr_t)ptr;
 	uint16_t node = V8M_REGION_NODE_UNBOUND;
+	*out_is_anchor = false;
 	(void)pthread_mutex_lock(&g_region_lock);
 	for (size_t i = 0; i < g_region_count; i++) {
 		if (g_regions[i].start == start) {
 			node = g_regions[i].node;
+			*out_is_anchor = g_regions[i].is_anchor;
 			/* Swap-remove to keep the lookup scan
 			 * compact. Order in the array does not matter. */
 			g_regions[i] = g_regions[--g_region_count];
@@ -362,6 +437,30 @@ static int bind_to_local_node(void *addr, size_t bytes)
 	if (node >= node_count) {
 		return -1;
 	}
+	/* NUMA imbalance rebalance (numa.md §6.2 first action). When
+	 * the bg purge thread has flagged this node as suppressed —
+	 * because it holds ≥ 150 % of the average across live nodes —
+	 * route this allocation to the nearest non-suppressed
+	 * neighbour instead. The diversion counter surfaces in the
+	 * rebalance stats so a maintainer can confirm the path
+	 * fired. */
+	if (atomic_load_explicit(&v8m_per_node_suppressed[node],
+				 memory_order_relaxed)) {
+		for (uint32_t rank = 0; rank < node_count; rank++) {
+			uint32_t alt = v8m_numa_fallback_node(node, rank);
+			if (alt >= node_count || alt == node) {
+				continue;
+			}
+			if (!atomic_load_explicit(&v8m_per_node_suppressed[alt],
+						  memory_order_relaxed)) {
+				node = alt;
+				atomic_fetch_add_explicit(
+				    &v8m_numa_rebalance_diversions, 1U,
+				    memory_order_relaxed);
+				break;
+			}
+		}
+	}
 
 	/* Build a unsigned-long bitmap with just our node's bit set.
 	 * The kernel reads `maxnode + 1` bits of the mask; setting
@@ -467,6 +566,105 @@ void v8m_page_heap_thp_test_inject(uint64_t cold_threshold_ticks,
 	atomic_store_explicit(&g_thp_last_alloc_tsc, 0U, memory_order_relaxed);
 }
 
+/*
+ * Anchor-or-mmap: VMA-minimization fallback for THP-eligible
+ * allocations. Tries the global anchor first when the request is at
+ * or above V8M_HUGE_PAGE_SIZE — every successful carve saves one
+ * VMA over the per-allocation discrete mmap path. Falls back to
+ * `reserve_aligned` (over-allocate-and-trim mmap) when the anchor
+ * is too small, the carve doesn't fit, or the lazy init failed.
+ * `*used_anchor` is set true iff the result came from the carve
+ * path so the caller can route the matching free correctly.
+ */
+static void *anchor_or_mmap(size_t bytes, size_t alignment, bool *used_anchor)
+{
+	*used_anchor = false;
+	if (bytes >= V8M_HUGE_PAGE_SIZE) {
+		struct v8m_anchor_reservation *anchor = anchor_get();
+		if (anchor != NULL) {
+			void *carved = v8m_anchor_reservation_carve(
+			    anchor, bytes, alignment);
+			if (carved != NULL) {
+				*used_anchor = true;
+				atomic_fetch_add_explicit(
+				    &v8m_anchor_carve_calls, 1U,
+				    memory_order_relaxed);
+				return carved;
+			}
+			atomic_fetch_add_explicit(&v8m_anchor_carve_failures,
+						  1U, memory_order_relaxed);
+		}
+	}
+	return reserve_aligned(bytes, alignment);
+}
+
+/*
+ * Try MAP_HUGETLB | MAP_HUGE_1GB for Gigantic-class requests.
+ * Returns the mapped pointer on success or NULL when the request
+ * isn't shaped for the path or the syscall failed (caller falls
+ * through to the next-larger huge-page attempt).
+ */
+static void *try_gigantic(size_t bytes, size_t alignment)
+{
+	if (bytes < V8M_GIGANTIC_BYTES ||
+	    (bytes & (V8M_GIGANTIC_BYTES - 1U)) != 0U ||
+	    alignment < V8M_GIGANTIC_BYTES ||
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) == 0) {
+		return NULL;
+	}
+	atomic_fetch_add_explicit(&v8m_gigantic_alloc_calls, 1U,
+				  memory_order_relaxed);
+	void *gigantic =
+	    mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+		 MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | V8M_MAP_HUGE_1GB,
+		 -1, 0);
+	if (gigantic != MAP_FAILED) {
+		return gigantic;
+	}
+	atomic_fetch_add_explicit(&v8m_gigantic_alloc_failures, 1U,
+				  memory_order_relaxed);
+	return NULL;
+}
+
+/*
+ * Try MAP_HUGETLB for 2 MiB-class requests. Returns the mapped
+ * pointer on success or NULL on failure / unsupported shape.
+ */
+static void *try_hugetlb(size_t bytes, size_t alignment)
+{
+	if (bytes < V8M_HUGE_PAGE_SIZE ||
+	    (bytes & (V8M_HUGE_PAGE_SIZE - 1U)) != 0U ||
+	    alignment < V8M_HUGE_PAGE_SIZE ||
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) == 0) {
+		return NULL;
+	}
+	atomic_fetch_add_explicit(&v8m_hugetlb_alloc_calls, 1U,
+				  memory_order_relaxed);
+	void *huge = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+			  MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+	if (huge != MAP_FAILED) {
+		return huge;
+	}
+	atomic_fetch_add_explicit(&v8m_hugetlb_alloc_failures, 1U,
+				  memory_order_relaxed);
+	return NULL;
+}
+
+/* Common register-and-bind tail for the kernel-direct mmap paths
+ * (Gigantic + HUGETLB). On region-table-full undoes the mmap so
+ * the caller never sees an unclassifiable pointer. */
+static void *register_and_bind_mmap(void *ptr, size_t bytes)
+{
+	record_mmap(bytes);
+	if (region_register(ptr, bytes) != 0) {
+		(void)munmap(ptr, bytes);
+		record_munmap(bytes);
+		return NULL;
+	}
+	bind_and_account(ptr, bytes);
+	return ptr;
+}
+
 void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 {
 	if (bytes == 0 || alignment < V8M_PAGE_SIZE ||
@@ -474,91 +672,33 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		return NULL;
 	}
 
-	/* Try MAP_HUGETLB | MAP_HUGE_1GB first for Gigantic-class
-	 * requests (size + alignment ≥ 1 GiB, both 1 GiB-multiple,
-	 * V8M_OPT_HUGE_PAGES on). On a kernel with reserved 1 GiB
-	 * huge pages this is the densest possible mapping; on every
-	 * other host (the common case — CI, dev containers, most
-	 * production systems without a `hugepagesz=1G` boot
-	 * argument) the syscall fails and we fall through to the
-	 * 2 MiB MAP_HUGETLB attempt below, then ultimately to the
-	 * regular mmap + MADV_HUGEPAGE path (huge-pages.md §7). */
-	if (bytes >= V8M_GIGANTIC_BYTES &&
-	    (bytes & (V8M_GIGANTIC_BYTES - 1U)) == 0U &&
-	    alignment >= V8M_GIGANTIC_BYTES &&
-	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
-		atomic_fetch_add_explicit(&v8m_gigantic_alloc_calls, 1U,
-					  memory_order_relaxed);
-		void *gigantic = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-				      MAP_PRIVATE | MAP_ANONYMOUS |
-					  MAP_HUGETLB | V8M_MAP_HUGE_1GB,
-				      -1, 0);
-		if (gigantic != MAP_FAILED) {
-			record_mmap(bytes);
-			if (region_register(gigantic, bytes) != 0) {
-				(void)munmap(gigantic, bytes);
-				record_munmap(bytes);
-				return NULL;
-			}
-			bind_and_account(gigantic, bytes);
-			return gigantic;
-		}
-		atomic_fetch_add_explicit(&v8m_gigantic_alloc_failures, 1U,
-					  memory_order_relaxed);
-		/* Fall through to the 2 MiB MAP_HUGETLB attempt. */
+	void *gigantic = try_gigantic(bytes, alignment);
+	if (gigantic != NULL) {
+		return register_and_bind_mmap(gigantic, bytes);
+	}
+	void *huge = try_hugetlb(bytes, alignment);
+	if (huge != NULL) {
+		return register_and_bind_mmap(huge, bytes);
 	}
 
-	/* Try MAP_HUGETLB first when the request is shaped for it:
-	 * size is a multiple of the kernel huge-page size,
-	 * alignment is at least the kernel huge-page size, and
-	 * V8M_OPT_HUGE_PAGES allows it. The kernel returns a
-	 * huge-page-aligned address so no over-allocate-and-trim is
-	 * needed; on failure (no reserved huge pages — the typical
-	 * case in containers and CI) we fall through to the regular
-	 * mmap + MADV_HUGEPAGE path, which is documented as the
-	 * supported fallback for this code path (huge-pages.md §4.1). */
-	if (bytes >= V8M_HUGE_PAGE_SIZE &&
-	    (bytes & (V8M_HUGE_PAGE_SIZE - 1U)) == 0U &&
-	    alignment >= V8M_HUGE_PAGE_SIZE &&
-	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
-		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_calls, 1U,
-					  memory_order_relaxed);
-		void *huge =
-		    mmap(NULL, bytes, PROT_READ | PROT_WRITE,
-			 MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
-		if (huge != MAP_FAILED) {
-			record_mmap(bytes);
-			if (region_register(huge, bytes) != 0) {
-				(void)munmap(huge, bytes);
-				record_munmap(bytes);
-				return NULL;
-			}
-			bind_and_account(huge, bytes);
-			return huge;
-		}
-		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_failures, 1U,
-					  memory_order_relaxed);
-		/* Fall through to the regular path. */
-	}
-
-	/* Regular path. reserve_aligned picks between a single direct
-	 * mmap (when alignment fits within one OS page — common on
-	 * ppc64le 64 KiB kernels and aarch64 16/64 KiB kernels) and the
-	 * over-allocate-and-trim fallback (the only option on x86_64
-	 * where the 4 KiB OS page is smaller than every
-	 * V8M_PAGE_SIZE-shaped request). */
-	void *result = reserve_aligned(bytes, alignment);
+	bool used_anchor = false;
+	void *result = anchor_or_mmap(bytes, alignment, &used_anchor);
 	if (result == NULL) {
 		return NULL;
 	}
-	if (region_register(result, bytes) != 0) {
-		/* Region table is full — undo the mmap so the caller
+	if (region_register_with_flags(result, bytes, used_anchor) != 0) {
+		/* Region table is full — undo the alloc so the caller
 		 * never sees a pointer the foreign-detection path
 		 * can't classify. The cap is generous (4096 live
 		 * regions) and crossing it points at either a leak or a
 		 * workload that needs the radix-tree replacement. */
-		(void)munmap(result, bytes);
-		record_munmap(bytes);
+		if (used_anchor) {
+			(void)v8m_anchor_reservation_release(anchor_get(),
+							     result, bytes);
+		} else {
+			(void)munmap(result, bytes);
+			record_munmap(bytes);
+		}
 		return NULL;
 	}
 	/* Hint the kernel toward transparent huge pages for
@@ -599,14 +739,23 @@ void v8m_page_heap_free(void *ptr, size_t bytes)
 	if (ptr == NULL || bytes == 0) {
 		return;
 	}
-	uint16_t node = region_unregister(ptr);
+	bool is_anchor = false;
+	uint16_t node = region_unregister_with_flags(ptr, &is_anchor);
 	if (node != V8M_REGION_NODE_UNBOUND && node < V8M_NUMA_MAX_NODES) {
 		atomic_fetch_sub_explicit(&v8m_per_node_bytes[node],
 					  (uint64_t)bytes,
 					  memory_order_relaxed);
 	}
-	(void)munmap(ptr, bytes);
-	record_munmap(bytes);
+	if (is_anchor) {
+		/* Anchor carves stay inside the anchor's PROT_NONE VMA;
+		 * release drops the physical pages and re-protects the
+		 * slot so use-after-free traps. The slot is not
+		 * reclaimable (bump-only by design). */
+		(void)v8m_anchor_reservation_release(anchor_get(), ptr, bytes);
+	} else {
+		(void)munmap(ptr, bytes);
+		record_munmap(bytes);
+	}
 }
 
 void v8m_page_heap_advise_dont_need(void *ptr, size_t bytes)
@@ -655,6 +804,37 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
 	out->thp_cold_threshold_ticks = atomic_load_explicit(
 	    &g_thp_cold_threshold_ticks, memory_order_relaxed);
+	out->anchor_carve_calls =
+	    atomic_load_explicit(&v8m_anchor_carve_calls, memory_order_relaxed);
+	out->anchor_carve_failures = atomic_load_explicit(
+	    &v8m_anchor_carve_failures, memory_order_relaxed);
+}
+
+size_t v8m_page_heap_numa_rebalance(void)
+{
+	struct v8m_numa_balance_stats snap = {0};
+	v8m_page_heap_get_numa_balance(&snap);
+	if (snap.node_count <= 1U) {
+		return 0;
+	}
+	size_t flipped = 0;
+	uint32_t cap = snap.node_count > V8M_NUMA_MAX_NODES ? V8M_NUMA_MAX_NODES
+							    : snap.node_count;
+	for (uint32_t node = 0; node < cap; node++) {
+		bool over = snap.imbalanced && node == snap.most_loaded_node;
+		bool was = atomic_exchange_explicit(
+		    &v8m_per_node_suppressed[node], over, memory_order_relaxed);
+		if (was != over) {
+			flipped++;
+		}
+	}
+	return flipped;
+}
+
+uint64_t v8m_page_heap_numa_rebalance_diversions(void)
+{
+	return atomic_load_explicit(&v8m_numa_rebalance_diversions,
+				    memory_order_relaxed);
 }
 
 void v8m_page_heap_get_numa_balance(struct v8m_numa_balance_stats *out)

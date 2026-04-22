@@ -93,21 +93,34 @@ void *v8m_anchor_reservation_carve(struct v8m_anchor_reservation *res,
 	}
 
 	(void)pthread_mutex_lock(&res->lock);
-	size_t aligned = round_up_pow2(res->bump_offset, alignment);
-	if (aligned < res->bump_offset || aligned > res->cap ||
-	    bytes > res->cap - aligned) {
+	/* Align the absolute target address (base + bump_offset) up to
+	 * the requested alignment, not just the bump_offset itself —
+	 * base may only be OS-page aligned, so carving with alignment >
+	 * OS_PAGE_SIZE needs the extra rounding to land on the right
+	 * boundary. The skipped padding stays inside the anchor and is
+	 * never reclaimed (bump-only). */
+	uintptr_t target = (uintptr_t)res->base + res->bump_offset;
+	uintptr_t aligned_target =
+	    (target + (alignment - 1U)) & ~(uintptr_t)(alignment - 1U);
+	if (aligned_target < target) {
+		res->carve_failures++;
+		(void)pthread_mutex_unlock(&res->lock);
+		return NULL;
+	}
+	size_t aligned_offset = aligned_target - (uintptr_t)res->base;
+	if (aligned_offset > res->cap || bytes > res->cap - aligned_offset) {
 		res->carve_failures++;
 		(void)pthread_mutex_unlock(&res->lock);
 		return NULL;
 	}
 	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-	void *carved = (void *)((uintptr_t)res->base + aligned);
+	void *carved = (void *)aligned_target;
 	if (mprotect(carved, bytes, PROT_READ | PROT_WRITE) != 0) {
 		res->carve_failures++;
 		(void)pthread_mutex_unlock(&res->lock);
 		return NULL;
 	}
-	res->bump_offset = aligned + bytes;
+	res->bump_offset = aligned_offset + bytes;
 	res->carve_calls++;
 	(void)pthread_mutex_unlock(&res->lock);
 	return carved;

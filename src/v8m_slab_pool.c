@@ -14,10 +14,96 @@
 #include <stdint.h>
 
 #include "v8m_internal.h"
+#include "v8m_numa.h" /* v8m_numa_current_node */
+#include "v8m_numa_pool.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
+
+/*
+ * Global per-NUMA huge-page pool. Sources slab pages for every
+ * v8m_slab_pool whose `use_numa_pool` is true. Lazy-init via
+ * v8m_slab_pool_global_init from the dispatcher's constructor;
+ * shutdown via v8m_slab_pool_global_destroy from the destructor.
+ * Test pools (created via v8m_slab_pool_init only) leave
+ * `use_numa_pool` false and stay on the discrete page-heap path
+ * so isolated tests don't share slab pages through the global.
+ */
+static struct v8m_numa_pool g_slab_numa_pool;
+static atomic_bool g_slab_numa_pool_ready;
+
+int v8m_slab_pool_global_init(void)
+{
+	if (atomic_load_explicit(&g_slab_numa_pool_ready,
+				 memory_order_acquire)) {
+		return 0;
+	}
+	int init_rc = v8m_numa_pool_init(&g_slab_numa_pool);
+	if (init_rc != 0) {
+		return init_rc;
+	}
+	atomic_store_explicit(&g_slab_numa_pool_ready, true,
+			      memory_order_release);
+	return 0;
+}
+
+void v8m_slab_pool_global_destroy(void)
+{
+	if (!atomic_load_explicit(&g_slab_numa_pool_ready,
+				  memory_order_acquire)) {
+		return;
+	}
+	atomic_store_explicit(&g_slab_numa_pool_ready, false,
+			      memory_order_release);
+	v8m_numa_pool_destroy(&g_slab_numa_pool);
+}
+
+void v8m_slab_pool_set_use_numa_pool(struct v8m_slab_pool *pool,
+				     bool use_numa_pool)
+{
+	if (pool == NULL) {
+		return;
+	}
+	pool->use_numa_pool = use_numa_pool;
+}
+
+/* Allocate a fresh slab page either from the global numa_pool
+ * (when this pool opted in AND the global is ready) or directly
+ * from the page heap (test pools or pre-init). Returns NULL on
+ * failure of the chosen source. */
+static void *acquire_slab_page(const struct v8m_slab_pool *pool)
+{
+	if (pool->use_numa_pool && atomic_load_explicit(&g_slab_numa_pool_ready,
+							memory_order_acquire)) {
+		uint32_t node = v8m_numa_current_node();
+		if (node >= V8M_NUMA_MAX_NODES) {
+			node = 0;
+		}
+		void *page = v8m_numa_pool_carve_slab(&g_slab_numa_pool, node);
+		if (page != NULL) {
+			return page;
+		}
+		/* Carve failed (page heap exhausted, etc.); fall
+		 * through to direct alloc as a last resort. */
+	}
+	return v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+}
+
+static void release_slab_page(const struct v8m_slab_pool *pool, void *page)
+{
+	if (pool->use_numa_pool && atomic_load_explicit(&g_slab_numa_pool_ready,
+							memory_order_acquire)) {
+		if (v8m_numa_pool_release_slab(&g_slab_numa_pool, page)) {
+			return;
+		}
+		/* Not owned by the numa_pool — must have come from the
+		 * direct path (allocated when the numa_pool was
+		 * temporarily unavailable). Fall through to page-heap
+		 * release. */
+	}
+	v8m_page_heap_free(page, V8M_PAGE_SIZE);
+}
 #include "v8m_slab_small.h"
 #include "v8m_slab_tiny.h"
 
@@ -61,6 +147,7 @@ int v8m_slab_pool_init(struct v8m_slab_pool *pool)
 		pool->classes[i].current = NULL;
 		pool->classes[i].partials = NULL;
 	}
+	pool->use_numa_pool = false;
 	return pthread_mutex_init(&pool->lock, NULL);
 }
 
@@ -69,14 +156,14 @@ void v8m_slab_pool_destroy(struct v8m_slab_pool *pool)
 	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
 		struct v8m_slab_pool_class *cls = &pool->classes[i];
 		if (cls->current != NULL) {
-			v8m_page_heap_free(cls->current, V8M_PAGE_SIZE);
+			release_slab_page(pool, cls->current);
 			cls->current = NULL;
 		}
 		struct v8m_page_meta *next = NULL;
 		for (struct v8m_page_meta *page = cls->partials; page != NULL;
 		     page = next) {
 			next = page->next;
-			v8m_page_heap_free(page, V8M_PAGE_SIZE);
+			release_slab_page(pool, page);
 		}
 		cls->partials = NULL;
 	}
@@ -148,11 +235,13 @@ static void *try_partials(struct v8m_slab_pool_class *cls)
  * for `size_class`, install it as `current`, and allocate one
  * object from it.
  */
-/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
-static void *acquire_fresh_page(struct v8m_slab_pool_class *cls,
+/* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
+static void *acquire_fresh_page(const struct v8m_slab_pool *pool,
+				struct v8m_slab_pool_class *cls,
 				uint32_t size_class, uint64_t owner_thread)
+/* NOLINTEND(bugprone-easily-swappable-parameters) */
 {
-	void *page = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
+	void *page = acquire_slab_page(pool);
 	if (page == NULL) {
 		return NULL;
 	}
@@ -177,7 +266,7 @@ void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
 		obj = try_partials(cls);
 	}
 	if (obj == NULL) {
-		obj = acquire_fresh_page(cls, size_class, owner_thread);
+		obj = acquire_fresh_page(pool, cls, size_class, owner_thread);
 	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
@@ -222,7 +311,7 @@ bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 
 	if (became_empty) {
 		unlink_from_class(cls, meta);
-		v8m_page_heap_free(meta, V8M_PAGE_SIZE);
+		release_slab_page(pool, meta);
 	} else if (was_full && cls->current != meta) {
 		/* Full -> partial transition; the page wasn't in any
 		 * list, so add it to partials. The `cls->current != meta`

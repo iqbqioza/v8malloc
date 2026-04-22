@@ -108,6 +108,15 @@ struct v8m_page_heap_stats {
 	uint64_t thp_demote_calls;
 	uint64_t thp_ema_ticks;
 	uint64_t thp_cold_threshold_ticks;
+	/* Anchor reservation usage. `anchor_carve_calls` counts
+	 * THP-eligible allocations the page heap satisfied from the
+	 * global anchor's PROT_NONE region instead of a discrete mmap;
+	 * `anchor_carve_failures` counts attempts that fell back to
+	 * discrete mmap (anchor full, alignment did not fit, anchor
+	 * lazy-init failed). The two together partition the
+	 * THP-eligible alloc count above the kernel-page threshold. */
+	uint64_t anchor_carve_calls;
+	uint64_t anchor_carve_failures;
 };
 
 /*
@@ -128,6 +137,34 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
  */
 struct v8m_numa_balance_stats;
 void v8m_page_heap_get_numa_balance(struct v8m_numa_balance_stats *out);
+
+/*
+ * NUMA rebalance action (numa.md §6.2). Re-evaluates the per-node
+ * balance and toggles each node's "suppressed" flag — the
+ * most-loaded node is marked suppressed iff `imbalanced` is true on
+ * the snapshot, every other node clears. While suppressed, new
+ * allocations on a thread whose current node is the suppressed one
+ * are diverted to the nearest non-suppressed neighbour via
+ * `v8m_numa_fallback_node`. Returns the count of flag transitions
+ * (suppressed ↔ not) — useful for the bg-purge tick to log when
+ * the action fires. Called periodically by the bg purge thread;
+ * tests can call it directly to drive the action.
+ */
+size_t v8m_page_heap_numa_rebalance(void);
+
+/*
+ * Diversion counter — total allocations the rebalance action
+ * routed away from the calling thread's overloaded node. Monotonic.
+ */
+uint64_t v8m_page_heap_numa_rebalance_diversions(void);
+
+/*
+ * Test-only: tear down the global anchor reservation. Tests that
+ * want a clean baseline call this between phases; production
+ * callers should never touch it (the anchor lives for the process
+ * lifetime). NOT exported via `v8malloc.map`.
+ */
+void v8m_page_heap_anchor_destroy_for_test(void);
 
 /*
  * Test-only knob for the adaptive THP advice (huge-pages.md §5).
