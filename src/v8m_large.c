@@ -90,6 +90,16 @@ static size_t round_up_pow2(size_t value, size_t multiple)
 #define V8M_LARGE_HUGE_ALIGN ((size_t)2 * 1024 * 1024)
 
 /*
+ * Gigantic allocations (>= 1 GiB) bump the page-heap alignment to
+ * 1 GiB so the page heap can attempt MAP_HUGETLB | MAP_HUGE_1GB.
+ * The over-alignment cost is bounded (≤ 1 GiB of virtual address
+ * space, negligible against a multi-GiB allocation); the win when
+ * 1 GiB huge pages are reserved is one TLB entry per gigabyte
+ * versus 512 TLB entries with 2 MiB pages.
+ */
+#define V8M_LARGE_GIGANTIC_ALIGN ((size_t)1024 * 1024 * 1024)
+
+/*
  * Shared backend used by v8m_large_alloc / v8m_large_alloc_aligned.
  * `header_offset` places the user pointer; `pheap_alignment` is
  * the alignment requested from the page heap (always >=
@@ -163,12 +173,17 @@ void *v8m_large_alloc(size_t size, uint64_t owner_thread)
 	 * the page heap's MAP_HUGETLB attempt is in play. The mmap_size
 	 * is rounded to the same alignment, wasting at most 2 MiB of
 	 * virtual address space per Huge alloc — small relative to the
-	 * request. Large allocations (256 KiB - 2 MiB) keep the
-	 * V8M_PAGE_SIZE alignment the v0 baseline used. */
+	 * request. Gigantic allocations (>= 1 GiB) bump further to
+	 * 1 GiB so the page heap can attempt MAP_HUGE_1GB. Large
+	 * allocations (256 KiB - 2 MiB) keep the V8M_PAGE_SIZE
+	 * alignment the v0 baseline used. */
 	size_t pheap_alignment = V8M_PAGE_SIZE;
-	if (size > V8M_LARGE_MAX_SIZE &&
-	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
-		pheap_alignment = V8M_LARGE_HUGE_ALIGN;
+	if (v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
+		if (size >= V8M_LARGE_GIGANTIC_ALIGN) {
+			pheap_alignment = V8M_LARGE_GIGANTIC_ALIGN;
+		} else if (size > V8M_LARGE_MAX_SIZE) {
+			pheap_alignment = V8M_LARGE_HUGE_ALIGN;
+		}
 	}
 	return large_alloc_with_offset(size, V8M_SLAB_HEADER_SIZE,
 				       pheap_alignment, owner_thread);

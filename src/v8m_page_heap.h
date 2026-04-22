@@ -84,6 +84,15 @@ struct v8m_page_heap_stats {
 	 * follow the kernel's default policy instead of the
 	 * intended local-bind. */
 	uint64_t mbind_failures;
+	/* Number of mmap(MAP_HUGETLB | MAP_HUGE_1GB) Gigantic-page
+	 * attempts. Triggered for allocations that are 1 GiB-multiple
+	 * AND 1 GiB-aligned with V8M_OPT_HUGE_PAGES != 0. The most
+	 * common reason for the count to stay zero is that no caller
+	 * routes a request that large; the most common reason for
+	 * `gigantic_alloc_failures` to track `gigantic_alloc_calls`
+	 * 1:1 is the kernel having no reserved 1 GiB pages. */
+	uint64_t gigantic_alloc_calls;
+	uint64_t gigantic_alloc_failures;
 };
 
 /*

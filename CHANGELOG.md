@@ -7,6 +7,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- 1 GiB Gigantic-page path
+  (`src/v8m_page_heap.c`, `src/v8m_large.c`, huge-pages.md §7).
+  `v8m_page_heap_alloc` now attempts
+  `mmap(MAP_HUGETLB | MAP_HUGE_1GB)` as its first preference
+  for requests that are 1 GiB-multiple AND 1 GiB-aligned with
+  `V8M_OPT_HUGE_PAGES` on; on failure (the common case —
+  kernels without 1 GiB hugepages reserved, every CI runner)
+  the path falls through cleanly to the existing 2 MiB
+  MAP_HUGETLB attempt and ultimately to mmap + MADV_HUGEPAGE,
+  so no behavioural change for hosts that cannot serve 1 GiB
+  pages. `v8m_large_alloc` bumps the page-heap alignment to
+  1 GiB for size ≥ 1 GiB so the new code path is reachable
+  from the standard `malloc(N)` entry point — the
+  over-alignment cost is bounded (≤ 1 GiB of virtual address
+  space, negligible against a multi-GiB allocation) and the
+  win when 1 GiB pages are reserved is one TLB entry per
+  gigabyte versus 512 entries with 2 MiB pages. Two new
+  counters on `struct v8m_page_heap_stats` —
+  `gigantic_alloc_calls` and `gigantic_alloc_failures` — let
+  a maintainer verify the path fires on production hardware.
+  `MAP_HUGE_1GB` is computed locally (`30 << 26`) to avoid
+  pulling in `<linux/mman.h>` which collides with glibc's
+  `<sys/mman.h>`.
+
 - Background purge thread (`src/v8m_bg_purge.{h,c}`,
   fragmentation.md §6.3). Spawned at the end of
   `v8m_constructor` after the dispatcher is fully usable;

@@ -40,6 +40,8 @@ static _Atomic uint64_t v8m_hugetlb_alloc_calls = 0;
 static _Atomic uint64_t v8m_hugetlb_alloc_failures = 0;
 static _Atomic uint64_t v8m_mbind_calls = 0;
 static _Atomic uint64_t v8m_mbind_failures = 0;
+static _Atomic uint64_t v8m_gigantic_alloc_calls = 0;
+static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
 
 /*
  * Allocations at or above this size are candidates for the
@@ -56,6 +58,30 @@ static _Atomic uint64_t v8m_mbind_failures = 0;
  * size-multiple and alignment checks.
  */
 #define V8M_HUGETLB_BYTES ((size_t)2 * 1024 * 1024)
+
+/*
+ * 1 GiB Gigantic-page size (huge-pages.md §7). Triggered for
+ * allocations that are 1 GiB-multiple AND 1 GiB-aligned with
+ * V8M_OPT_HUGE_PAGES on. Requires kernel huge pages of the 1 GiB
+ * size to be reserved (`echo N > /proc/sys/vm/nr_hugepages_1G`,
+ * which itself usually needs `hugepagesz=1G default_hugepagesz=1G`
+ * on the kernel command line). Failure is the common case in
+ * containers and CI; we fall through to the 2 MiB MAP_HUGETLB
+ * attempt and ultimately the regular mmap + MADV_HUGEPAGE path.
+ */
+#define V8M_GIGANTIC_BYTES ((size_t)1024 * 1024 * 1024)
+/*
+ * The Linux UAPI exposes the Gigantic-page page-shift to mmap via
+ * an explicit MAP_HUGE_1GB flag (= 30 << MAP_HUGE_SHIFT). Define
+ * the constants here to avoid pulling in <linux/mman.h> which
+ * collides with glibc's <sys/mman.h>.
+ */
+#ifndef V8M_MAP_HUGE_SHIFT
+#define V8M_MAP_HUGE_SHIFT 26
+#endif
+#ifndef V8M_MAP_HUGE_1GB
+#define V8M_MAP_HUGE_1GB (30 << V8M_MAP_HUGE_SHIFT)
+#endif
 
 /*
  * Region map. Bounded array of (start, end) tuples kept in
@@ -213,6 +239,40 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		return NULL;
 	}
 
+	/* Try MAP_HUGETLB | MAP_HUGE_1GB first for Gigantic-class
+	 * requests (size + alignment ≥ 1 GiB, both 1 GiB-multiple,
+	 * V8M_OPT_HUGE_PAGES on). On a kernel with reserved 1 GiB
+	 * huge pages this is the densest possible mapping; on every
+	 * other host (the common case — CI, dev containers, most
+	 * production systems without a `hugepagesz=1G` boot
+	 * argument) the syscall fails and we fall through to the
+	 * 2 MiB MAP_HUGETLB attempt below, then ultimately to the
+	 * regular mmap + MADV_HUGEPAGE path (huge-pages.md §7). */
+	if (bytes >= V8M_GIGANTIC_BYTES &&
+	    (bytes & (V8M_GIGANTIC_BYTES - 1U)) == 0U &&
+	    alignment >= V8M_GIGANTIC_BYTES &&
+	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
+		atomic_fetch_add_explicit(&v8m_gigantic_alloc_calls, 1U,
+					  memory_order_relaxed);
+		void *gigantic = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+				      MAP_PRIVATE | MAP_ANONYMOUS |
+					  MAP_HUGETLB | V8M_MAP_HUGE_1GB,
+				      -1, 0);
+		if (gigantic != MAP_FAILED) {
+			record_mmap(bytes);
+			if (region_register(gigantic, bytes) != 0) {
+				(void)munmap(gigantic, bytes);
+				record_munmap(bytes);
+				return NULL;
+			}
+			bind_to_local_node(gigantic, bytes);
+			return gigantic;
+		}
+		atomic_fetch_add_explicit(&v8m_gigantic_alloc_failures, 1U,
+					  memory_order_relaxed);
+		/* Fall through to the 2 MiB MAP_HUGETLB attempt. */
+	}
+
 	/* Try MAP_HUGETLB first when the request is shaped for it:
 	 * size is a 2 MiB multiple, alignment is at least 2 MiB, and
 	 * V8M_OPT_HUGE_PAGES allows it. The kernel returns a 2 MiB-
@@ -348,4 +408,8 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&v8m_mbind_calls, memory_order_relaxed);
 	out->mbind_failures =
 	    atomic_load_explicit(&v8m_mbind_failures, memory_order_relaxed);
+	out->gigantic_alloc_calls = atomic_load_explicit(
+	    &v8m_gigantic_alloc_calls, memory_order_relaxed);
+	out->gigantic_alloc_failures = atomic_load_explicit(
+	    &v8m_gigantic_alloc_failures, memory_order_relaxed);
 }
