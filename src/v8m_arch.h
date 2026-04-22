@@ -103,4 +103,40 @@
 #define V8M_LIKELY(x) __builtin_expect(!!(x), 1)
 #define V8M_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
+/* --- Runtime CPU feature probes ------------------------------------ */
+/*
+ * Both probes return meaningful values only on the architecture they
+ * target; on every other arch they return a sensible compile-time
+ * default (`false` for LSE, `V8M_CACHE_LINE_SIZE` for the cache line)
+ * so callers can treat them as portable. Linkage is C99 — defined in
+ * src/v8m_arch.c, declared here so internal TUs share the surface.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+
+/*
+ * AArch64 Large System Extensions (LSE) availability. Reads
+ * AT_HWCAP via getauxval and tests HWCAP_ATOMICS. When true, the
+ * compiler-emitted CAS / SWP / LDADD-family instructions on this
+ * process's CPU dispatch to LSE forms instead of LL/SC retry loops.
+ * GCC's `-moutline-atomics` (default since GCC 10) makes the
+ * dispatch automatic; this probe lets diagnostics report which path
+ * the runtime took. Always false on non-aarch64 builds.
+ */
+bool v8m_arch_has_lse(void);
+
+/*
+ * Runtime L1 dcache line size in bytes. On aarch64 reads CTR_EL0
+ * (DminLine field) via mrs; on every other arch returns the
+ * compile-time `V8M_CACHE_LINE_SIZE`. The value matters when a
+ * runtime CPU has a wider line than the build assumed — Apple M1's
+ * P-cores ship 128 B lines while the default aarch64 build assumes
+ * 64 B, so a future cycle that wants to dynamically pad hot
+ * structures can consult this. The compile-time `V8M_CACHELINE_ALIGNED`
+ * macro stays the source of struct layout; this is purely a
+ * diagnostic / future-tuning hook.
+ */
+size_t v8m_arch_runtime_cache_line_size(void);
+
 #endif /* V8M_ARCH_H */

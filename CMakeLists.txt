@@ -136,6 +136,18 @@ endif()
 set(V8MALLOC_ARCH_FLAGS)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
 	set(V8MALLOC_ARCH_FLAGS -march=x86-64-v2)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+	# AArch64 Tier 1. -moutline-atomics ships GCC-generated
+	# stubs that dispatch each atomic op between LL/SC and LSE
+	# (CAS / SWP / LDADD-family) at runtime via the
+	# `__aarch64_have_lse_atomics` flag the runtime sets from
+	# HWCAP_ATOMICS. GCC 10+ defaults to outline atomics; making
+	# the flag explicit documents the choice and keeps the
+	# behaviour pinned across toolchain upgrades. The runtime
+	# probe `v8m_arch_has_lse()` reports which path the dispatch
+	# selected on the current host. TPIDR_EL0-relative TLS is
+	# emitted by GCC / Clang for `__thread` automatically.
+	set(V8MALLOC_ARCH_FLAGS -moutline-atomics)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le|powerpc64le")
 	set(V8MALLOC_ARCH_FLAGS -mcpu=power9)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
@@ -171,6 +183,7 @@ endif()
 
 set(V8MALLOC_SOURCES
 	src/v8m_api.c
+	src/v8m_arch.c
 	src/v8m_bg_purge.c
 	src/v8m_bootstrap.c
 	src/v8m_buddy.c

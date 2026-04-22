@@ -210,6 +210,48 @@ static int check_page_size(void)
 	return 0;
 }
 
+static int check_runtime_probes(void)
+{
+	/* The runtime probes are portable: on non-aarch64 builds they
+	 * return sensible defaults (`false` for LSE, V8M_CACHE_LINE_SIZE
+	 * for the cache line). On aarch64 builds the values come from
+	 * AT_HWCAP and CTR_EL0 — we can't assert a specific outcome
+	 * there (it depends on the host CPU and kernel config), only
+	 * that the probe runs without crashing and returns something
+	 * sane. */
+	bool lse = v8m_arch_has_lse();
+#if !defined(V8M_ARCH_AARCH64)
+	if (lse) {
+		return fail("v8m_arch_has_lse returned true on non-aarch64");
+	}
+#else
+	/* Silence -Wunused-but-set on aarch64 where the value is free. */
+	(void)lse;
+#endif
+
+	size_t line = v8m_arch_runtime_cache_line_size();
+	if (line == 0U || (line & (line - 1U)) != 0U) {
+		return fail("runtime cache line size is not a power of two");
+	}
+	/* CTR_EL0 encodes DminLine as log2(words); the realistic range
+	 * for a dcache line is 16 B (tiny embedded) up to 256 B
+	 * (mainframe-class). Anything outside that points at a broken
+	 * probe. */
+	if (line < 16U || line > 256U) {
+		return fail("runtime cache line size out of plausible range");
+	}
+#if !defined(V8M_ARCH_AARCH64)
+	/* Non-aarch64 builds return the compile-time constant
+	 * verbatim — anything else would mean the portable fallback
+	 * drifted. */
+	if (line != (size_t)V8M_CACHE_LINE_SIZE) {
+		return fail(
+		    "non-aarch64 runtime line size diverged from compile-time");
+	}
+#endif
+	return 0;
+}
+
 static int check_bitops_builtins(void)
 {
 	/* The allocator relies on __builtin_ctzll, __builtin_clzll,
@@ -250,6 +292,7 @@ int main(void)
 	result |= check_alignment_macros();
 	result |= check_branch_hints();
 	result |= check_page_size();
+	result |= check_runtime_probes();
 	result |= check_bitops_builtins();
 	if (result == 0) {
 		(void)printf("test_arch: OK\n");

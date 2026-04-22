@@ -6,6 +6,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- AArch64 Tier 1 runtime CPU feature probes
+  (`src/v8m_arch.{h,c}`, platform-abstraction.md §4.2 / TODO
+  Tier 1 aarch64 entry). New helpers `v8m_arch_has_lse()` and
+  `v8m_arch_runtime_cache_line_size()` ship a portable surface:
+  on aarch64 they read `AT_HWCAP & HWCAP_ATOMICS` via getauxval
+  and `CTR_EL0` via `mrs` to report whether the running CPU has
+  the Large System Extensions and what its actual L1 dcache
+  line width is; on every other arch they return `false` and
+  `V8M_CACHE_LINE_SIZE` respectively, so callers can use them
+  without `#ifdef`. CMake gets an explicit `aarch64` branch in
+  `V8MALLOC_ARCH_FLAGS` that pins `-moutline-atomics` (GCC's
+  default since 10, but explicit for documentation and future
+  toolchain pinning); the GCC-emitted stubs dispatch each
+  atomic op between LL/SC and LSE forms at runtime via the
+  `__aarch64_have_lse_atomics` flag the runtime sets from
+  HWCAP. TPIDR_EL0-relative TLS is compiler-emitted for
+  `__thread` automatically. The compile-time `V8M_CACHELINE_ALIGNED`
+  macro continues to drive struct layout — the runtime probe is
+  for diagnostics today and for a future cycle that wants to
+  dynamically pad hot structures on hosts whose actual line
+  width exceeds the build assumption (Apple M1 P-cores at
+  128 B vs the 64 B default). Coverage in `tests/test_arch.c`
+  asserts the helpers are callable on every arch, return
+  power-of-two cache lines in the plausible 16–256 B range,
+  and that the non-aarch64 fallback returns the compile-time
+  constant verbatim.
+
 ### Documented
 - Tier 2 RISC-V 64 support is explicit in the build system
   (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
