@@ -346,6 +346,84 @@ static int check_hugetlb_attempt(void)
 	return 0;
 }
 
+/*
+ * Adaptive THP advice (huge-pages.md §5). Test-injects a tiny cold
+ * threshold and a high seed EMA so the next THP-eligible alloc lands
+ * in the demote branch; then injects a huge threshold so the
+ * subsequent alloc lands in the promote branch. Verifies both
+ * counters partition the work and that the test-only knob restores
+ * cleanly.
+ */
+static int check_thp_adaptive_decision(void)
+{
+	v8m_config_init();
+
+	/* Save the live state so we can restore it; subsequent tests
+	 * (and the rest of the suite) must observe the lazy-init
+	 * baseline, not whatever this test left behind. */
+	struct v8m_page_heap_stats saved = {0};
+	v8m_page_heap_get_stats(&saved);
+	uint64_t saved_threshold = saved.thp_cold_threshold_ticks;
+	uint64_t saved_ema = saved.thp_ema_ticks;
+
+	/* Force the demote branch: a threshold of 1 tick is exceeded by
+	 * any positive inter-arrival delta. The injected EMA seeds the
+	 * decision; the first alloc resets last_tsc (the inject helper
+	 * clears it), and the second computes a real delta that lands
+	 * past the threshold and triggers DEMOTE. */
+	v8m_page_heap_thp_test_inject(1U, 1000U);
+
+	struct v8m_page_heap_stats before = {0};
+	v8m_page_heap_get_stats(&before);
+	void *first = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	if (first == NULL) {
+		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		return fail("first THP-eligible alloc returned NULL");
+	}
+	void *second = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	if (second == NULL) {
+		v8m_page_heap_free(first, HUGEPAGE_BYTES);
+		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		return fail("second THP-eligible alloc returned NULL");
+	}
+	struct v8m_page_heap_stats after = {0};
+	v8m_page_heap_get_stats(&after);
+	uint64_t demote_delta =
+	    after.thp_demote_calls - before.thp_demote_calls;
+	v8m_page_heap_free(first, HUGEPAGE_BYTES);
+	v8m_page_heap_free(second, HUGEPAGE_BYTES);
+	if (demote_delta == 0U) {
+		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		return fail("DEMOTE branch did not fire under tiny threshold");
+	}
+
+	/* Force the promote branch: a huge threshold ensures any natural
+	 * EMA stays well below it. */
+	v8m_page_heap_thp_test_inject(UINT64_MAX, 0U);
+	v8m_page_heap_get_stats(&before);
+	void *third = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	void *fourth = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	v8m_page_heap_get_stats(&after);
+	uint64_t promote_delta =
+	    after.thp_promote_calls - before.thp_promote_calls;
+	uint64_t demote_delta_2 =
+	    after.thp_demote_calls - before.thp_demote_calls;
+	if (third != NULL) {
+		v8m_page_heap_free(third, HUGEPAGE_BYTES);
+	}
+	if (fourth != NULL) {
+		v8m_page_heap_free(fourth, HUGEPAGE_BYTES);
+	}
+	v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+	if (promote_delta == 0U) {
+		return fail("PROMOTE branch did not fire under huge threshold");
+	}
+	if (demote_delta_2 != 0U) {
+		return fail("DEMOTE branch fired under huge threshold");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_alignment();
@@ -379,5 +457,9 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_hugetlb_attempt();
+	status = check_hugetlb_attempt();
+	if (status != 0) {
+		return status;
+	}
+	return check_thp_adaptive_decision();
 }

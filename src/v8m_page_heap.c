@@ -43,6 +43,29 @@ static _Atomic uint64_t v8m_mbind_calls = 0;
 static _Atomic uint64_t v8m_mbind_failures = 0;
 static _Atomic uint64_t v8m_gigantic_alloc_calls = 0;
 static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
+/*
+ * Adaptive THP advice (huge-pages.md §5). The page heap tracks the
+ * EMA of inter-allocation TSC ticks for THP-eligible mappings; when
+ * the EMA exceeds `g_thp_cold_threshold_ticks` (cold workload), the
+ * MADV_HUGEPAGE hint is replaced with MADV_NOHUGEPAGE so the kernel
+ * does not waste effort promoting a region that the program is
+ * unlikely to actively touch. The hot/warm path keeps the existing
+ * MADV_HUGEPAGE behaviour (and increments the legacy
+ * `hugepage_advise_calls` counter), so the only behaviour change vs.
+ * the unconditional baseline is the addition of the demote branch
+ * for cold workloads.
+ *
+ * Threshold derivation: lazy-init from `v8m_arch_tsc_frequency_mhz()`
+ * to ≈ 1 second in TSC ticks (mhz × 1e6). Tests can override both
+ * the threshold and the current EMA via
+ * `v8m_page_heap_thp_test_inject` so the decision can be exercised
+ * without depending on wall-clock timing.
+ */
+static _Atomic uint64_t v8m_thp_promote_calls = 0;
+static _Atomic uint64_t v8m_thp_demote_calls = 0;
+static _Atomic uint64_t g_thp_last_alloc_tsc;
+static _Atomic uint64_t g_thp_ema_ticks;
+static _Atomic uint64_t g_thp_cold_threshold_ticks;
 
 /*
  * Allocations at or above the kernel huge-page size are candidates
@@ -307,6 +330,68 @@ static void bind_to_local_node(void *addr, size_t bytes)
 	}
 }
 
+enum v8m_thp_advice {
+	V8M_THP_PROMOTE = 0,
+	V8M_THP_DEMOTE = 1,
+};
+
+static uint64_t thp_cold_threshold_ticks(void)
+{
+	uint64_t cached = atomic_load_explicit(&g_thp_cold_threshold_ticks,
+					       memory_order_relaxed);
+	if (cached != 0U) {
+		return cached;
+	}
+	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
+	if (mhz == 0U) {
+		mhz = 1000U; /* non-x86_64 fallback returns 1000 by contract:
+			      * v8m_arch_rdtsc returns nanoseconds, so the
+			      * "mhz" basis becomes ticks-per-microsecond. */
+	}
+	uint64_t ticks = mhz * 1000U * 1000U; /* ≈ 1 second */
+	atomic_store_explicit(&g_thp_cold_threshold_ticks, ticks,
+			      memory_order_relaxed);
+	return ticks;
+}
+
+static enum v8m_thp_advice thp_decide_and_record(void)
+{
+	uint64_t now = v8m_arch_rdtsc();
+	uint64_t last = atomic_exchange_explicit(&g_thp_last_alloc_tsc, now,
+						 memory_order_relaxed);
+	if (last == 0U || now <= last) {
+		/* First THP-eligible alloc since process start (or a
+		 * monotonic-clock wrap on the rdtsc fallback path) — no
+		 * inter-arrival delta to fold into the EMA. Default to
+		 * PROMOTE (current behaviour). */
+		return V8M_THP_PROMOTE;
+	}
+	uint64_t delta = now - last;
+	uint64_t prev_ema =
+	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
+	uint64_t new_ema =
+	    (prev_ema == 0U) ? delta : ((prev_ema * 3U + delta) / 4U);
+	atomic_store_explicit(&g_thp_ema_ticks, new_ema, memory_order_relaxed);
+	if (new_ema > thp_cold_threshold_ticks()) {
+		return V8M_THP_DEMOTE;
+	}
+	return V8M_THP_PROMOTE;
+}
+
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+void v8m_page_heap_thp_test_inject(uint64_t cold_threshold_ticks,
+				   uint64_t ema_ticks)
+{
+	atomic_store_explicit(&g_thp_cold_threshold_ticks, cold_threshold_ticks,
+			      memory_order_relaxed);
+	atomic_store_explicit(&g_thp_ema_ticks, ema_ticks,
+			      memory_order_relaxed);
+	/* Reset last-alloc TSC so the next decision recomputes from a
+	 * clean baseline rather than mixing the test-injected EMA with
+	 * a stale delta. */
+	atomic_store_explicit(&g_thp_last_alloc_tsc, 0U, memory_order_relaxed);
+}
+
 void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 {
 	if (bytes == 0 || alignment < V8M_PAGE_SIZE ||
@@ -411,9 +496,24 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 	 * 2 MiB elsewhere) — anything below that has no THP path. */
 	if (bytes >= V8M_HUGE_PAGE_SIZE &&
 	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
-		(void)madvise(result, bytes, MADV_HUGEPAGE);
-		atomic_fetch_add_explicit(&v8m_hugepage_advise_calls, 1U,
-					  memory_order_relaxed);
+		/* Adaptive THP advice (huge-pages.md §5): when the
+		 * inter-allocation EMA is hot/warm, retain the existing
+		 * MADV_HUGEPAGE behaviour; when it crosses the cold
+		 * threshold, demote to MADV_NOHUGEPAGE so the kernel
+		 * does not waste effort promoting a region the program
+		 * is unlikely to actively touch. */
+		enum v8m_thp_advice advice = thp_decide_and_record();
+		if (advice == V8M_THP_DEMOTE) {
+			(void)madvise(result, bytes, MADV_NOHUGEPAGE);
+			atomic_fetch_add_explicit(&v8m_thp_demote_calls, 1U,
+						  memory_order_relaxed);
+		} else {
+			(void)madvise(result, bytes, MADV_HUGEPAGE);
+			atomic_fetch_add_explicit(&v8m_hugepage_advise_calls,
+						  1U, memory_order_relaxed);
+			atomic_fetch_add_explicit(&v8m_thp_promote_calls, 1U,
+						  memory_order_relaxed);
+		}
 	}
 	bind_to_local_node(result, bytes);
 	return result;
@@ -467,4 +567,12 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    &v8m_gigantic_alloc_calls, memory_order_relaxed);
 	out->gigantic_alloc_failures = atomic_load_explicit(
 	    &v8m_gigantic_alloc_failures, memory_order_relaxed);
+	out->thp_promote_calls =
+	    atomic_load_explicit(&v8m_thp_promote_calls, memory_order_relaxed);
+	out->thp_demote_calls =
+	    atomic_load_explicit(&v8m_thp_demote_calls, memory_order_relaxed);
+	out->thp_ema_ticks =
+	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
+	out->thp_cold_threshold_ticks = atomic_load_explicit(
+	    &g_thp_cold_threshold_ticks, memory_order_relaxed);
 }

@@ -6,6 +6,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- Adaptive THP advice (TODO P2 row 155 — huge-pages.md
+  §5). The page heap now tracks the EMA of inter-arrival
+  TSC ticks for THP-eligible allocations (≥
+  `V8M_HUGE_PAGE_SIZE`, with `V8M_OPT_HUGE_PAGES` on)
+  and replaces the unconditional `MADV_HUGEPAGE` hint
+  with a density-driven decision: hot/warm workloads
+  retain `MADV_HUGEPAGE` (promote), cold workloads —
+  EMA above ≈ 1 second of inter-arrival ticks — get
+  `MADV_NOHUGEPAGE` (demote) so the kernel does not
+  waste effort promoting regions the program is
+  unlikely to actively touch. Threshold derived once
+  from `v8m_arch_tsc_frequency_mhz()`. Two new counters
+  on `struct v8m_page_heap_stats`: `thp_promote_calls`,
+  `thp_demote_calls`; plus `thp_ema_ticks` and
+  `thp_cold_threshold_ticks` snapshots of the live
+  decision state. Test-only knob
+  `v8m_page_heap_thp_test_inject` lets tests drive the
+  decision deterministically without depending on
+  wall-clock timing (internal symbol — not in
+  `v8malloc.map`). Coverage in
+  `tests/test_page_heap.c::check_thp_adaptive_decision`.
+  The full per-region access tracking + page-by-page
+  promotion the spec calls for needs a region-stats
+  table that does not exist in v0; the EMA-driven
+  global decision captures the spec's intent at
+  page-heap granularity.
+
 ### Added
 - Caller-address-based lifetime tracker
   (`v8m_get_lifetime_stats`, TODO P2 row 154 —

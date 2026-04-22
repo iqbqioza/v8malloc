@@ -93,6 +93,21 @@ struct v8m_page_heap_stats {
 	 * 1:1 is the kernel having no reserved 1 GiB pages. */
 	uint64_t gigantic_alloc_calls;
 	uint64_t gigantic_alloc_failures;
+	/* Adaptive THP advice (huge-pages.md §5). `thp_promote_calls`
+	 * counts MADV_HUGEPAGE hints chosen by the density-driven
+	 * decision (warm/hot path); `thp_demote_calls` counts the
+	 * MADV_NOHUGEPAGE hints emitted for cold workloads where the
+	 * EMA of inter-arrival ticks crossed the threshold. The two
+	 * counters together partition every THP-eligible alloc that
+	 * fired the decision (allocations under V8M_HUGE_PAGE_SIZE or
+	 * with V8M_OPT_HUGE_PAGES off skip both branches). The
+	 * `thp_ema_ticks` and `thp_cold_threshold_ticks` snapshots
+	 * surface the live decision state for diagnostic comparison
+	 * with the threshold. */
+	uint64_t thp_promote_calls;
+	uint64_t thp_demote_calls;
+	uint64_t thp_ema_ticks;
+	uint64_t thp_cold_threshold_ticks;
 };
 
 /*
@@ -102,6 +117,20 @@ struct v8m_page_heap_stats {
  * inconsistent by a small amount.
  */
 void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
+
+/*
+ * Test-only knob for the adaptive THP advice (huge-pages.md §5).
+ * Overrides the cold-threshold ticks and the live EMA so a test can
+ * deterministically exercise the promote / demote branches without
+ * depending on wall-clock timing. NOT exported from the library; the
+ * symbol is internal-only — `v8malloc.map` does not list it. Pass
+ * any non-zero `cold_threshold_ticks` to lock the threshold (the
+ * lazy initializer's early-return treats non-zero as "already
+ * computed"); zero behaves as a reset that re-enables the lazy
+ * derivation on the next decision.
+ */
+void v8m_page_heap_thp_test_inject(uint64_t cold_threshold_ticks,
+				   uint64_t ema_ticks);
 
 /*
  * Region map — every successful v8m_page_heap_alloc records the
