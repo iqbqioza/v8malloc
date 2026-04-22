@@ -6,6 +6,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Init lifecycle is now a four-state machine
+  (`src/v8m_api.c`). `enum v8m_init_state` carries
+  `NONE / RUNNING / READY / TORN_DOWN` instead of the binary
+  0 / 1 the previous version used. The constructor publishes
+  RUNNING with release ordering BEFORE touching the dispatcher
+  (so a reentrant alloc during `dlsym` / `pthread_atfork` /
+  `v8m_dispatch_init` sees a non-READY state and routes
+  through bootstrap), then publishes READY after init completes.
+  The destructor swaps to TORN_DOWN, distinct from NONE so a
+  future debug build can flag "alloc after destructor"
+  separately from "alloc before constructor". `dispatch_ready()`
+  now returns true only for READY; all atfork handlers gate on
+  the same predicate. No hot-path observable difference today
+  — the bootstrap path catches all non-READY states the same
+  way — but spec compliance and a clearer mental model for the
+  upcoming TLC and bg-purge cycles. Closes the matching P0
+  TODO entries (`g_heap` three-state init, lazy init,
+  constructor / destructor at priority 101) — those describe
+  behaviour either already present or now landed.
+
 ### Added
 - NUMA local-node pin via `mbind(MPOL_BIND)` on every
   freshly-mapped page-heap region (`src/v8m_page_heap.c`). Both

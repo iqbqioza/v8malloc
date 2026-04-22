@@ -39,10 +39,32 @@
 #include "v8m_size_class.h"
 #include "v8malloc/v8malloc.h"
 
-/* 0 = uninitialized, 1 = ready, 2 = shutting down. The constructor
- * sets it to 1 with release ordering; the destructor swaps it back
- * to 0 with acquire ordering before tearing the dispatcher down. */
-static atomic_int g_init_state = 0;
+/* Init lifecycle (architecture.md §3.2 — three-state init machine,
+ * extended here with TORN_DOWN for post-destructor distinction).
+ *
+ *   NONE       0  process started, no allocator init has begun yet
+ *   RUNNING    1  inside v8m_constructor, dispatcher is mid-init —
+ *                 a reentrant allocation must route to bootstrap
+ *   READY      2  v8m_constructor done, dispatcher fully usable
+ *   TORN_DOWN  3  v8m_destructor ran — distinct from NONE so the
+ *                 future debug build can flag "allocation after
+ *                 destructor" separately from "allocation before
+ *                 constructor"; both states route to bootstrap so
+ *                 there's no hot-path observable difference today
+ *
+ * The constructor publishes RUNNING with release ordering BEFORE
+ * touching the dispatcher (so a reentrant alloc during dispatch
+ * init sees RUNNING and bootstrap-routes), then publishes READY
+ * after init completes. The destructor swaps to TORN_DOWN with
+ * acquire ordering. dispatch_ready() returns true only for READY.
+ */
+enum v8m_init_state {
+	V8M_INIT_NONE = 0,
+	V8M_INIT_RUNNING = 1,
+	V8M_INIT_READY = 2,
+	V8M_INIT_TORN_DOWN = 3
+};
+static atomic_int g_init_state = V8M_INIT_NONE;
 static struct v8m_dispatch g_dispatch;
 
 /* OOM handler + soft-limit state. The handler pointer rides in an
@@ -117,27 +139,38 @@ static void abort_with(const char *msg)
 
 static void v8m_atfork_prepare(void)
 {
-	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
+	    V8M_INIT_READY) {
 		v8m_dispatch_prefork(&g_dispatch);
 	}
 }
 
 static void v8m_atfork_parent(void)
 {
-	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
+	    V8M_INIT_READY) {
 		v8m_dispatch_postfork_parent(&g_dispatch);
 	}
 }
 
 static void v8m_atfork_child(void)
 {
-	if (atomic_load_explicit(&g_init_state, memory_order_acquire) == 1) {
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
+	    V8M_INIT_READY) {
 		v8m_dispatch_postfork_child(&g_dispatch);
 	}
 }
 
 __attribute__((constructor(101))) static void v8m_constructor(void)
 {
+	/* Publish RUNNING before touching anything malloc-shaped so a
+	 * reentrant alloc during dispatch init sees a non-READY state
+	 * and routes through bootstrap. Ordering: the store is release,
+	 * the matching load in dispatch_ready / atfork handlers is
+	 * acquire. */
+	atomic_store_explicit(&g_init_state, V8M_INIT_RUNNING,
+			      memory_order_release);
+
 	/* Resolve libc fallbacks first — dlsym may itself allocate, and
 	 * those calls hit our malloc override before dispatch_ready is
 	 * true, falling through to the bootstrap allocator. Doing the
@@ -149,15 +182,16 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	if (v8m_dispatch_init(&g_dispatch) != 0) {
 		abort_with("v8malloc: dispatch init failed\n");
 	}
-	/* Register fork handlers before publishing the ready flag so
-	 * that any thread that calls fork() the moment we go live sees
-	 * the locks acquired in deterministic order. pthread_atfork
-	 * itself may allocate; that goes through bootstrap. */
+	/* Register fork handlers before publishing READY so that any
+	 * thread that calls fork() the moment we go live sees the
+	 * locks acquired in deterministic order. pthread_atfork itself
+	 * may allocate; that goes through bootstrap. */
 	if (pthread_atfork(v8m_atfork_prepare, v8m_atfork_parent,
 			   v8m_atfork_child) != 0) {
 		abort_with("v8malloc: pthread_atfork registration failed\n");
 	}
-	atomic_store_explicit(&g_init_state, 1, memory_order_release);
+	atomic_store_explicit(&g_init_state, V8M_INIT_READY,
+			      memory_order_release);
 }
 
 __attribute__((destructor(101))) static void v8m_destructor(void)
@@ -182,12 +216,14 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 *   atexit-based teardown that defers munmaps until after
 	 *   stdio cleanup.
 	 */
-	(void)atomic_exchange_explicit(&g_init_state, 0, memory_order_acquire);
+	(void)atomic_exchange_explicit(&g_init_state, V8M_INIT_TORN_DOWN,
+				       memory_order_acquire);
 }
 
 static bool dispatch_ready(void)
 {
-	return atomic_load_explicit(&g_init_state, memory_order_acquire) == 1;
+	return atomic_load_explicit(&g_init_state, memory_order_acquire) ==
+	       V8M_INIT_READY;
 }
 
 /* --- v8m_-prefixed API --------------------------------------------- */
