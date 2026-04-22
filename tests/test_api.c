@@ -873,6 +873,21 @@ static int check_huge_and_frag_stats(void)
 		free(large);
 		return fail("frag.live counts did not reflect the allocations");
 	}
+	/* /proc/self/maps must report at least the v8malloc SO + libc
+	 * + ld-linux + the test binary itself + the live anchor
+	 * mappings, so a healthy bench sees double-digit VMAs at
+	 * minimum. Any value past 0 means the read worked. */
+	if (frag.vma_count == 0U) {
+		free(huge_obj);
+		free(large);
+		return fail("vma_count reported as zero (open failed?)");
+	}
+	uint64_t direct = v8m_count_vmas();
+	if (direct == 0U) {
+		free(huge_obj);
+		free(large);
+		return fail("v8m_count_vmas returned 0");
+	}
 
 	free(huge_obj);
 	free(large);

@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `v8m_count_vmas()` public API (exported under
+  `V8MALLOC_1.0`). Returns the process-wide VMA count read live
+  from `/proc/self/maps` — useful for surfacing the kernel-side
+  fragmentation cost a maintainer cannot see from
+  `v8m_get_stats` alone (every Huge allocation that does not
+  coalesce with an existing region grows the line count, and a
+  runaway count slows mmap / fork / page fault paths in the
+  kernel). Implemented with raw `open` + `read` + `close` — no
+  fopen, no malloc on the path — so it is safe to call from the
+  future background purge thread without re-entering the
+  allocator. Returns 0 if /proc/self/maps cannot be opened
+  (some seccomp sandboxes), letting the caller treat that as
+  "unknown" rather than "zero". `v8m_get_frag_metrics` grows a
+  `vma_count` field that carries the same number so a single
+  snapshot covers both allocator-side and kernel-side
+  fragmentation. Half of huge-pages.md §6.2 — the MAP_FIXED
+  anchor-reservation refactor + auto-warning-on-threshold land
+  in a follow-up cycle.
+
 - AAL primitives test (`tests/test_arch.c`). Covers the
   architecture-abstraction-layer surface the library actually
   exposes today: V8M_ARCH_* detection (exactly one defined,

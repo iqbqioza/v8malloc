@@ -16,6 +16,7 @@
  */
 
 #include <errno.h>
+#include <fcntl.h> /* O_RDONLY for v8m_count_vmas */
 #include <malloc.h> /* mallinfo/mallinfo2/mallopt/malloc_*  glibc extensions */
 #include <pthread.h>
 #include <stdatomic.h>
@@ -557,6 +558,34 @@ V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out)
 	out->bin_overflow_flushes = 0;
 }
 
+V8M_EXPORT uint64_t v8m_count_vmas(void)
+{
+	/* Open /proc/self/maps with raw read() to avoid an alloc on
+	 * the fast path — fopen pulls in libio buffers that would
+	 * route back through v8malloc. open + read + close are
+	 * malloc-free. Each line in /proc/self/maps describes one
+	 * VMA, so the line count is the VMA count. */
+	int maps_fd = open("/proc/self/maps", O_RDONLY);
+	if (maps_fd < 0) {
+		return 0;
+	}
+	uint64_t lines = 0;
+	char buf[4096];
+	for (;;) {
+		ssize_t got = read(maps_fd, buf, sizeof(buf));
+		if (got <= 0) {
+			break;
+		}
+		for (ssize_t i = 0; i < got; i++) {
+			if (buf[i] == '\n') {
+				lines++;
+			}
+		}
+	}
+	(void)close(maps_fd);
+	return lines;
+}
+
 V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 {
 	if (out == NULL) {
@@ -578,6 +607,7 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 	out->large_live_count =
 	    large.large_alloc_count - large.large_free_count;
 	out->huge_live_count = large.huge_alloc_count - large.huge_free_count;
+	out->vma_count = v8m_count_vmas();
 }
 
 V8M_EXPORT int v8m_purge(void)

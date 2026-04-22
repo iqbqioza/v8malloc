@@ -225,6 +225,7 @@ struct v8m_frag_metrics {
 	uint64_t region_map_used_pct; /* live_regions / capacity * 100 */
 	uint64_t large_live_count;
 	uint64_t huge_live_count;
+	uint64_t vma_count; /* /proc/self/maps lines, or 0 if unreadable */
 };
 
 /*
@@ -232,6 +233,21 @@ struct v8m_frag_metrics {
  * returns all zeroes.
  */
 V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out);
+
+/*
+ * Process-wide VMA count, read live from /proc/self/maps. Useful
+ * for surfacing the kernel-side fragmentation cost — every Huge
+ * allocation that does NOT coalesce with an existing region grows
+ * the line count, and a runaway count slows mmap / fork / page
+ * fault paths in the kernel. Returns 0 if /proc/self/maps cannot
+ * be opened (e.g. some seccomp sandboxes), which the caller can
+ * treat as "unknown" rather than "zero".
+ *
+ * Cost: one open + sequential read + close, roughly O(VMA_count).
+ * Cheap enough for periodic logging, too expensive for the alloc
+ * fast path.
+ */
+V8M_EXPORT uint64_t v8m_count_vmas(void);
 
 /*
  * Force a purge cycle: page-heap regions that have drained
