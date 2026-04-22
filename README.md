@@ -202,6 +202,16 @@ sudo scripts/bench-run.sh -- scripts/bench-compare.sh \
     -- ./build/bench/bench/mb_02_scalability
 ```
 
+For the external mimalloc-bench suite, `scripts/bench-mimalloc.sh`
+drives any workload from a pre-built mimalloc-bench tree under
+v8malloc LD_PRELOAD and reports wall time + peak RSS:
+
+```bash
+git clone https://github.com/daanx/mimalloc-bench /tmp/mb
+cd /tmp/mb && ./build-bench-env.sh
+scripts/bench-mimalloc.sh --bench-dir /tmp/mb -- cfrac alloc-test
+```
+
 Knobs (env vars):
 - `V8M_BENCH_DURATION_MS` — per-size / per-config timing budget
   (MB-01 default 250, MB-02 default 1000)

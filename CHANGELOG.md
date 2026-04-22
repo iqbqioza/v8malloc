@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- mimalloc-bench wrapper script
+  (`scripts/bench-mimalloc.sh`). Drives the external
+  mimalloc-bench suite (alloc-test, cfrac, espresso, larsonN,
+  mstressN, glibc-bench, redis, rptest, …) under v8malloc via
+  LD_PRELOAD so the de-facto malloc-replacement benchmark
+  catalogue is one command away. Thin wrapper, not a
+  re-implementation: expects a tree the user has already built
+  with mimalloc-bench's own `build-bench-env.sh`, then for each
+  requested workload runs `LD_PRELOAD=$V8M /usr/bin/time -v
+  <workload>` and tags the wall time + peak RSS block by
+  workload name. `--reps N` for noise sampling. With no
+  workloads named, prints the catalogue of `out/bench/sys/` so
+  the maintainer does not have to grep. Resolves the v8malloc
+  SO via the same probe-then-env-var pattern as
+  `bench-compare.sh` (V8M_V8MALLOC_SO overrides).
+
 - `v8m_count_vmas()` public API (exported under
   `V8MALLOC_1.0`). Returns the process-wide VMA count read live
   from `/proc/self/maps` — useful for surfacing the kernel-side
