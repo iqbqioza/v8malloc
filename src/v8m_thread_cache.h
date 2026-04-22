@@ -198,6 +198,31 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 				  struct v8m_slab_pool *pool);
 
 /*
+ * Drain the cross-thread MPSC remote-free queue and push each
+ * drained slot onto the matching local bin (recovering the size
+ * class from the page meta of each node). Returns the number of
+ * nodes drained. Called on the dispatcher's TLC slow path —
+ * before falling through to the slab pool — so a follow-up alloc
+ * can satisfy from drained slots without a pool-mutex round trip.
+ *
+ * Slots whose meta is invalid or whose class is out of the
+ * Tiny/Small range are skipped (they should not be in the queue —
+ * only slab-class objects ever get pushed there — but the drain
+ * tolerates them defensively rather than aborting). Overflow
+ * during the local push is intentionally NOT flushed: drain runs
+ * on the cold slow path that already pays the slab-pool latency
+ * one allocation later, so the simpler "just push" semantics keep
+ * the drain itself fast.
+ *
+ * v0 leaves the remote queue dormant — slab pages are pool-owned
+ * (not thread-owned), so a free always lands in the freeing
+ * thread's local bin and never in another cache's remote queue.
+ * This drain is therefore a no-op in v0; it lights up when the
+ * thread-owned-slab refactor wires owner-thread routing.
+ */
+size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache);
+
+/*
  * Hook invoked by the pthread_key destructor to drain a cache's
  * bins back to the slab pool before the cache struct itself is
  * freed. The thread-cache module does not itself know about the

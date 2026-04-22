@@ -18,8 +18,11 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
+#include "v8m_remote_free.h" /* v8m_mpsc_push for the drain test */
 #include "v8m_thread_cache.h"
+#include "v8malloc/v8malloc.h" /* v8m_purge */
 
 static int fail(const char *msg)
 {
@@ -253,6 +256,67 @@ static int check_overflow_signal(void)
 	return 0;
 }
 
+/*
+ * Drain coverage: simulate a remote producer pushing freed slots
+ * to the cache's MPSC queue, then verify v8m_thread_cache_drain_remote
+ * returns them and routes each to the appropriate local bin keyed
+ * by the slot's page-meta size class. We use real Tiny-class
+ * allocations as the queue payload so the page-meta lookup
+ * succeeds — the bin push inside drain_remote walks
+ * v8m_ptr_to_meta(slot)->size_class to pick the bin, so synthetic
+ * stack addresses would skip the push (the drain tolerates
+ * invalid meta defensively but does not bin them).
+ */
+static int check_drain_remote_routes_to_bin(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	/* Allocate two real slabs to use as remote-queue payloads. */
+	void *slot_a = malloc(8);
+	void *slot_b = malloc(8);
+	if (slot_a == NULL || slot_b == NULL) {
+		free(slot_a);
+		free(slot_b);
+		return fail("malloc for drain test returned NULL");
+	}
+
+	/* Drain any state the previous tests left in the bins so we
+	 * can assert the post-drain bin count cleanly. Hits the
+	 * dispatcher purge path. */
+	(void)v8m_purge();
+
+	/* Push the slots onto the remote MPSC queue without going
+	 * through the public free (which would land in the local
+	 * bin instead). This is the white-box equivalent of "another
+	 * thread freed these slots while routing remote-frees to us". */
+	v8m_mpsc_push(&cache->remote, (struct v8m_mpsc_node *)slot_a);
+	v8m_mpsc_push(&cache->remote, (struct v8m_mpsc_node *)slot_b);
+
+	size_t drained = v8m_thread_cache_drain_remote(cache);
+	if (drained != 2U) {
+		return fail("drain_remote did not return 2 nodes");
+	}
+	/* Both slots are class 0 (8-byte). The drain pushes them
+	 * onto bin_heads[0]; verify the bin holds 2 entries. */
+	if (cache->bin_count[0] != 2U) {
+		return fail("drained slots did not land in bin[0]");
+	}
+
+	/* Pop both back through the cache so the slabs return to
+	 * canonical state when this test's main() destructor flushes. */
+	(void)v8m_thread_cache_alloc(cache, 0);
+	(void)v8m_thread_cache_alloc(cache, 0);
+
+	/* Hand the slabs back to the slab pool via the normal free
+	 * path so they don't leak. */
+	free(slot_a);
+	free(slot_b);
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -261,6 +325,7 @@ int main(void)
 	result |= check_destructor_fires_on_thread_exit();
 	result |= check_alloc_free_round_trip();
 	result |= check_overflow_signal();
+	result |= check_drain_remote_routes_to_bin();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

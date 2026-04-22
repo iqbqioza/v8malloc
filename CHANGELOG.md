@@ -6,6 +6,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- TLC slow-path remote-free drain
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.c`,
+  thread-cache.md §2.3 / TODO P0 "Slow path chain" + "Drain
+  only on owner thread's slow path" rows). New
+  `v8m_thread_cache_drain_remote` helper drains the cache's
+  cross-thread MPSC queue and pushes each drained slot onto
+  the matching local bin keyed by the slot's page-meta size
+  class; it's invoked from `v8m_dispatch_alloc`'s TLC slow
+  path right before falling through to the slab pool, so a
+  follow-up retry can satisfy from drained slots without a
+  pool-mutex round trip. The drain is a no-op in v0 (slab
+  pages are pool-owned, so nothing pushes to the queue); it
+  lights up when the thread-owned-slab refactor wires the
+  owner-thread routing on the free path. Coverage in
+  `tests/test_thread_cache.c::check_drain_remote_routes_to_bin`
+  white-boxes the drain by manually pushing two real Tiny
+  slabs to the cache's MPSC queue and verifying both land on
+  `bin_heads[0]` after the drain returns 2.
+
 ### Performance
 - Thread-cache (L1) fast path (`src/v8m_thread_cache.{h,c}`,
   `src/v8m_dispatch.{h,c}`, thread-cache.md §2.1 / TODO P0

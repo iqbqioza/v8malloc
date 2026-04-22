@@ -101,9 +101,9 @@ static void destroy_cache(void *arg)
 	uintptr_t hook_raw =
 	    atomic_load_explicit(&g_drain_hook, memory_order_acquire);
 	if (hook_raw != 0) {
+		v8m_thread_cache_drain_hook hook;
 		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
-		v8m_thread_cache_drain_hook hook =
-		    (v8m_thread_cache_drain_hook)hook_raw;
+		hook = (v8m_thread_cache_drain_hook)hook_raw;
 		hook(cache);
 	}
 	/* Latch the bypass flag BEFORE the free — the free routes
@@ -182,9 +182,11 @@ void *v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 	/* The cached object's first 8 bytes hold the next pointer.
 	 * Reading them is well-defined because every cached object
 	 * is at least sizeof(void *) wide (the smallest size class
-	 * is 8 bytes on every supported arch). */
+	 * is 8 bytes on every supported arch). The void * cast on
+	 * `&next` keeps clang-tidy's multi-level-pointer rule happy
+	 * (the natural type is `void **`, but memcpy takes `void *`). */
 	void *next = NULL;
-	(void)memcpy(&next, head, sizeof(next));
+	(void)memcpy((void *)&next, head, sizeof(next));
 	cache->bin_heads[cls] = next;
 	cache->bin_count[cls]--;
 	return head;
@@ -197,7 +199,7 @@ bool v8m_thread_cache_free(struct v8m_thread_cache *cache, uint32_t cls,
 		return false;
 	}
 	void *prev_head = cache->bin_heads[cls];
-	(void)memcpy(obj, &prev_head, sizeof(prev_head));
+	(void)memcpy(obj, (const void *)&prev_head, sizeof(prev_head));
 	cache->bin_heads[cls] = obj;
 	cache->bin_count[cls]++;
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
@@ -217,7 +219,7 @@ size_t v8m_thread_cache_flush_half(struct v8m_thread_cache *cache,
 			break;
 		}
 		void *next = NULL;
-		(void)memcpy(&next, obj, sizeof(next));
+		(void)memcpy((void *)&next, obj, sizeof(next));
 		cache->bin_heads[cls] = next;
 		cache->bin_count[cls]--;
 		/* Recover the meta from the object pointer; the slab
@@ -245,6 +247,33 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 		}
 	}
 	return total;
+}
+
+size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache)
+{
+	if (cache == NULL) {
+		return 0;
+	}
+	struct v8m_mpsc_node *node = v8m_mpsc_drain(&cache->remote);
+	size_t count = 0;
+	while (node != NULL) {
+		/* Read `next` BEFORE pushing onto the local bin —
+		 * v8m_thread_cache_free overwrites the first 8 bytes
+		 * of the slot with the bin's `next` pointer, which
+		 * would clobber the MPSC chain link if we read it
+		 * after. */
+		struct v8m_mpsc_node *next =
+		    atomic_load_explicit(&node->next, memory_order_relaxed);
+		const struct v8m_page_meta *meta = v8m_ptr_to_meta(node);
+		if (meta != NULL && v8m_page_meta_valid(meta) &&
+		    meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+			(void)v8m_thread_cache_free(cache, meta->size_class,
+						    node);
+		}
+		node = next;
+		count++;
+	}
+	return count;
 }
 
 int v8m_thread_cache_module_init(void)

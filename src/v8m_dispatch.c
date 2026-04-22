@@ -71,7 +71,16 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 		 * between distinct slab pools. The cache is created
 		 * on first touch; failure to allocate one (rare; only
 		 * under extreme memory pressure) bypasses the cache
-		 * and serves directly. */
+		 * and serves directly.
+		 *
+		 * Slow path: drain the cross-thread remote-free queue
+		 * before falling through to the slab pool, so a
+		 * follow-up retry can satisfy from drained slots
+		 * without a pool-mutex round trip. The drain is a
+		 * no-op in v0 (slab pages are pool-owned, so nothing
+		 * pushes to the queue); it lights up when the
+		 * thread-owned-slab refactor wires owner-thread
+		 * routing. */
 		if (dispatch->use_tlc) {
 			struct v8m_thread_cache *cache =
 			    v8m_thread_cache_get_or_create();
@@ -80,6 +89,13 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 				    v8m_thread_cache_alloc(cache, cls);
 				if (cached != NULL) {
 					return cached;
+				}
+				if (v8m_thread_cache_drain_remote(cache) > 0U) {
+					cached =
+					    v8m_thread_cache_alloc(cache, cls);
+					if (cached != NULL) {
+						return cached;
+					}
 				}
 			}
 		}
