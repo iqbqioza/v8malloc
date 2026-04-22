@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Weekly benchmark workflow. Builds v8malloc in release mode with
-# the bench harness enabled, runs every MB-01..06 benchmark with the
+# the bench harness enabled, runs every MB-01..07 benchmark with the
 # spec-realistic knobs (longer durations than the interactive
 # defaults so the numbers are not warmup-dominated), optionally
 # compares against jemalloc/tcmalloc/mimalloc when those packages
@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   run-benches:
-    name: Run MB-01..06 in release mode
+    name: Run MB-01..07 in release mode
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -120,6 +120,20 @@ jobs:
             -- ./build/bench/bench/mb_06_large_latency \
             > bench-results/mb_06_large_latency.txt 2>&1 || true
           cat bench-results/mb_06_large_latency.txt
+
+      - name: MB-07 NUMA local-allocation rate
+        run: |
+          V8M_BENCH_ITERS=512 \
+            ./scripts/bench-compare.sh \
+            -- ./build/bench/bench/mb_07_numa_local \
+            > bench-results/mb_07_numa_local.txt 2>&1 || true
+          # MB-07 only produces real numbers on a multi-NUMA host
+          # with get_mempolicy enabled; on the GitHub shared
+          # runner (single node, often seccomp-filtered) it
+          # prints the "skipping every row" stub. The artifact
+          # still captures the run for the day a host with
+          # CONFIG_NUMA=y is in the matrix.
+          cat bench-results/mb_07_numa_local.txt
 
       - name: Upload results
         uses: actions/upload-artifact@v4

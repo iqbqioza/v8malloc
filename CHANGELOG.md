@@ -6,6 +6,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Weekly bench workflow now also runs MB-07 (NUMA
+  local-allocation rate) — `.github/workflows/bench-weekly.yml`.
+  The job header text changes from "MB-01..06" to "MB-01..07"
+  so the run page reads correctly. MB-07 only produces real
+  numbers on a multi-NUMA host with `get_mempolicy` enabled
+  (the GitHub shared runner is single-node and often
+  seccomp-filtered, so it prints the "skipping every row" stub
+  for now); the artifact still captures the run for the day a
+  CONFIG_NUMA=y host enters the matrix. Knob:
+  `V8M_BENCH_ITERS=512` for a longer per-cell sample than the
+  CI default.
+
 ### Added
 - `V8M_DEBUG` double-free detection (`src/v8m_api.c`,
   api.md §6.2). `v8m_free` consults a 4096-entry ring of
