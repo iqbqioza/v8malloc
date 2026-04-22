@@ -252,6 +252,43 @@ static int check_runtime_probes(void)
 	return 0;
 }
 
+static int check_tsc(void)
+{
+	/* RDTSC must be monotonic across two back-to-back calls — true
+	 * for `rdtsc` on x86_64 and for clock_gettime(MONOTONIC_RAW)
+	 * on every other arch. The two calls happen close enough in
+	 * time that the test is robust against scheduler preemption. */
+	uint64_t first = v8m_arch_rdtsc();
+	uint64_t second = v8m_arch_rdtsc();
+	if (second < first) {
+		return fail("v8m_arch_rdtsc went backwards");
+	}
+
+	uint32_t mhz = v8m_arch_tsc_frequency_mhz();
+#if defined(V8M_ARCH_X86_64)
+	/* Calibration falls back to 3000 MHz when the calibration
+	 * window is disturbed; either the real number or the fallback
+	 * must land in the plausible 100–10000 band. */
+	if (mhz < 100U || mhz > 10000U) {
+		return fail("TSC frequency out of plausible range");
+	}
+#else
+	/* Fallback nanoseconds-per-microsecond is exactly 1000 on
+	 * every non-x86_64 build. */
+	if (mhz != 1000U) {
+		return fail("non-x86_64 TSC frequency not 1000");
+	}
+#endif
+
+	/* Second call should return the cached value, identical to
+	 * the first. (On non-x86_64 builds this is trivially true
+	 * since the function returns a constant.) */
+	if (v8m_arch_tsc_frequency_mhz() != mhz) {
+		return fail("TSC frequency cache returned different value");
+	}
+	return 0;
+}
+
 static int check_bitops_builtins(void)
 {
 	/* The allocator relies on __builtin_ctzll, __builtin_clzll,
@@ -293,6 +330,7 @@ int main(void)
 	result |= check_branch_hints();
 	result |= check_page_size();
 	result |= check_runtime_probes();
+	result |= check_tsc();
 	result |= check_bitops_builtins();
 	if (result == 0) {
 		(void)printf("test_arch: OK\n");

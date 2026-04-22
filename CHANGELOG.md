@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- x86_64 RDTSC time source + lazy frequency calibration
+  (`src/v8m_arch.{h,c}`, winning-algorithms.md §4.2 / TODO
+  Tier 1 P1 entry). New helpers `v8m_arch_rdtsc()` and
+  `v8m_arch_tsc_frequency_mhz()` give the future EMA refill
+  controller a portable monotonic time source. On x86_64
+  `v8m_arch_rdtsc` is a single `__rdtsc` and the frequency
+  helper measures TSC drift against
+  `clock_gettime(CLOCK_MONOTONIC_RAW)` over a 5 ms window the
+  first time it is called, caching the result in an atomic;
+  scheduler-induced calibration outliers fall back to a
+  sensible 3 GHz default rather than poisoning every
+  downstream batch-size computation. On every other arch the
+  rdtsc helper returns `clock_gettime(MONOTONIC_RAW)`
+  nanoseconds and the frequency helper returns 1000 — the
+  controller's "ticks per microsecond" formulation works on
+  both axes without arch-specific code in the caller.
+  Coverage in `tests/test_arch.c::check_tsc` asserts
+  monotonicity across two reads, the cache returns the same
+  value on a second call, and the frequency lands in the
+  plausible 100–10000 MHz band on x86_64 / exactly 1000
+  elsewhere.
+
 - AArch64 Tier 1 runtime CPU feature probes
   (`src/v8m_arch.{h,c}`, platform-abstraction.md §4.2 / TODO
   Tier 1 aarch64 entry). New helpers `v8m_arch_has_lse()` and

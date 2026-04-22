@@ -139,4 +139,32 @@ bool v8m_arch_has_lse(void);
  */
 size_t v8m_arch_runtime_cache_line_size(void);
 
+#include <stdint.h>
+
+/*
+ * Monotonic time-stamp counter, in TSC ticks (x86_64) or
+ * nanoseconds (every other arch). The EMA refill controller
+ * (winning-algorithms.md §4.2) reads this to estimate per-class
+ * allocation rate. On x86_64 the read is a single `rdtsc`
+ * instruction (no fence — the controller tolerates skew on the
+ * order of an out-of-order window); on other arches it falls back
+ * to `clock_gettime(CLOCK_MONOTONIC_RAW)` returning nanoseconds.
+ *
+ * The unit divergence is intentional: pair the value with
+ * `v8m_arch_tsc_frequency_mhz()` to convert to microseconds, and
+ * the controller's "ticks per microsecond" formulation works on
+ * both axes without arch-specific code in the caller.
+ */
+uint64_t v8m_arch_rdtsc(void);
+
+/*
+ * TSC ticks per microsecond (i.e. "MHz" of the time source above).
+ * On x86_64 calibrated lazily on first call by measuring TSC drift
+ * against `clock_gettime(CLOCK_MONOTONIC_RAW)` over a short
+ * window; cached in an atomic for subsequent calls. On every other
+ * arch returns 1000 — the fallback `v8m_arch_rdtsc()` returns
+ * nanoseconds, and 1000 ns per microsecond closes the loop.
+ */
+uint32_t v8m_arch_tsc_frequency_mhz(void);
+
 #endif /* V8M_ARCH_H */
