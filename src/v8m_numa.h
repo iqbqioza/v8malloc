@@ -63,6 +63,17 @@ uint32_t v8m_numa_node_for_cpu(uint32_t cpu);
 uint32_t v8m_numa_current_node(void);
 
 /*
+ * Calling thread's current CPU id. Wraps sched_getcpu(); on
+ * failure or out-of-range returns 0. Used to index the per-core
+ * L2 cache (capped at V8M_NUMA_MAX_CPUS), so the 0 fallback is
+ * safe — it just routes everyone to the cpu-0 cache, which is
+ * correct (if not optimal) under syscall failure. Refresh
+ * caching may follow once an L2 hot-path consumer measures the
+ * sched_getcpu cost as worth it.
+ */
+uint32_t v8m_numa_current_cpu(void);
+
+/*
  * SLIT-style relative distance from `from` to `to`, as reported
  * by /sys/devices/system/node/nodeN/distance. The Linux convention
  * is 10 for local, 20+ for remote; values are clamped to uint8_t

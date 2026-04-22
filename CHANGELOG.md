@@ -7,6 +7,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- L2 per-core core cache primitive
+  (`src/v8m_core_cache.{h,c}`, `src/v8m_numa.{h,c}`,
+  architecture.md §2.2 / TODO P1 "Per-core v8m_core_cache" +
+  "Treiber stack with tagged pointers" rows). New
+  `struct v8m_core_cache` carries one Treiber stack per size
+  class, V8M_CACHELINE_ALIGNED so neighbouring entries in the
+  global per-CPU table do not share a cache line.
+  `v8m_core_cache_push` and `v8m_core_cache_pop` use a
+  CAS-loop on a tagged 64-bit head — top 16 bits hold an
+  ABA-protection tag (incremented on every successful CAS),
+  bottom 48 bits hold the canonical-form pointer (every
+  pointer the allocator hands out fits in 48 bits on
+  x86_64 / aarch64 user mappings). The global table is sized
+  at `V8M_NUMA_MAX_CPUS = 4096` cores in BSS; only the cores
+  the workload actually touches get physically backed pages
+  (~384 B per touched core). `v8m_core_cache_for_current_cpu`
+  pairs with the new `v8m_numa_current_cpu` helper to route
+  pushes / pops to the calling thread's CPU. Wiring into the
+  TLC overflow / refill paths lands with the spec's
+  `push_batch / pop_batch to amortize CAS` cycle (TODO P1
+  row 63); today the L2 is callable from tests but is not
+  yet on the alloc / free hot path. Coverage in
+  `tests/test_core_cache.c`: single-thread LIFO round-trip,
+  empty-stack pop returns NULL, out-of-range guards, and a
+  4 producer × 4 consumer × 1024-pushes-each conservation
+  stress that asserts every pushed pointer surfaces on the
+  consumer side exactly once.
+
+### Added
 - Deferred coalescing for the buddy pool — opt-in
   (`src/v8m_buddy.{h,c}`, `src/v8m_buddy_pool.c`,
   `src/v8m_config.c`, `include/v8malloc/v8malloc.h`,

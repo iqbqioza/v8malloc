@@ -329,3 +329,12 @@ uint32_t v8m_numa_current_node(void)
 	}
 	return t_cached_node;
 }
+
+uint32_t v8m_numa_current_cpu(void)
+{
+	int cpu = sched_getcpu();
+	if (cpu < 0 || cpu >= (int)V8M_NUMA_MAX_CPUS) {
+		return 0;
+	}
+	return (uint32_t)cpu;
+}
