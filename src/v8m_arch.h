@@ -38,6 +38,14 @@
 #define V8M_ARCH_S390X 1
 #define V8M_CACHE_LINE_SIZE 256
 #elif defined(__loongarch64)
+/*
+ * LoongArch 64. Tier 3. The GCC 13 / Clang 16 floor we already
+ * gate is the published "good support" line for this target. Weak
+ * memory model: stdatomic memory_order_acquire/release/seq_cst
+ * lower to DBAR; LL.D/SC.D back the C11 _Atomic CAS path; tp
+ * ($r2) carries __thread storage with a single load. Cache line
+ * is 64 B on 3A5000 / 3A6000.
+ */
 #define V8M_ARCH_LOONGARCH64 1
 #define V8M_CACHE_LINE_SIZE 64
 #else

@@ -6,6 +6,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documented
+- Tier 3 LoongArch 64 support is explicit in the build system
+  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
+  — platform-abstraction.md §4.6 / TODO Tier 3 loongarch64
+  entry. Added a dedicated `elseif(... loongarch64)` branch to
+  `V8MALLOC_ARCH_FLAGS` so a future tuning flag has a place to
+  drop in; the branch ships empty today because every spec
+  feature is compiler-emitted under the existing GCC ≥ 13 /
+  Clang ≥ 16 floor: DBAR memory barriers via stdatomic
+  memory_order, LL.D/SC.D atomics through C11 _Atomic CAS,
+  CLZ.D/CTZ.D/CPOP.D through `__builtin_*`, and tp ($r2)-relative
+  TLS through `__thread`. Also expanded the loongarch arm of
+  `v8m_arch.h`'s detection cascade with a comment explaining
+  the same compiler-coverage chain.
+
 ### Changed
 - Kernel huge-page size is now per-arch via the new
   `V8M_HUGE_PAGE_SIZE` macro in `src/v8m_arch.h`

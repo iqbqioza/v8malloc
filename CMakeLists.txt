@@ -140,6 +140,15 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le|powerpc64le")
 	set(V8MALLOC_ARCH_FLAGS -mcpu=power9)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
 	set(V8MALLOC_ARCH_FLAGS -march=z14)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "loongarch64")
+	# LoongArch: no per-arch flag override needed. The toolchain
+	# (GCC >= 13 / Clang >= 16, already gated above) emits DBAR
+	# barriers via stdatomic memory_order, LL.D/SC.D atomics
+	# through the C11 _Atomic primitives, CLZ.D / CTZ.D / CPOP.D
+	# through __builtin_*, and tp-relative TLS through __thread.
+	# Listed explicitly so a future cycle that needs to add a
+	# loongarch-specific tuning flag has a place to drop it.
+	set(V8MALLOC_ARCH_FLAGS)
 endif()
 
 # --- Sources ------------------------------------------------------------------
