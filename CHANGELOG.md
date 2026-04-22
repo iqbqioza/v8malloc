@@ -6,6 +6,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- End-to-end MPSC remote-free drain coverage
+  (`tests/test_remote_free.c::check_alloc_remote_realloc`,
+  TODO [Test] row 171). The existing
+  `test_remote_free.c` covered the MPSC primitive in
+  isolation (multi-producer / single-consumer stress); the
+  new third check exercises the dispatcher integration the
+  spec asks for. Owner thread allocates a Tiny slot,
+  exposes its TLC pointer; producer thread pushes that
+  slot directly onto the owner's `cache->remote` MPSC
+  queue (simulating the cross-thread free routing the
+  dispatcher will do once thread-owned slab pages land);
+  owner drains its TLC + L2 via `v8m_purge_thread` so the
+  next alloc forces the TLC slow path; the realloc
+  returns the same pointer the producer pushed,
+  confirming
+  `v8m_thread_cache_drain_remote → bin install → fast-path
+  pop` works end to end. The producer-side routing piece
+  (dispatcher choosing MPSC over local bin based on
+  `meta->owner_thread`) is the only part that remains for
+  the thread-owned-slab refactor.
+
 ### Performance
 - False-sharing audit extended to the L1 thread cache and L2
   core cache (`src/v8m_thread_cache.{h,c}`,
