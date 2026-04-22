@@ -196,6 +196,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_large.c
 	src/v8m_libc_fallback.c
 	src/v8m_numa.c
+	src/v8m_numa_pool.c
 	src/v8m_page.c
 	src/v8m_page_heap.c
 	src/v8m_refill_controller.c

@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Per-NUMA-node huge-page pool primitive
+  (`src/v8m_numa_pool.{h,c}`). Owns a list of
+  `v8m_huge_slab` descriptors per NUMA node; carves
+  V8M_PAGE_SIZE-sized slab pages from those huge
+  pages on demand and migrates descriptors between
+  partials / fulls lists as their occupancy changes.
+  An emptied descriptor is unlinked and its huge page
+  is returned to the page heap on the same call —
+  bounded memory footprint without a sweep tick. Each
+  per-node bookkeeping block is `V8M_CACHELINE_ALIGNED`
+  (`struct v8m_numa_pool_node`) so adjacent nodes'
+  counters and lock cannot share a line; a thread
+  carving from node 0 cannot bounce node 1's cache
+  line. Per-node counters: `huge_pages_alive`,
+  `huge_pages_allocated`, `huge_pages_released`,
+  `slab_carve_calls`, `slab_release_calls`. Huge pages
+  are sourced via `v8m_page_heap_alloc(V8M_HUGE_PAGE_SIZE,
+  V8M_HUGE_PAGE_SIZE)`, so the page heap's MAP_HUGETLB
+  primary attempt + MADV_HUGEPAGE fallback both apply.
+  Ships standalone — the dispatcher does not yet route
+  slab allocations through this pool; that wiring lands
+  with the slab pool refactor that consumes the
+  per-NUMA shape. Coverage in `tests/test_numa_pool.c`
+  (cache-line alignment of per-node entries, init /
+  destroy lifecycle including double-destroy + NULL
+  tolerance, basic carve with page-aligned + owned slot,
+  full huge page migrates to fulls list, the next carve
+  allocates a fresh huge page, full drain returns
+  every huge page to the OS, foreign release is
+  rejected, out-of-range numa_node returns NULL).
 - Anchor reservation primitive
   (`src/v8m_anchor_reservation.{h,c}`).
   Reserves one large virtual range up front via
