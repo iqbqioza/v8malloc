@@ -250,6 +250,25 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out);
 V8M_EXPORT uint64_t v8m_count_vmas(void);
 
 /*
+ * Async-signal-safe emergency allocation
+ * (architecture.md §6). `malloc` / `free` are not
+ * async-signal-safe in general — the slab pool's `pthread_mutex`
+ * would happily deadlock if a signal handler fires on a thread
+ * that already holds it. This is the escape hatch: a small BSS
+ * bump pool, atomic-only, no locks, no syscalls, safe to call
+ * from any signal handler.
+ *
+ * Returns NULL on exhaustion (the buffer is intentionally tiny —
+ * a one-page emergency budget — so signal handlers must check).
+ * The returned pointer can be passed to `free()` like any other
+ * v8malloc allocation; the dispatcher recognises it via a range
+ * check and treats the free as a no-op (the buffer leaks for the
+ * process lifetime by design).
+ */
+/* NOLINTNEXTLINE(readability-redundant-declaration) */
+V8M_EXPORT void *v8m_signal_safe_alloc(size_t size);
+
+/*
  * Force a purge cycle: page-heap regions that have drained
  * (e.g., empty buddy arenas, slab pages with `used_count == 0`)
  * are returned to the kernel. v0's slab and buddy pools already

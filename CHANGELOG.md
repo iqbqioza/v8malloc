@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Async-signal-safe emergency allocator
+  (`src/v8m_signal_safe.{h,c}`, architecture.md §6).
+  `malloc` / `free` are not async-signal-safe in general — the
+  slab pool's `pthread_mutex` would happily deadlock if a
+  signal handler fires on a thread that already holds it.
+  `v8m_signal_safe_alloc(size_t)` (exported under
+  `V8MALLOC_1.0`) is the escape hatch: a 64 KiB BSS bump pool
+  with an atomic offset, no locks, no syscalls, safe to call
+  from any signal handler. Returns NULL on exhaustion (the
+  budget is intentionally tiny — abort would be a worse
+  signal-handler outcome than a NULL the handler can check).
+  `free()` on a signal-safe pointer is a safe no-op: the
+  dispatcher's free path consults `v8m_ptr_is_signal_safe`
+  before reaching for page metadata, mirroring the bootstrap
+  pointer treatment. The buffer leaks for the process lifetime
+  by design — per-pointer reclamation would need a free list
+  which would not be async-signal-safe under contention from
+  non-handler frees. New `tests/test_signal_safe.c` covers
+  cold-buffer alloc, free no-op, alloc(0), exhaustion → NULL,
+  `malloc_usable_size` no-crash, and an actual
+  `raise(SIGUSR1)` round-trip exercising the alloc-from-handler
+  path end-to-end.
+
 - 1 GiB Gigantic-page path
   (`src/v8m_page_heap.c`, `src/v8m_large.c`, huge-pages.md §7).
   `v8m_page_heap_alloc` now attempts

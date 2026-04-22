@@ -37,6 +37,7 @@
 #include "v8m_numa.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
+#include "v8m_signal_safe.h"
 #include "v8m_size_class.h"
 #include "v8malloc/v8malloc.h"
 
@@ -322,6 +323,13 @@ V8M_EXPORT void v8m_free(void *ptr)
 		/* Bootstrap allocations have no per-pointer free path
 		 * — they're released only when the buffer is reset,
 		 * which never happens in v0. */
+		return;
+	}
+	if (v8m_ptr_is_signal_safe(ptr)) {
+		/* Signal-safe emergency allocations leak by design;
+		 * the buffer is small and any per-pointer reclamation
+		 * would need a free list, which would not be
+		 * async-signal-safe under contention. */
 		return;
 	}
 	if (!dispatch_ready()) {

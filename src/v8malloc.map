@@ -37,6 +37,7 @@ V8MALLOC_1.0 {
 		v8m_get_thread_stats;
 		v8m_get_frag_metrics;
 		v8m_count_vmas;
+		v8m_signal_safe_alloc;
 		v8m_purge;
 		v8m_purge_thread;
 
