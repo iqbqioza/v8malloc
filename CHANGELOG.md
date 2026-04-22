@@ -7,9 +7,43 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Anchor reservation primitive
+  (`src/v8m_anchor_reservation.{h,c}`).
+  Reserves one large virtual range up front via
+  `mmap(PROT_NONE | MAP_NORESERVE)` (default 256 MiB,
+  caller-tunable) and carves sub-regions out of it via
+  `mprotect(PROT_READ | PROT_WRITE)` — each carve
+  commits its pages to the existing PROT_NONE mapping
+  rather than minting a new VMA, so the kernel-side
+  cost of mmap / fork / page-fault scales with the
+  anchor count rather than the per-allocation count.
+  Bump-only allocation by design: `release()` applies
+  `MADV_DONTNEED` + `mprotect(PROT_NONE)` to drop the
+  physical pages and trap use-after-free, but the
+  virtual slot is not reclaimable — the simpler
+  semantics keep the carve fast-path branch-free, and
+  the page-heap's existing region-table free path
+  handles within-region reuse for the integration
+  cycle that consumes this primitive. Stats counters
+  (`carve_calls`, `carve_failures`, `release_calls`)
+  on the descriptor + a lock-free `owns()` predicate
+  and `remaining()` accessor for the future routing
+  decision. Ships standalone because the page-heap
+  integration that consumes it requires routing
+  decisions about which size classes opt in (Huge is
+  the largest VMA contributor; Large and below carry
+  the existing region-table cost) and those decisions
+  are simpler to land on top of a frozen primitive.
+  Coverage in `tests/test_anchor_reservation.c` (init
+  / destroy lifecycle including default-cap and NULL
+  tolerance, basic carve with alignment + writability
+  + non-overlap, exhaustion bumps `carve_failures` and
+  preserves bump_offset, release does NOT recycle the
+  slot, release rejects foreign / oversized / NULL
+  / zero-byte pointers, owns predicate edges,
+  non-power-of-two alignment rejection).
 - Huge-page slab carve primitive
-  (`src/v8m_huge_slab.{h,c}`, TODO P0 row 88 partial —
-  huge-pages.md §4.2). Implements the spec's
+  (`src/v8m_huge_slab.{h,c}`). Implements the
   `struct v8m_huge_slab` verbatim: per-huge-page
   descriptor with a 32-bit bitmap (each bit tracks one
   V8M_PAGE_SIZE = 64 KiB slab page within the
@@ -25,7 +59,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the future per-NUMA HugePage pool will consume.
   `V8M_HUGE_SLABS_PER_HUGE` = `V8M_HUGE_PAGE_SIZE /
   V8M_PAGE_SIZE` (32 default, 16 on s390x), exactly
-  matching the spec's per-arch table. Two
+  matching the per-arch table. Two
   `_Static_assert`s pin the bitmap-fits-in-32-bits
   invariant. Ships standalone because the per-NUMA
   HugePage pool that consumes it is multi-cycle work;
@@ -37,22 +71,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   rejection of bad pointers, partial slabs_per_huge
   clamping, NULL tolerance).
 - Time-based EMA refill controller module
-  (`src/v8m_refill_controller.{h,c}`, TODO P1 row 132 —
-  winning-algorithms.md §4.2). Implements the spec
-  algorithm verbatim: per-class EMA of actual demand
+  (`src/v8m_refill_controller.{h,c}`). Implements the algorithm verbatim: per-class EMA of actual demand
   (α = 0.25), rate predictor that divides by elapsed
   TSC ticks since the previous refill, batch sized so
   the next refill lands ≈ V8M_REFILL_TARGET_HOLD_MICROS
   (100 µs) into the future, clamped to
   [V8M_REFILL_BATCH_MIN, V8M_REFILL_BATCH_MAX] = [4,
   256]. Ships standalone because L3 / L4 do not yet
-  exist as discrete tiers in the v0 dispatcher (the
-  controller's spec scope is the L2↔L3 / L3↔L4
-  boundary, where the rdtsc + EMA cost is amortized
-  across an L3/L4 lock + TLB round trip; the L1↔L2
-  boundary uses the simpler capacity-based sizing per
-  thread-cache.md §3.2 and cannot afford the rdtsc
-  work). A future cycle that introduces a per-NUMA L3
+  exist as discrete tiers in the v0 dispatcher. A future cycle that introduces a per-NUMA L3
   pool will instance the controller and consume the
   computed batch on its refill path. Test-only
   `v8m_refill_controller_set_last_refill_tsc` knob
@@ -62,8 +88,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   zero-demand MIN clamp, EMA smoothing of a single
   spike, NULL/out-of-range tolerance).
 - Per-NUMA-node memory balance snapshot
-  (`v8m_get_numa_balance`, TODO P2 row 157 — numa.md
-  §6.1 inter-node rebalancing detection). The page heap
+  (`v8m_get_numa_balance`). The page heap
   now stamps each registered region with the NUMA node
   its `mbind()` landed on (`uint16_t node` on
   `region_entry`, `V8M_REGION_NODE_UNBOUND` sentinel),
@@ -72,7 +97,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `struct v8m_numa_balance_stats` carries
   `per_node_bytes[64]`, `total_bytes`, `node_count`,
   `most_loaded_node`, `most_loaded_bytes`,
-  `average_bytes_per_node`, and the spec's
+  `average_bytes_per_node`, and the
   `imbalanced` flag — true when the most-loaded node
   holds ≥ 150 % of the average across live nodes
   (encoded as `most * 2 > average * 3` to dodge floats
@@ -81,7 +106,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `bind_and_account` helper centralizes the
   bind → record_node → counter-bump invariant in one
   place so the four call sites in `v8m_page_heap_alloc`
-  don't repeat the pattern. The action half of the spec
+  don't repeat the pattern. The action half
   (suppress new allocations from the overloaded node,
   page migration via `move_pages()`, TLC capacity
   shrink) is the future cycle that lands once a
@@ -93,8 +118,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   multi-NUMA-only assertion gated on `node_count > 1`).
 
 ### Performance
-- Adaptive THP advice (TODO P2 row 155 — huge-pages.md
-  §5). The page heap now tracks the EMA of inter-arrival
+- Adaptive THP advice. The page heap now tracks the EMA of inter-arrival
   TSC ticks for THP-eligible allocations (≥
   `V8M_HUGE_PAGE_SIZE`, with `V8M_OPT_HUGE_PAGES` on)
   and replaces the unconditional `MADV_HUGEPAGE` hint
@@ -115,16 +139,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `v8malloc.map`). Coverage in
   `tests/test_page_heap.c::check_thp_adaptive_decision`.
   The full per-region access tracking + page-by-page
-  promotion the spec calls for needs a region-stats
+  promotion needs a region-stats
   table that does not exist in v0; the EMA-driven
-  global decision captures the spec's intent at
+  global decision captures the intent at
   page-heap granularity.
 
 ### Added
 - Caller-address-based lifetime tracker
-  (`v8m_get_lifetime_stats`, TODO P2 row 154 —
-  fragmentation.md §5.2). Foundation for the
-  ephemeral/short/long arena routing the spec calls for.
+  (`v8m_get_lifetime_stats`). Foundation for
+  ephemeral/short/long arena routing.
   Opt-in via `V8M_OPT_LIFETIME_TRACKING` (env
   `V8M_LIFETIME_TRACKING`, default 0); when on,
   `v8m_malloc` samples 1-in-`V8M_LIFETIME_SAMPLE_RATE`
@@ -151,8 +174,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   in `tests/test_thread_cache.c::check_lifetime_tracker_records`
   + `check_lifetime_tracker_off_is_inert`.
 - Size-class request histogram + public snapshot API
-  (`v8m_get_size_class_histogram`, TODO P2 row 153 —
-  size-classes.md §9 "workload-adaptive size classes").
+  (`v8m_get_size_class_histogram`).
   Foundation for the dynamic size-class adjustment row:
   every dispatcher allocation is sampled
   (1-in-`V8M_HISTOGRAM_SAMPLE_RATE` = 64 today) and the
@@ -161,7 +183,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   of raw requests so internal-frag per bucket is
   `request_count[cls] * v8m_class_to_size[cls] -
   request_bytes[cls]` — what the future hot-reload step
-  of §9 will consume to decide whether a new sub-class
+  will consume to decide whether a new sub-class
   would shrink the dominant waste bucket. Per-TLC
   counters with no atomics on the hot path; a global
   carry-over absorbs the bootstrap / signal-safe
@@ -174,12 +196,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   Coverage in
   `tests/test_thread_cache.c::check_size_class_histogram`.
 - End-to-end MPSC remote-free drain coverage
-  (`tests/test_remote_free.c::check_alloc_remote_realloc`,
-  TODO [Test] row 171). The existing
+  (`tests/test_remote_free.c::check_alloc_remote_realloc`). The existing
   `test_remote_free.c` covered the MPSC primitive in
   isolation (multi-producer / single-consumer stress); the
-  new third check exercises the dispatcher integration the
-  spec asks for. Owner thread allocates a Tiny slot,
+  new third check exercises the dispatcher integration. Owner thread allocates a Tiny slot,
   exposes its TLC pointer; producer thread pushes that
   slot directly onto the owner's `cache->remote` MPSC
   queue (simulating the cross-thread free routing the
@@ -196,8 +216,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Performance
 - False-sharing audit extended to the L1 thread cache and L2
-  core cache (`src/v8m_thread_cache.{h,c}`,
-  `src/v8m_core_cache.c`, TODO P1 row 137). The L1 cache's
+  core cache (`src/v8m_thread_cache.{h,c}`, `src/v8m_core_cache.c`). The L1 cache's
   `remote` MPSC queue head (producer-written when
   cross-thread frees route here) is now followed by a
   V8M_CACHELINE_ALIGNED `initialized` field, which forces
@@ -227,10 +246,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   cross-thread free routing.
 
 - TLC↔L2 plumbing with single-CAS batch push
-  (`src/v8m_core_cache.{h,c}`, `src/v8m_thread_cache.{h,c}`,
-  `src/v8m_dispatch.{h,c}`, `src/v8m_api.c`,
-  architecture.md §2.2 / TODO P1 "push_batch / pop_batch to
-  amortize CAS" row). New `v8m_core_cache_push_batch`
+  (`src/v8m_core_cache.{h,c}`, `src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.{h,c}`, `src/v8m_api.c`). New `v8m_core_cache_push_batch`
   pushes a pre-linked chain onto a per-core L2 stack with a
   single tagged-pointer CAS — amortizes the CAS over every
   node in the batch (typically 32 = V8M_DISPATCH_L2_BATCH).
@@ -262,9 +278,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - L2 per-core core cache primitive
-  (`src/v8m_core_cache.{h,c}`, `src/v8m_numa.{h,c}`,
-  architecture.md §2.2 / TODO P1 "Per-core v8m_core_cache" +
-  "Treiber stack with tagged pointers" rows). New
+  (`src/v8m_core_cache.{h,c}`, `src/v8m_numa.{h,c}`). New
   `struct v8m_core_cache` carries one Treiber stack per size
   class, V8M_CACHELINE_ALIGNED so neighbouring entries in the
   global per-CPU table do not share a cache line.
@@ -279,9 +293,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   (~384 B per touched core). `v8m_core_cache_for_current_cpu`
   pairs with the new `v8m_numa_current_cpu` helper to route
   pushes / pops to the calling thread's CPU. Wiring into the
-  TLC overflow / refill paths lands with the spec's
-  `push_batch / pop_batch to amortize CAS` cycle (TODO P1
-  row 63); today the L2 is callable from tests but is not
+  TLC overflow / refill paths lands with the
+  `push_batch / pop_batch to amortize CAS` cycle ; today the L2 is callable from tests but is not
   yet on the alloc / free hot path. Coverage in
   `tests/test_core_cache.c`: single-thread LIFO round-trip,
   empty-stack pop returns NULL, out-of-range guards, and a
@@ -291,10 +304,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Deferred coalescing for the buddy pool — opt-in
-  (`src/v8m_buddy.{h,c}`, `src/v8m_buddy_pool.c`,
-  `src/v8m_config.c`, `include/v8malloc/v8malloc.h`,
-  winning-algorithms.md §10 / TODO P2 "Deferred coalescing"
-  row). New `V8M_OPT_DEFERRED_COALESCE` option (env
+  (`src/v8m_buddy.{h,c}`, `src/v8m_buddy_pool.c`, `src/v8m_config.c`, `include/v8malloc/v8malloc.h`). New `V8M_OPT_DEFERRED_COALESCE` option (env
   `V8M_DEFERRED_COALESCE`, default 0) gates a buddy-pool
   variant where `v8m_buddy_pool_free` skips the
   immediate buddy-merge — the freed block lands on
@@ -308,7 +318,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   same-size patterns at the cost of slightly higher
   steady-state fragmentation; off by default because the
   immediate-coalesce baseline is still the better fit for
-  most workloads. The spec calls for a 3-buffer epoch GC
+  most workloads. The calls for a 3-buffer epoch GC
   to avoid a TOCTOU race on the epoch swap; v8malloc's
   per-pool mutex serializes all buddy operations, so the
   epoch scheme would add complexity without buying
@@ -323,9 +333,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - NUMA aggressive migration (level 3) — opt-in
-  (`src/v8m_thread_cache.{h,c}`, `src/v8m_config.c`,
-  `include/v8malloc/v8malloc.h`, numa.md §4.3 / TODO P2
-  "NUMA aggressive migration" row). New
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_config.c`, `include/v8malloc/v8malloc.h`). New
   `V8M_OPT_NUMA_AGGRESSIVE_MIGRATION` option (env
   `V8M_NUMA_AGGRESSIVE_MIGRATION`, default 0) gates a
   per-thread migration check that runs from the cache's
@@ -354,9 +362,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Predictive prefetch table for the TLC
-  (`src/v8m_thread_cache.{h,c}`, `src/v8m_api.c`,
-  winning-algorithms.md §9 / TODO P2 "Predictive prefetch
-  table" row). Each thread cache now carries a
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_api.c`). Each thread cache now carries a
   `uint8_t predict_table[V8M_PREDICT_TABLE_SIZE = 1024]`
   storing the most recently observed size class for the
   call site that hashes to each slot. `v8m_malloc` captures
@@ -383,8 +389,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   benchmark runs.
 
 - Adaptive bin-capacity controller for the TLC
-  (`src/v8m_thread_cache.{h,c}`, thread-cache.md §5.2 / TODO
-  P1 "Adaptive bin capacity" row). The cache now tracks
+  (`src/v8m_thread_cache.{h,c}`). The cache now tracks
   per-class `alloc_count_per_class` / `free_count_per_class`
   on every bin pop/push and runs `v8m_thread_cache_gc_tick`
   every `V8M_TLC_GC_INTERVAL` (1024) operations. Each tick
@@ -413,9 +418,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the alloc/free fast paths).
 
 - TLC slow-path remote-free drain
-  (`src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.c`,
-  thread-cache.md §2.3 / TODO P0 "Slow path chain" + "Drain
-  only on owner thread's slow path" rows). New
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.c`). New
   `v8m_thread_cache_drain_remote` helper drains the cache's
   cross-thread MPSC queue and pushes each drained slot onto
   the matching local bin keyed by the slot's page-meta size
@@ -432,10 +435,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `bin_heads[0]` after the drain returns 2.
 
 ### Performance
-- Thread-cache (L1) fast path (`src/v8m_thread_cache.{h,c}`,
-  `src/v8m_dispatch.{h,c}`, thread-cache.md §2.1 / TODO P0
-  `Malloc fast path`, `Free fast path`, `Bin overflow`, and P1
-  `Per-class bin_capacity[]` rows). The TLC scaffolding from
+- Thread-cache (L1) fast path (`src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.{h,c}`, `Malloc fast path`, `Free fast path`, `Bin overflow`, `Per-class bin_capacity[]`). The TLC scaffolding from
   the previous cycle is now wired into the dispatcher: malloc
   pops from `bin_heads[size_class]`, free pushes back to the
   same bin, and a push that crosses `bin_capacity[size_class]`
@@ -479,9 +479,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the slab pool.
 
 ### Added
-- Thread-cache (L1) scaffolding (`src/v8m_thread_cache.{h,c}`,
-  architecture.md §2.1 + thread-cache.md §2.1 / TODO P0
-  `__thread t_cache` entry). New module owns the
+- Thread-cache (L1) scaffolding (`src/v8m_thread_cache.{h,c}`, `__thread t_cache`). New module owns the
   `__thread struct v8m_thread_cache *t_cache` slot, the lazy
   first-touch initializer (`v8m_thread_cache_get_or_create`),
   and a `pthread_key_create` destructor that reclaims a
@@ -510,8 +508,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `v8m_thread_cache_destructor_calls()` reclamation counter).
 
 - `V8M_OPT_DEBUG` red zones for Large/Huge allocations
-  (`src/v8m_large.c`, api.md §6.2 / TODO P2 "red zones"
-  sub-item). When DEBUG is on, the alloc path fills the
+  (`src/v8m_large.c`). When DEBUG is on, the alloc path fills the
   first 64 bytes (one cache line) of the tail padding
   between the caller's requested size and the usable_size
   boundary with a `0xCD` canary; the free path walks the
@@ -540,8 +537,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   unmapped-arena-edge fault.
 
 - `V8M_OPT_DEBUG` trailing guard pages for Large/Huge
-  allocations (`src/v8m_large.c`, `src/v8m_large.h`,
-  api.md §6.2 / TODO P2 "guard pages, red zones" entry).
+  allocations (`src/v8m_large.c`, `src/v8m_large.h`).
   When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`) the alloc path
   appends one V8M_PAGE_SIZE region at the end of every Large /
   Huge allocation and `mprotect()`s it `PROT_NONE`; an overrun
@@ -564,8 +560,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Performance
 - Buddy arenas now defer the page-heap munmap when they fully
-  drain (`src/v8m_buddy_pool.{h,c}`, fragmentation.md §6.3 /
-  TODO P1 "MADV_DONTNEED on idle pages" entry). When the free
+  drain (`src/v8m_buddy_pool.{h,c}`). When the free
   path empties an arena it applies `madvise(MADV_DONTNEED)` —
   which releases the physical frames immediately — and keeps
   the VMA + buddy bookkeeping in a `drained` state. A revival
@@ -597,8 +592,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - x86_64 RDTSC time source + lazy frequency calibration
-  (`src/v8m_arch.{h,c}`, winning-algorithms.md §4.2 / TODO
-  Tier 1 P1 entry). New helpers `v8m_arch_rdtsc()` and
+  (`src/v8m_arch.{h,c}`). New helpers `v8m_arch_rdtsc()` and
   `v8m_arch_tsc_frequency_mhz()` give the future EMA refill
   controller a portable monotonic time source. On x86_64
   `v8m_arch_rdtsc` is a single `__rdtsc` and the frequency
@@ -619,8 +613,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   elsewhere.
 
 - AArch64 Tier 1 runtime CPU feature probes
-  (`src/v8m_arch.{h,c}`, platform-abstraction.md §4.2 / TODO
-  Tier 1 aarch64 entry). New helpers `v8m_arch_has_lse()` and
+  (`src/v8m_arch.{h,c}`). New helpers `v8m_arch_has_lse()` and
   `v8m_arch_runtime_cache_line_size()` ship a portable surface:
   on aarch64 they read `AT_HWCAP & HWCAP_ATOMICS` via getauxval
   and `CTR_EL0` via `mrs` to report whether the running CPU has
@@ -647,11 +640,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Documented
 - Tier 2 RISC-V 64 support is explicit in the build system
-  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
-  — platform-abstraction.md §4.3 / TODO Tier 2 riscv64 entry.
+  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`).
   Added a dedicated `elseif(... riscv64)` branch to
   `V8MALLOC_ARCH_FLAGS` so a future tuning flag has a place to
-  drop in; the branch ships empty today because every spec
+  drop in; the branch ships empty today because every
   feature lowers from existing toolchain primitives:
   `stdatomic` emits LR.D/SC.D on baseline rv64gc and AMOCAS when
   the target advertises the Zacas extension; `__builtin_clzll` /
@@ -661,16 +653,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   model. Cache line is 64 B on the two parts most QEMU rootfses
   model (SiFive U74, T-Head C910); a future cycle adds a runtime
   probe via `sysconf(_SC_LEVEL1_DCACHE_LINESIZE)` for hosts that
-  diverge. The spec'd runtime hwprobe ISA query is documented as
+  diverge. The documented runtime hwprobe ISA query is documented as
   out-of-scope for v0 — the codegen choice is locked at compile
   time, so a runtime probe would be purely diagnostic.
 
 - Tier 3 LoongArch 64 support is explicit in the build system
-  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`)
-  — platform-abstraction.md §4.6 / TODO Tier 3 loongarch64
+  (`CMakeLists.txt`) and architecture header (`src/v8m_arch.h`).
   entry. Added a dedicated `elseif(... loongarch64)` branch to
   `V8MALLOC_ARCH_FLAGS` so a future tuning flag has a place to
-  drop in; the branch ships empty today because every spec
+  drop in; the branch ships empty today because every
   feature is compiler-emitted under the existing GCC ≥ 13 /
   Clang ≥ 16 floor: DBAR memory barriers via stdatomic
   memory_order, LL.D/SC.D atomics through C11 _Atomic CAS,
@@ -682,7 +673,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 - Kernel huge-page size is now per-arch via the new
   `V8M_HUGE_PAGE_SIZE` macro in `src/v8m_arch.h`
-  (huge-pages.md §4.2 / TODO Tier 3 s390x entry):
+  :
   s390x uses 1 MiB to match the kernel default, every other
   Tier 1/2 arch we ship today (x86_64, aarch64, ppc64le,
   riscv64, loongarch64) keeps 2 MiB. The MAP_HUGETLB attempt
@@ -702,8 +693,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Performance
 - `v8m_page_heap_alloc` skips the over-allocate-and-trim path
   when the requested alignment fits within one OS page
-  (`src/v8m_page_heap.c`, platform-abstraction.md §5.4 /
-  TODO Tier 2 ppc64le entry). mmap returns an OS-page-aligned
+  (`src/v8m_page_heap.c`). mmap returns an OS-page-aligned
   address by definition, so for those requests a single direct
   mmap is sufficient — saves one extra `alignment` bytes of VMA
   reservation and the matching trim munmap call(s) per
@@ -734,7 +724,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the lists by design, so the snapshot reports the
   actively-partitioned population — the population that
   drives operational utilization decisions
-  (fragmentation.md §4.1). Per-class breakdown is a follow-up
+  . Per-class breakdown is a follow-up
   API once the per-class field group warrants its own struct.
   Coverage in `tests/test_api.c::check_huge_and_frag_stats`
   asserts `slab_pages_in_use >= 1` and `slab_slots_used >= 1`
@@ -756,8 +746,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   CI default.
 
 ### Added
-- `V8M_DEBUG` double-free detection (`src/v8m_api.c`,
-  api.md §6.2). `v8m_free` consults a 4096-entry ring of
+- `V8M_DEBUG` double-free detection (`src/v8m_api.c`). `v8m_free` consults a 4096-entry ring of
   recently-freed pointers when `V8M_OPT_DEBUG != 0`; a hit
   aborts with `v8malloc DEBUG: double-free detected at <ptr>`
   before the underlying free runs (so the second slab/buddy
@@ -772,8 +761,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   child died with SIGABRT, asserting the abort fires
   end-to-end.
 
-- `V8M_DEBUG` leak-summary on exit (`src/v8m_api.c`,
-  api.md §6.2). When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`),
+- `V8M_DEBUG` leak-summary on exit (`src/v8m_api.c`). When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`),
   the destructor reads `v8m_collect_live_stats` and emits a
   one-line stderr summary when `live_bytes > 1 MiB` OR
   `live_regions > 4`. The thresholds skip the "one slab page
@@ -800,7 +788,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - VMA-count threshold warning in the bg purge thread
-  (`src/v8m_bg_purge.c`, huge-pages.md §6.2). New
+  (`src/v8m_bg_purge.c`). New
   `V8M_OPT_VMA_WARN_THRESHOLD` (env `V8M_VMA_WARN_THRESHOLD`,
   default 1024) drives the bg purge thread to emit a one-line
   stderr warning when the live VMA count from
@@ -810,7 +798,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   recovered will re-warn. Independent of `V8M_VERBOSE` so
   production hosts can keep verbose logging off and still get
   the warning. 0 disables. Closes the auto-warning half of the
-  VMA monitoring TODO; the MAP_FIXED anchor-reservation
+  VMA monitoring; the MAP_FIXED anchor-reservation
   refactor remains as separate page-heap-strategy work.
 
 - `malloc_info` XML expanded + `V8M_PROFILE` on-exit dump
@@ -837,7 +825,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   gate.
 
 - Async-signal-safe emergency allocator
-  (`src/v8m_signal_safe.{h,c}`, architecture.md §6).
+  (`src/v8m_signal_safe.{h,c}`).
   `malloc` / `free` are not async-signal-safe in general — the
   slab pool's `pthread_mutex` would happily deadlock if a
   signal handler fires on a thread that already holds it.
@@ -860,7 +848,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   path end-to-end.
 
 - 1 GiB Gigantic-page path
-  (`src/v8m_page_heap.c`, `src/v8m_large.c`, huge-pages.md §7).
+  (`src/v8m_page_heap.c`, `src/v8m_large.c`).
   `v8m_page_heap_alloc` now attempts
   `mmap(MAP_HUGETLB | MAP_HUGE_1GB)` as its first preference
   for requests that are 1 GiB-multiple AND 1 GiB-aligned with
@@ -883,8 +871,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   pulling in `<linux/mman.h>` which collides with glibc's
   `<sys/mman.h>`.
 
-- Background purge thread (`src/v8m_bg_purge.{h,c}`,
-  fragmentation.md §6.3). Spawned at the end of
+- Background purge thread (`src/v8m_bg_purge.{h,c}`). Spawned at the end of
   `v8m_constructor` after the dispatcher is fully usable;
   joined at the start of `v8m_destructor` before the init
   state flips to TORN_DOWN. Sleeps via
@@ -892,7 +879,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   regardless of the configured `V8M_OPT_PURGE_INTERVAL` —
   no waiting out the full interval at process exit. The
   period is re-read each tick so a runtime
-  `v8m_set_option(V8M_OPT_PURGE_INTERVAL, ...)` is picked up
+  `v8m_set_option(V8M_OPT_PURGE_INTERVAL,...)` is picked up
   on the next iteration. v0 scan body is a stub that emits
   one stats line to stderr per tick when `V8M_OPT_VERBOSE`
   is set, otherwise no-op (the slab and buddy pools already
@@ -918,10 +905,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   now returns true only for READY; all atfork handlers gate on
   the same predicate. No hot-path observable difference today
   — the bootstrap path catches all non-READY states the same
-  way — but spec compliance and a clearer mental model for the
-  upcoming TLC and bg-purge cycles. Closes the matching P0
-  TODO entries (`g_heap` three-state init, lazy init,
-  constructor / destructor at priority 101) — those describe
+  way — but correctness and a clearer mental model for the
+  upcoming TLC and bg-purge cycles. Closes the matching P0 — those describe
   behaviour either already present or now landed.
 
 ### Added
@@ -943,7 +928,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `struct v8m_page_heap_stats` — `mbind_calls` and
   `mbind_failures` — let a maintainer verify the path is firing
   on production hardware. Resolves the P0 mbind item on
-  TODO.md; the future per-NUMA pool sharding builds on top of
+  ; the future per-NUMA pool sharding builds on top of
   this.
 
 ### Changed
@@ -994,18 +979,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   "unknown" rather than "zero". `v8m_get_frag_metrics` grows a
   `vma_count` field that carries the same number so a single
   snapshot covers both allocator-side and kernel-side
-  fragmentation. Half of huge-pages.md §6.2 — the MAP_FIXED
-  anchor-reservation refactor + auto-warning-on-threshold land
-  in a follow-up cycle.
+  fragmentation. The MAP_FIXED anchor-reservation
+  refactor + auto-warning-on-threshold land in a follow-up cycle.
 
 - AAL primitives test (`tests/test_arch.c`). Covers the
   architecture-abstraction-layer surface the library actually
   exposes today: V8M_ARCH_* detection (exactly one defined,
   plus a cross-check against the compiler's predefined
   `__x86_64__` / `__aarch64__` / `__riscv` / `__powerpc64__` /
-  `__s390x__` / `__loongarch64`), V8M_CACHE_LINE_SIZE (power
-  of two + matches the spec's 64 / 128 / 256 per arch from
-  platform-abstraction.md §5.3), V8M_CACHELINE_ALIGNED +
+  `__s390x__` / `__loongarch64`), V8M_CACHE_LINE_SIZE, V8M_CACHELINE_ALIGNED +
   V8M_ALIGNED(N) (stack structs land on the requested
   boundary), V8M_LIKELY / V8M_UNLIKELY (hints only — both
   branches produce identical observable outcomes),
@@ -1014,15 +996,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the `__builtin_ctzll / clzll / popcountll` intrinsics the
   slab-bitmap and buddy-level hot paths rely on (hand-built
   inputs to catch a broken cross toolchain). The
-  per-primitive split the spec calls for
-  (test_atomics.c / test_bitops.c / test_tls.c /
+  per-primitive split (test_atomics.c / test_bitops.c / test_tls.c /
   test_prefetch.c) lands when the matching v8m_* wrappers
   actually ship — today those operations are consumed
   directly from `<stdatomic.h>` and `__builtin_*`, so there
   is nothing in the AAL surface to split across. (`tests/test_soak.c`). Runs the
   MB-04 mixed-size workload for a configurable budget — 2 s by
   default so every PR run pays for it, env-override
-  (`V8M_SOAK_DURATION_MS`) up to the spec's 24 hours — sampling
+  (`V8M_SOAK_DURATION_MS`) up to the 24 hours — sampling
   `v8m_get_stats.live_regions` every 500 ms against a cap that
   scales with `live_count` (leak-induced growth surfaces within
   seconds, not days). After a full post-run drain the test
@@ -1035,7 +1016,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   zero leak on drain.
 
 - MB-07 NUMA local-allocation-rate benchmark
-  (`bench/mb_07_numa_local.c`, benchmarks.md §2.7).
+  (`bench/mb_07_numa_local.c`).
   Single-thread; for each allocation, touches the first byte to
   force the kernel to back the page with a local physical
   frame, then issues a direct `get_mempolicy` syscall with
@@ -1084,10 +1065,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   (`V8M_BENCH_DURATION_MS`, etc.) work. Chains cleanly with
   `scripts/bench-run.sh`:
   `sudo scripts/bench-run.sh -- scripts/bench-compare.sh \
-  -- ./build/bench/bench/mb_01_throughput`.
+  --./build/bench/bench/mb_01_throughput`.
 
 - ST-03 fork-safety stress test
-  (`tests/test_fork_stress.c`, benchmarks.md §4.3). Spins 4
+  (`tests/test_fork_stress.c`). Spins 4
   worker threads in the parent doing continuous alloc/free
   across four size buckets (slab-Tiny, slab-Small, buddy,
   Large), then forks 25 times back-to-back with the workers
@@ -1103,8 +1084,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   with non-zero status.
 
 - MB-05 fragmentation scenario benchmark
-  (`bench/mb_05_fragmentation.c`, benchmarks.md §2.5). Drives
-  the spec's fragmentation-maximizing pattern: allocate N
+  (`bench/mb_05_fragmentation.c`). Drives
+  the fragmentation-maximizing pattern: allocate N
   objects with random sizes, free 50 % at random, re-allocate
   N/2 with different sizes (always fresh distribution draws),
   repeat K iterations. After each iteration the bench samples
@@ -1117,7 +1098,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   beyond the user's asked-for bytes (combined internal +
   external fragmentation). Output is one row per iteration so
   the time series is plot-ready. Default 10 000 live × 20
-  iterations keeps interactive runs sub-second; the spec's
+  iterations keeps interactive runs sub-second; the
   1M × 100 sweep is reachable via env knobs. Knobs:
   `V8M_BENCH_LIVE_COUNT` (default 10000, capped at 1M),
   `V8M_BENCH_ITERS` (default 20, capped at 1000),
@@ -1125,7 +1106,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   external fragmentation breakdown lands as follow-up.
 
 - MB-03 producer/consumer benchmark
-  (`bench/mb_03_producer_consumer.c`, benchmarks.md §2.3). N
+  (`bench/mb_03_producer_consumer.c`). N
   producer threads each `malloc` fixed-size objects and hand
   them to a paired consumer via a bounded 1024-slot SPSC ring;
   the consumer `free`s. Every alloc/free pair crosses a thread
@@ -1133,7 +1114,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   free path that the future remote-free MPSC queue will
   optimize. Pair sweep (1, 2, 4, 8, 16), capped at
   `min(nproc/2, 32)` by default (`V8M_BENCH_MAX_PAIRS=N`
-  overrides). Size sweep matches the spec exactly: 64 B / 256 B
+  overrides). Size sweep matches the exactly: 64 B / 256 B
   / 1 KiB. Reports per-row `handoffs` / `handoffs_per_sec` /
   `per_pair` so the single-mutex scaling story is legible.
   Also serves as the regression gate for the slab-pool
@@ -1209,27 +1190,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - MB-04 mixed-size workload benchmark
-  (`bench/mb_04_mixed.c`, benchmarks.md §2.4). Single-thread
+  (`bench/mb_04_mixed.c`). Single-thread
   workload driving a bounded working set of `live_count`
   concurrent allocations through alloc/free with sizes drawn
-  from the spec's six-band distribution (8 B/32 B at 40 %, …,
+  from the six-band distribution (8 B/32 B at 40 %, …,
   > 64 KiB at 3 %). Each iteration picks a random slot and
   replaces its allocation with a fresh size from the
   distribution, so the working set holds at roughly
-  `live_count` live objects — the spec's "concurrently live
+  `live_count` live objects — the "concurrently live
   objects" knob. NULL returns are tolerated and counted in
   `alloc_failures` (the > 64 KiB tail occasionally exhausts the
   buddy pool's 16 MiB cap; throughput reflects only successful
   ops). Bringing this up surfaced and unblocked the slab-pool
   partials-list double-insertion bug fixed in this same cycle.
-  Multi-thread variants (the spec's "threads: 1, 8, 64") land
+  Multi-thread variants (the "threads: 1, 8, 64") land
   with finer-grained per-pool synchronization. Knobs:
   `V8M_BENCH_DURATION_MS` (default 1000), `V8M_BENCH_WARMUP_MS`
   (default 100), `V8M_BENCH_LIVE_COUNT` (default 10000, capped
   at 10 M), `V8M_BENCH_SEED` (default 0x1234).
 
 - MB-06 large-allocation latency benchmark
-  (`bench/mb_06_large_latency.c`, benchmarks.md §2.6).
+  (`bench/mb_06_large_latency.c`).
   Single-thread per-iteration timing of the Large / Huge mmap
   path, reported separately for the three phases the kernel
   charges differently: `alloc` latency (mmap + region-map
@@ -1237,25 +1218,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   in physical pages on demand — page-fault dominated), and
   `free` latency (region-map remove + munmap). Each phase
   reports both p50 and p99 across `V8M_BENCH_ITERS` iterations
-  per size, so the spec's "Large allocation ≤0.5× glibc"
-  median-comparison criterion (benchmarks.md §6) is directly
+  per size, so the "Large allocation ≤0.5× glibc"
+  median-comparison criterion is directly
   legible. The memset is fenced with a one-byte
   `__asm__ volatile("" : : "r"(ptr) : "memory")` compiler
   barrier — without it gcc dead-code-eliminates the memset
   (its result is only ever consumed by free) and the fault
   numbers come out as zero.
 
-  Sweeps the spec's exact size ladder (256 KiB → 256 MiB).
+  Sweeps the exact size ladder (256 KiB → 256 MiB).
   256 KiB sits at the buddy/Large boundary so the bench also
   surfaces the routing transition. Multi-thread coverage (the
-  spec's "threads: 1, 8") lands once the page-heap region map
+   "threads: 1, 8") lands once the page-heap region map
   grows finer-grained synchronization. Knobs:
   `V8M_BENCH_ITERS` (default 100, clamped to [10, 10000] so
   taint-flow analysis is happy), `V8M_BENCH_MAX_SIZE_MB`
   (default 256; lower for limited-RAM CI runners).
 
 - Benchmark runner script (`scripts/bench-run.sh`). Pins the
-  host into the benchmarks.md §1.3 measurement environment
+  host into the measurement environment
   before invoking the supplied bench command — switches every
   online CPU's frequency governor to `performance`, disables
   transparent huge pages, and disables ASLR — then restores the
@@ -1263,7 +1244,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   need root; without root the script prints a warning and runs
   the bench anyway so dev-laptop iteration still benefits from
   the harness. `--drop-caches` opt-in for fault-heavy workloads.
-  Usage: `scripts/bench-run.sh -- ./build/bench/bench/mb_01_throughput`.
+  Usage: `scripts/bench-run.sh --./build/bench/bench/mb_01_throughput`.
 
 - Exhaustive `malloc_usable_size` contract test
   (`tests/test_usable_size.c`). Sweeps every Tiny / Small slab
@@ -1311,10 +1292,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   to a page the consumer had just unmapped. Both threads were
   serialized on the pool mutex, so the race is somewhere
   subtler — most likely `cls->current` becoming stale across
-  unmap+remap when `mmap(NULL, ...)` happens to return the same
+  unmap+remap when `mmap(NULL,...)` happens to return the same
   virtual address. Reverted the bench to keep the tree green;
   MB-03 is unblocked once the thread cache lands and empty-page
-  reclamation can be made lazy. Tracked in TODO.md.
+  reclamation can be made lazy.
 
 - Exhaustive realloc-semantics test (`tests/test_realloc.c`).
   Walks a 10-cell size ladder (8 B → 4 MiB) upward through every
@@ -1339,7 +1320,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - Multi-arch weekly CI workflow
   (`.github/workflows/multi-arch.yml`). Runs the full build +
   ctest suite under QEMU-user emulation against every Tier 1 /
-  Tier 2 architecture on the platform-abstraction.md support
+  Tier 2 architecture on the support
   list — aarch64, ppc64le, s390x, riscv64 — exercising the
   per-arch atomics, alignment, and cache-line constants the
   architecture-abstraction layer (`src/v8m_arch.h`) selects on.
@@ -1374,8 +1355,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   of the matrix without this test catching it.
 
 - MB-02 multi-thread scalability benchmark
-  (`bench/mb_02_scalability.c`, benchmarks.md §2.2). Sweeps the
-  spec's 1 / 2 / 4 / 8 / 16 / 32 / 64 / 128 thread counts at the
+  (`bench/mb_02_scalability.c`). Sweeps the
+   1 / 2 / 4 / 8 / 16 / 32 / 64 / 128 thread counts at the
   fixed 64 B common-case size, reports total throughput,
   per-thread throughput, and the scalability ratio anchored on
   the 1-thread number. Each per-thread-count run barriers the
@@ -1383,7 +1364,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   duration, barriers them out, sums per-thread iters. The thread
   sweep is capped to `min(nproc, 32)` by default so small CI
   boxes do not spend wall time thrashing 128 contended threads;
-  `V8M_BENCH_MAX_THREADS=128` opts back into the spec range.
+  `V8M_BENCH_MAX_THREADS=128` opts back into the range.
   Knobs (env vars): `V8M_BENCH_DURATION_MS` (default 1000),
   `V8M_BENCH_WARMUP_MS` (default 100), `V8M_BENCH_SIZE` (default
   64), `V8M_BENCH_MAX_THREADS`. Reuses the `v8malloc_add_bench`
@@ -1483,7 +1464,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `idx ^ 1` whenever the buddy is free and not split.
 - Runtime configuration (`v8m_config_init/get/set`): one atomic
   int64 per option, seeded from the V8M_* environment variables
-  documented in AGENT.md §7 with documented defaults (verbose 0,
+  with documented defaults (verbose 0,
   purge interval 10 s, thread-cache max 256, HugePages 1, NUMA
   aware 1, debug 0, profile 0, compaction threshold 25 %).
   v8m_config_init re-reads the environment on every call so tests
@@ -1493,7 +1474,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   to default on unparseable env values, set/get round-trip, and
   the out-of-range guard.
 - MB-01 single-thread throughput benchmark
-  (`bench/mb_01_throughput.c`, benchmarks.md §3.1) and the
+  (`bench/mb_01_throughput.c`) and the
   surrounding `bench/` scaffolding. The benchmark sweeps eight
   sizes spanning every backend (8 B / 64 B / 512 B / 4 KiB slab,
   16 KiB / 64 KiB / 256 KiB buddy, 2 MiB Huge mmap), with a
@@ -1535,7 +1516,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   parallel jobs gate every PR and push to `main`: matrix build +
   ctest under both gcc and clang, UBSan build + ctest under
   clang, and the format-check / tidy / cppcheck linters. Multi-
-  arch coverage stays in a separate weekly workflow (TODO) so
+  arch coverage stays in a separate weekly workflow so
   PR turnaround stays under five minutes.
 
 - Release pipeline script (`scripts/release.sh`). Run from a
@@ -1552,7 +1533,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   README §Cutting a release documents the workflow.
 
 - MAP_HUGETLB primary attempt for Huge allocations
-  (huge-pages.md §4.1). `v8m_page_heap_alloc` now tries
+  . `v8m_page_heap_alloc` now tries
   `mmap(MAP_HUGETLB)` first when the request is shaped for it
   (size is a 2 MiB multiple, alignment is at least 2 MiB,
   `V8M_OPT_HUGE_PAGES` allows it); on success the kernel returns
@@ -1582,11 +1563,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   nothrow new/delete (`std::nothrow_t` overloads), and the
   combined sized+aligned and nothrow+aligned deletes:
 
-      _ZdlPv  _ZdaPv  _ZdlPvm  _ZdaPvm
-      _ZdlPvSt11align_val_t  _ZdaPvSt11align_val_t
+      _ZdlPv _ZdaPv _ZdlPvm _ZdaPvm
+      _ZdlPvSt11align_val_t _ZdaPvSt11align_val_t
       _ZdlPvmSt11align_val_t _ZdaPvmSt11align_val_t
-      _ZnwmRKSt9nothrow_t    _ZnamRKSt9nothrow_t
-      _ZdlPvRKSt9nothrow_t   _ZdaPvRKSt9nothrow_t
+      _ZnwmRKSt9nothrow_t _ZnamRKSt9nothrow_t
+      _ZdlPvRKSt9nothrow_t _ZdaPvRKSt9nothrow_t
       _ZnwmSt11align_val_tRKSt9nothrow_t
       _ZnamSt11align_val_tRKSt9nothrow_t
       _ZdlPvSt11align_val_tRKSt9nothrow_t
@@ -1602,8 +1583,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   shipping implementations call `malloc` internally and pick up
   v8malloc transparently through the LD_PRELOAD chain.
 
-- Memory-pressure stress test (`tests/test_memory_pressure.c`,
-  benchmarks.md §4 ST-02). Five-phase scenario: build a working
+- Memory-pressure stress test (`tests/test_memory_pressure.c`). Five-phase scenario: build a working
   set of Large-class allocations, plant a soft limit at the
   current `live_bytes` (zero headroom), assert the next sizeable
   allocation fails with `errno = ENOMEM`, free part of the set
@@ -1642,7 +1622,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   so it's absent from the dev compile_commands.json); format /
   format-check still cover it.
 
-- Distance-ordered NUMA fallback (numa.md §5.2). The library
+- Distance-ordered NUMA fallback. The library
   constructor now also reads
   `/sys/devices/system/node/nodeN/distance` for every detected
   node, populates a `g_distance[from][to]` SLIT matrix
@@ -1661,7 +1641,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   combination and asserts the fallback distances are non-decreasing.
 
 - Per-thread cached `v8m_numa_current_node` with 1-in-1024
-  refresh (numa.md §2.2). Two new `__thread` slots cache the
+  refresh. Two new `__thread` slots cache the
   resolved node id and a call counter; only every 1024-th call
   pays for `sched_getcpu` plus the cpu→node lookup. The interval
   is a power of two so the refresh check collapses to a single
@@ -1698,15 +1678,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
     ours). Bumped to 256 KiB so sanitizer runtimes fit alongside
     the existing dlsym / pthread_atfork constructor-chain
     allocations.
-  * test_api's `posix_memalign(NULL, ...)` check tripped UBSan's
+  * test_api's `posix_memalign(NULL,...)` check tripped UBSan's
     nonnull-attribute runtime check (the volatile-pointer trick
     only dodges the compile-time diagnostic). Switched the test
     to call `v8m_posix_memalign` directly — our function doesn't
     carry glibc's `__nonnull` attribute, so UBSan no longer
     flags the deliberate NULL pass.
 
-- Thread-churn stress test (`tests/test_thread_churn.c`,
-  benchmarks.md §4 ST-04). 100 batches × 100 threads = 10 000
+- Thread-churn stress test (`tests/test_thread_churn.c`). 100 batches × 100 threads = 10 000
   thread creations total, each worker doing a short
   allocate / free run across every backend. After the run the
   test snapshots `v8m_get_stats` and asserts `live_regions` did
@@ -1757,7 +1736,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   collector can consult it without reordering the lifecycle
   helpers.
 
-- Resolved every remaining open question in TODO.md:
+- Resolved every remaining open question in :
     - **#2 Bootstrap handoff:** bootstrap allocations leak for
       the process lifetime by design (the 64 KiB buffer caps the
       leak; per-pointer free would defeat the bump allocator).
@@ -1779,7 +1758,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   compile-time dependency on libv8malloc; CMake injects the
   shared library via `LD_PRELOAD=$<TARGET_FILE:v8malloc_shared>`
   in the test's environment. The target then verifies (a)
-  `v8m_version` resolves through `dlsym(RTLD_DEFAULT, ...)` —
+  `v8m_version` resolves through `dlsym(RTLD_DEFAULT,...)` —
   proving our library was actually loaded — and (b) malloc /
   realloc / free across every backend size still round-trip
   correctly. Without the dlsym check, the malloc workload would
@@ -1805,7 +1784,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   with the highest `used_count`). Concentrating new allocations
   on near-full pages lets less-utilized pages drain back to
   empty (and the page heap) faster, the optimization called for
-  in fragmentation.md §4.3 as `v8m_select_allocation_page`.
+  as `v8m_select_allocation_page`.
   Linear scan in v0; the future per-class priority queue or
   utilization-bucketed list keeps the cost bounded once the
   partials count grows large. New `check_partials_pick_most_utilized`
@@ -1900,8 +1879,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   static cpu→node table; readers are lock-free constant-time
   array lookups, with `v8m_numa_current_node` wrapping
   `sched_getcpu()` and the cached map. The vDSO fast-path /
-  refresh-on-N-th-call optimization called for in
-  `.claude/docs/numa.md` §2.2 lands later. When sysfs is
+  refresh-on-N-th-call optimization lands later. When sysfs is
   absent (containers, NUMA disabled in the kernel) the module
   reports a single uniform node so every caller follows the
   non-NUMA code path. Caps: 64 nodes, 4096 CPUs (well above any
@@ -1931,7 +1909,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Modern glibc (≥ 2.34) no longer declares `malloc_get_state` /
   `malloc_set_state`, so we skip them rather than ship aliases
-  for symbols nothing imports. Documented in TODO.md.
+  for symbols nothing imports.
 
 - Page-heap region map (`v8m_page_heap_owns`). Every successful
   `v8m_page_heap_alloc` now records its returned range in a
@@ -1986,12 +1964,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   unmapped page. The libc-fallback module, the `__libc_*`
   aliases, and the dlsym capture all stand; only the
   `v8m_dispatch_free`-side forward is held back until the
-  page-heap region map (TODO.md open question #1) lands.
+  page-heap region map lands.
 
 - Libc fallback for foreign pointers
   (`v8m_libc_fallback_init/ready/free/malloc`): the library
   constructor now resolves the next free/malloc/calloc/realloc on
-  the dynamic search path via `dlsym(RTLD_NEXT, ...)` before
+  the dynamic search path via `dlsym(RTLD_NEXT,...)` before
   v8m_dispatch_init runs. The dispatcher's free path replaces the
   v0 silent-drop on foreign pointers with a forward to the
   captured libc free, so pre-init allocations made by other

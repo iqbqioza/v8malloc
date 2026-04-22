@@ -182,6 +182,7 @@ endif()
 # --- Sources ------------------------------------------------------------------
 
 set(V8MALLOC_SOURCES
+	src/v8m_anchor_reservation.c
 	src/v8m_api.c
 	src/v8m_arch.c
 	src/v8m_bg_purge.c
