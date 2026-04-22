@@ -15,11 +15,6 @@
 #     captures (e.g. after a perf-related change lands)
 #
 # What this does NOT do:
-#   - Automated perf-regression gate (>5% fail). That needs a
-#     persisted baseline file in the repo or a GitHub artifact
-#     from the previous run; landing just the scheduler first so
-#     the raw data is captured, baseline-diff logic lands as
-#     follow-up.
 #   - Tune the runner (THP / ASLR / governor). GitHub shared
 #     runners run behind a shared scheduler so the absolute
 #     numbers are noisy either way; we report them as-is and the
@@ -79,6 +74,23 @@ jobs:
             -- ./build/bench/bench/mb_01_throughput \
             > bench-results/mb_01_throughput.txt 2>&1 || true
           cat bench-results/mb_01_throughput.txt
+
+      # Per-bench baseline regression gate. The check is informational
+      # (continue-on-error) until enough weekly runs have stabilised
+      # the baselines committed under bench/baseline/. Maintainers
+      # establish a baseline by running the script with --capture
+      # locally and committing the result; subsequent runs fail this
+      # step when any row regresses past the 5 % threshold.
+      - name: MB-01 regression check
+        continue-on-error: true
+        run: |
+          if [ -f bench/baseline/mb_01_throughput.txt ]; then
+            ./scripts/bench-regression-check.sh \
+              ./build/bench/bench/mb_01_throughput \
+              bench/baseline/mb_01_throughput.txt
+          else
+            echo "no baseline at bench/baseline/mb_01_throughput.txt — skipping check"
+          fi
 
       - name: MB-02 multi-thread scalability
         run: |

@@ -7,6 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Persisted bench baseline regression check
+  (`scripts/bench-regression-check.sh` — resolution of the
+  ">5 % perf-regression gate" follow-on noted in the weekly
+  bench workflow). Two modes: `--capture <bench> <baseline>`
+  records a baseline file from a fresh bench run; the default
+  `<bench> <baseline> [threshold_pct]` mode runs the bench,
+  parses the rate column (`ops_per_sec`/`handoffs_per_sec`
+  preferred, `ns_per_op`/`latency_us` fallback), and exits 1
+  when any row regressed past the threshold (default 5 %, env
+  override `BENCH_REGRESSION_THRESHOLD_PCT`). Mawk-compatible —
+  no Python, no gawk extensions. Wired into
+  `.github/workflows/bench-weekly.yml` after the MB-01 capture
+  step (currently `continue-on-error: true` until the baseline
+  has stabilised across a few weekly runs). New
+  `bench/baseline/README.md` documents how maintainers establish
+  and commit a baseline.
+
+### Added
 - Gzip-wrapped pprof emit (`v8m_pprof_dump_heap_gz`). The new
   helper writes the encoded Profile message inside an RFC 1952
   gzip stream — 10-byte header + STORED DEFLATE blocks
