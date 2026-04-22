@@ -875,38 +875,82 @@ static int check_huge_and_frag_stats(void)
 		return fail("huge_alloc_count did not advance by 1");
 	}
 
+	/* Hold a small (Tiny-class) allocation across the snapshot so the
+	 * slab pool walker sees at least one live slot. The pool walks
+	 * `current` + `partials` only; without a live small object the
+	 * walker returns zero and the utilization assertions cannot
+	 * distinguish "broken walker" from "pool happened to be empty". */
+	void *small = malloc(32);
+	if (small == NULL) {
+		free(huge_obj);
+		free(large);
+		return fail("Tiny malloc for slab-stats check returned NULL");
+	}
+
 	v8m_get_frag_metrics(&frag);
 	if (frag.live_regions == 0U || frag.live_bytes == 0U) {
+		free(small);
 		free(huge_obj);
 		free(large);
 		return fail("frag metrics reported zero live regions/bytes");
 	}
 	if (frag.region_map_capacity == 0U) {
+		free(small);
 		free(huge_obj);
 		free(large);
 		return fail("region_map_capacity reported as zero");
 	}
 	if (frag.large_live_count == 0U || frag.huge_live_count == 0U) {
+		free(small);
 		free(huge_obj);
 		free(large);
 		return fail("frag.live counts did not reflect the allocations");
+	}
+	if (frag.slab_pages_in_use == 0U) {
+		free(small);
+		free(huge_obj);
+		free(large);
+		return fail(
+		    "slab_pages_in_use stayed zero with a live Tiny obj");
+	}
+	if (frag.slab_slots_total == 0U ||
+	    frag.slab_slots_used > frag.slab_slots_total) {
+		free(small);
+		free(huge_obj);
+		free(large);
+		return fail("slab slots counters out of range");
+	}
+	if (frag.slab_utilization_pct > 100U) {
+		free(small);
+		free(huge_obj);
+		free(large);
+		return fail("slab_utilization_pct exceeded 100");
+	}
+	if (frag.slab_slots_used == 0U) {
+		free(small);
+		free(huge_obj);
+		free(large);
+		return fail("slab_slots_used stayed zero with a live Tiny obj");
 	}
 	/* /proc/self/maps must report at least the v8malloc SO + libc
 	 * + ld-linux + the test binary itself + the live anchor
 	 * mappings, so a healthy bench sees double-digit VMAs at
 	 * minimum. Any value past 0 means the read worked. */
 	if (frag.vma_count == 0U) {
+		free(small);
 		free(huge_obj);
 		free(large);
 		return fail("vma_count reported as zero (open failed?)");
 	}
 	uint64_t direct = v8m_count_vmas();
 	if (direct == 0U) {
+		free(small);
 		free(huge_obj);
 		free(large);
 		return fail("v8m_count_vmas returned 0");
 	}
 
+	free(small);
 	free(huge_obj);
 	free(large);
 

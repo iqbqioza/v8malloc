@@ -39,6 +39,7 @@
 #include "v8m_page_heap.h"
 #include "v8m_signal_safe.h"
 #include "v8m_size_class.h"
+#include "v8m_slab_pool.h"
 #include "v8malloc/v8malloc.h"
 
 /* Init lifecycle (architecture.md §3.2 — three-state init machine,
@@ -735,9 +736,11 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 	}
 	struct v8m_live_stats live = {0};
 	struct v8m_large_stats large = {0};
+	struct v8m_slab_pool_aggregate_stats slab = {0};
 	if (dispatch_ready()) {
 		v8m_collect_live_stats(&live);
 		v8m_large_get_stats(&large);
+		v8m_slab_pool_get_aggregate_stats(&g_dispatch.slab, &slab);
 	}
 	out->live_regions = live.live_regions;
 	out->live_bytes = live.live_bytes;
@@ -750,6 +753,13 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 	    large.large_alloc_count - large.large_free_count;
 	out->huge_live_count = large.huge_alloc_count - large.huge_free_count;
 	out->vma_count = v8m_count_vmas();
+	out->slab_pages_in_use = slab.pages_in_use;
+	out->slab_slots_total = slab.slots_total;
+	out->slab_slots_used = slab.slots_used;
+	out->slab_utilization_pct =
+	    (slab.slots_total == 0U)
+		? 0U
+		: (slab.slots_used * 100U) / slab.slots_total;
 }
 
 V8M_EXPORT int v8m_purge(void)

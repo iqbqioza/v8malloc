@@ -216,10 +216,15 @@ struct v8m_thread_stats {
 V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out);
 
 /*
- * Fragmentation snapshot. v0 reports the page-heap-derived metrics
- * that are universally available; per-class slab utilization is
- * the next field group to land once the slab pool exposes the
- * walked counters.
+ * Fragmentation snapshot. Reports the page-heap-derived metrics plus
+ * the aggregate slab utilization across every Tiny/Small class. The
+ * slab counters cover pages currently held in the per-class
+ * `current` and `partials` lists — empty pages are returned to the
+ * page heap on free, and full pages are off the lists by design, so
+ * the walk reports the actively-partitioned population that drives
+ * operational utilization decisions (fragmentation.md §4.1).
+ * Per-class breakdown is a follow-up API once the per-class field
+ * group warrants its own struct.
  */
 struct v8m_frag_metrics {
 	uint64_t live_regions; /* mmap'd page-heap regions */
@@ -230,6 +235,11 @@ struct v8m_frag_metrics {
 	uint64_t large_live_count;
 	uint64_t huge_live_count;
 	uint64_t vma_count; /* /proc/self/maps lines, or 0 if unreadable */
+	uint64_t slab_pages_in_use; /* slab pages on current+partials */
+	uint64_t slab_slots_total; /* sum of capacity across those pages */
+	uint64_t slab_slots_used; /* sum of used_count across those pages */
+	uint64_t
+	    slab_utilization_pct; /* slab_slots_used / slab_slots_total * 100 */
 };
 
 /*

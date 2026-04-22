@@ -244,3 +244,38 @@ bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 	(void)pthread_mutex_unlock(&pool->lock);
 	return became_empty;
 }
+
+static void accumulate_page(const struct v8m_page_meta *page,
+			    struct v8m_slab_pool_aggregate_stats *out)
+{
+	out->pages_in_use++;
+	out->slots_total += page->capacity;
+	out->slots_used +=
+	    atomic_load_explicit(&page->used_count, memory_order_relaxed);
+}
+
+void v8m_slab_pool_get_aggregate_stats(
+    struct v8m_slab_pool *pool, struct v8m_slab_pool_aggregate_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->pages_in_use = 0;
+	out->slots_total = 0;
+	out->slots_used = 0;
+	if (pool == NULL) {
+		return;
+	}
+	(void)pthread_mutex_lock(&pool->lock);
+	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
+		const struct v8m_slab_pool_class *cls = &pool->classes[i];
+		if (cls->current != NULL) {
+			accumulate_page(cls->current, out);
+		}
+		for (const struct v8m_page_meta *page = cls->partials;
+		     page != NULL; page = page->next) {
+			accumulate_page(page, out);
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
+}

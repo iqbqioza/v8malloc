@@ -90,4 +90,25 @@ void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,
 bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 			void *obj);
 
+/*
+ * Aggregate utilization snapshot across every Tiny/Small class held
+ * by the pool. Walks current + partials per class under the pool
+ * lock, summing page count, slot capacity, and slot occupancy.
+ * Empty pages have already been returned to the page heap by the
+ * free path, so the walk does not see them; full pages are off all
+ * lists by design and are likewise invisible. The snapshot
+ * therefore reports "actively partitioned" slab pages — the
+ * population that drives operational utilization decisions
+ * (fragmentation.md §4.1). Reporters can derive
+ * `utilization = slots_used / slots_total` from the two counters.
+ */
+struct v8m_slab_pool_aggregate_stats {
+	uint64_t pages_in_use;
+	uint64_t slots_total;
+	uint64_t slots_used;
+};
+
+void v8m_slab_pool_get_aggregate_stats(
+    struct v8m_slab_pool *pool, struct v8m_slab_pool_aggregate_stats *out);
+
 #endif /* V8M_SLAB_POOL_H */

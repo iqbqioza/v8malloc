@@ -6,6 +6,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `v8m_get_frag_metrics` now reports aggregate slab utilization
+  alongside the page-heap-derived counters
+  (`include/v8malloc/v8malloc.h`, `src/v8m_api.c`,
+  `src/v8m_slab_pool.{h,c}`). Four new fields land on
+  `struct v8m_frag_metrics`: `slab_pages_in_use`,
+  `slab_slots_total`, `slab_slots_used`, and
+  `slab_utilization_pct`. The numbers are sourced from a new
+  `v8m_slab_pool_get_aggregate_stats` walker that traverses
+  every Tiny/Small class's `current` + `partials` lists under
+  the pool lock, summing each page's `capacity` (slot count)
+  and `used_count` (live slot count). Empty pages are
+  returned to the page heap on free and full pages are off
+  the lists by design, so the snapshot reports the
+  actively-partitioned population — the population that
+  drives operational utilization decisions
+  (fragmentation.md §4.1). Per-class breakdown is a follow-up
+  API once the per-class field group warrants its own struct.
+  Coverage in `tests/test_api.c::check_huge_and_frag_stats`
+  asserts `slab_pages_in_use >= 1` and `slab_slots_used >= 1`
+  while a Tiny-class allocation is held live, plus the
+  range invariants `slab_slots_used <= slab_slots_total`
+  and `slab_utilization_pct <= 100`.
+
 ### Changed
 - Weekly bench workflow now also runs MB-07 (NUMA
   local-allocation rate) — `.github/workflows/bench-weekly.yml`.
