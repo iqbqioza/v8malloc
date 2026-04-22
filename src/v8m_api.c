@@ -38,6 +38,7 @@
 #include "v8m_numa.h"
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
+#include "v8m_pprof.h"
 #include "v8m_signal_safe.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
@@ -296,13 +297,47 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 *   atexit-based teardown that defers munmaps until after
 	 *   stdio cleanup.
 	 */
-	/* If V8M_PROFILE is set, emit one final malloc_info XML
-	 * snapshot to stderr before tearing anything down. v0
-	 * profile-mode stops at the XML dump; the pprof emit on
-	 * exit (open question #5, resolved to pprof) lands when
-	 * the protobuf encoder lands. */
+	/* If V8M_PROFILE is set, emit two snapshots:
+	 *   1. A malloc_info XML dump to stderr — human-readable
+	 *      summary that grep tooling can pull from logs.
+	 *   2. A pprof-format heap profile (open question #5) to a
+	 *      file path resolved from $V8M_PROFILE_PATH (default
+	 *      `/tmp/v8malloc-PID.pb`) so existing `pprof` /
+	 *      `go tool pprof` tools can ingest the per-size-class
+	 *      breakdown. The .pb is uncompressed protobuf — pprof
+	 *      reads both .pb and .pb.gz. Failures (cannot open
+	 *      path, encoder overflow) are logged to stderr but
+	 *      non-fatal: the destructor must still complete so the
+	 *      OS can reap our mappings. */
 	if (v8m_config_get(V8M_OPT_PROFILE) != 0) {
 		(void)malloc_info(0, stderr);
+		/* getenv / strerror are not multi-thread-safe per POSIX,
+		 * but the destructor runs after the bg purge thread has
+		 * joined and we are on the only remaining thread of the
+		 * process. The clang-tidy concurrency check has no model
+		 * for that single-thread-at-shutdown invariant. */
+		/* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+		const char *path = getenv("V8M_PROFILE_PATH");
+		char path_buf[64];
+		if (path == NULL) {
+			(void)snprintf(path_buf, sizeof(path_buf),
+				       "/tmp/v8malloc-%d.pb", (int)getpid());
+			path = path_buf;
+		}
+		if (v8m_pprof_dump_heap_to_path(path) != 0) {
+			(void)fprintf(
+			    stderr,
+			    "v8malloc PROFILE: pprof dump to %s "
+			    "failed (%s)\n",
+			    path,
+			    /* NOLINTNEXTLINE(concurrency-mt-unsafe) */
+			    strerror(errno));
+		} else if (v8m_config_get(V8M_OPT_VERBOSE) != 0) {
+			(void)fprintf(stderr,
+				      "v8malloc PROFILE: pprof heap profile "
+				      "written to %s\n",
+				      path);
+		}
 	}
 
 	/* If V8M_DEBUG is set, emit a one-line leak summary so a
@@ -413,7 +448,14 @@ static bool oom_handler_says_retry(size_t size)
 	return retry != 0;
 }
 
-V8M_EXPORT void *v8m_malloc(size_t size)
+/* Shared malloc body parameterized on the user's caller PC. Every
+ * public entry that ultimately serves a malloc-shaped allocation
+ * (`v8m_malloc`, `v8m_calloc`, `v8m_realloc`'s alloc paths) routes
+ * through this helper passing its own `__builtin_return_address(0)`
+ * — that way the predictive prefetch table and the lifetime tracker
+ * see the user's actual call site, not the v8malloc internal frame
+ * that would result from one entry point thunking through another. */
+static void *do_malloc_pc(size_t size, const void *caller_pc)
 {
 	if (!dispatch_ready()) {
 		/* Pre-init / post-shutdown — serve from bootstrap.
@@ -437,7 +479,6 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 	 * yet. v8m_thread_cache_peek avoids creating a cache just
 	 * for the prefetch — the dispatcher's own cache_get will
 	 * create one if needed for the actual alloc. */
-	const void *caller_pc = __builtin_return_address(0);
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 	if (cache != NULL) {
 		v8m_thread_cache_predict_prefetch(cache, caller_pc);
@@ -472,6 +513,40 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
 					       v8m_arch_rdtsc());
 	return ptr;
+}
+
+/* Shared aligned-alloc body parameterized on the user's caller PC.
+ * Mirror of `do_malloc_pc` for the alignment-aware path: prefetch
+ * + arena routing + lifetime tracker hooks all consult the user's
+ * actual call site. */
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+static void *do_aligned_alloc_pc(size_t alignment, size_t size,
+				 const void *caller_pc)
+{
+	void *ptr = NULL;
+	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		v8m_thread_cache_predict_prefetch(cache, caller_pc);
+	}
+	v8m_dispatch_set_caller_pc(caller_pc);
+	ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	v8m_dispatch_set_caller_pc(NULL);
+	if (ptr == NULL) {
+		return NULL;
+	}
+	cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		v8m_thread_cache_predict_update(cache, caller_pc,
+						v8m_size_class(size));
+	}
+	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
+					       v8m_arch_rdtsc());
+	return ptr;
+}
+
+V8M_EXPORT void *v8m_malloc(size_t size)
+{
+	return do_malloc_pc(size, __builtin_return_address(0));
 }
 
 /* Double-free detection ring buffer (api.md §6.2). Off the hot
@@ -552,7 +627,10 @@ V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 		return NULL;
 	}
 	size_t total = nmemb * size;
-	void *ptr = v8m_malloc(total);
+	/* Pass calloc's own caller PC into do_malloc_pc so the predict
+	 * table and lifetime tracker see the user's call site, not the
+	 * v8m_calloc body. */
+	void *ptr = do_malloc_pc(total, __builtin_return_address(0));
 	if (ptr != NULL && total > 0U) {
 		(void)memset(ptr, 0, total);
 	}
@@ -581,8 +659,12 @@ V8M_EXPORT size_t v8m_malloc_usable_size(void *ptr)
 
 V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 {
+	/* Capture once at entry so both the realloc(NULL, n) shortcut
+	 * and the alloc-and-move path attribute the new allocation to
+	 * the user's actual call site. */
+	const void *caller_pc = __builtin_return_address(0);
 	if (ptr == NULL) {
-		return v8m_malloc(size);
+		return do_malloc_pc(size, caller_pc);
 	}
 	if (size == 0U) {
 		v8m_free(ptr);
@@ -597,7 +679,7 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 		return ptr; /* shrink / fits in place */
 	}
 
-	void *new_ptr = v8m_malloc(size);
+	void *new_ptr = do_malloc_pc(size, caller_pc);
 	if (new_ptr == NULL) {
 		return NULL;
 	}
@@ -647,7 +729,8 @@ V8M_EXPORT void *v8m_aligned_alloc(size_t alignment, size_t size)
 		errno = ENOMEM;
 		return NULL;
 	}
-	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	void *ptr =
+	    do_aligned_alloc_pc(alignment, size, __builtin_return_address(0));
 	if (ptr == NULL) {
 		errno = ENOMEM;
 	}
@@ -677,7 +760,8 @@ V8M_EXPORT int v8m_posix_memalign(void **memptr, size_t alignment, size_t size)
 		}
 		return ENOMEM;
 	}
-	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	void *ptr =
+	    do_aligned_alloc_pc(alignment, size, __builtin_return_address(0));
 	if (ptr == NULL) {
 		return ENOMEM;
 	}

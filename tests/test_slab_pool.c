@@ -373,6 +373,75 @@ static int check_partials_pick_most_utilized(void)
 	return 0;
 }
 
+/*
+ * Drained-page cache (slab-page deferred munmap). When a slab page
+ * becomes empty, release_slab_page parks it in the per-pool
+ * drained cache instead of releasing immediately. A subsequent
+ * acquire pops from the cache, saving an mmap/munmap round trip.
+ *
+ * Sequence: drain a page (alloc-free a single Tiny object), assert
+ * the cache holds 1 page, alloc again (which pops from drained),
+ * assert the cache is empty. Then sweep with max_idle_ticks=0 to
+ * force-release the next drained page, asserting the sweep return
+ * count matches.
+ */
+static int check_drained_cache_round_trip(void)
+{
+	struct v8m_slab_pool pool;
+	if (v8m_slab_pool_init(&pool) != 0) {
+		return fail("init returned non-zero");
+	}
+	if (v8m_slab_pool_drained_count(&pool) != 0U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("drained count nonzero on init");
+	}
+
+	void *obj = v8m_slab_pool_alloc(&pool, CLASS_TINY, OWNER_THREAD);
+	if (obj == NULL) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("first alloc returned NULL");
+	}
+	struct v8m_page_meta *meta = v8m_ptr_to_meta(obj);
+	(void)v8m_slab_pool_free(&pool, meta, obj);
+
+	if (v8m_slab_pool_drained_count(&pool) != 1U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("drained count should be 1 after empty-page free");
+	}
+
+	/* The next alloc should pop from drained — observable as the
+	 * drained_count dropping back to 0 (no new mmap was needed). */
+	void *revival = v8m_slab_pool_alloc(&pool, CLASS_TINY, OWNER_THREAD);
+	if (revival == NULL) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("revival alloc returned NULL");
+	}
+	if (v8m_slab_pool_drained_count(&pool) != 0U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("drained count should be 0 after revival pop");
+	}
+	struct v8m_page_meta *revival_meta = v8m_ptr_to_meta(revival);
+	(void)v8m_slab_pool_free(&pool, revival_meta, revival);
+	if (v8m_slab_pool_drained_count(&pool) != 1U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("drained count should be 1 after revival free");
+	}
+
+	/* Force-release the cache via sweep with threshold 0. */
+	size_t released = v8m_slab_pool_sweep_idle(&pool, 0U);
+	if (released != 1U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("sweep should release exactly 1 page");
+	}
+	if (v8m_slab_pool_drained_count(&pool) != 0U) {
+		v8m_slab_pool_destroy(&pool);
+		return fail("drained count should be 0 after sweep");
+	}
+
+	v8m_slab_pool_destroy(&pool);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_init_destroy();
@@ -404,6 +473,10 @@ int main(void)
 		return status;
 	}
 	status = check_partials_pick_most_utilized();
+	if (status != 0) {
+		return status;
+	}
+	status = check_drained_cache_round_trip();
 	if (status != 0) {
 		return status;
 	}

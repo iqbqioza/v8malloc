@@ -472,9 +472,11 @@ void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
  * V8M_OPT_PURGE_INTERVAL of 1 second, 4 ticks ≈ 4 seconds of grace
  * before a drained arena is fully released — enough to absorb the
  * typical alloc/free burst cadence without retaining VMA pressure
- * on a long idle workload.
+ * on a long idle workload. Same threshold reused for the slab
+ * drained-page cache so both backends release in lockstep.
  */
 #define V8M_DISPATCH_BUDDY_IDLE_TICKS 4U
+#define V8M_DISPATCH_SLAB_IDLE_TICKS 4U
 
 size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch)
 {
@@ -483,6 +485,12 @@ size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch)
 	}
 	size_t released = v8m_buddy_pool_sweep_idle(
 	    &dispatch->buddy, V8M_DISPATCH_BUDDY_IDLE_TICKS);
+	released += v8m_slab_pool_sweep_idle(&dispatch->slab,
+					     V8M_DISPATCH_SLAB_IDLE_TICKS);
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		released += v8m_slab_pool_sweep_idle(
+		    &dispatch->slab_lifetime[i], V8M_DISPATCH_SLAB_IDLE_TICKS);
+	}
 	/* NUMA rebalance action: re-evaluate per-node imbalance and
 	 * toggle each node's suppressed flag. The action half of the
 	 * spec (numa.md §6.2 first item) — alloc-time diversion is
@@ -499,9 +507,17 @@ size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch)
 	if (dispatch == NULL) {
 		return 0;
 	}
-	/* max_idle_ticks = 0 → every drained arena passes the
-	 * release test on the first walk. */
-	return v8m_buddy_pool_sweep_idle(&dispatch->buddy, 0U);
+	/* max_idle_ticks = 0 → every drained entry passes the release
+	 * test on the first walk. Both backends are flushed so a
+	 * caller asking for VMA / RSS relief gets it from every tier
+	 * the dispatcher caches at. */
+	size_t released = v8m_buddy_pool_sweep_idle(&dispatch->buddy, 0U);
+	released += v8m_slab_pool_purge_drained(&dispatch->slab);
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		released +=
+		    v8m_slab_pool_purge_drained(&dispatch->slab_lifetime[i]);
+	}
+	return released;
 }
 
 size_t v8m_dispatch_drain_local_l2(struct v8m_dispatch *dispatch)

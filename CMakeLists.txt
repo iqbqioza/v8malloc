@@ -199,6 +199,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_numa_pool.c
 	src/v8m_page.c
 	src/v8m_page_heap.c
+	src/v8m_pprof.c
 	src/v8m_refill_controller.c
 	src/v8m_signal_safe.c
 	src/v8m_size_class.c

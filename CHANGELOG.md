@@ -7,6 +7,69 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- pprof-format heap profile dump on exit (resolution of open
+  question #5). `V8M_PROFILE=1` now emits a pprof Profile message
+  (uncompressed protobuf, `.pb`) to a path resolved from
+  `$V8M_PROFILE_PATH` (default `/tmp/v8malloc-PID.pb`) right
+  after the malloc_info XML snapshot. New module
+  `src/v8m_pprof.{h,c}` ships a self-contained protobuf encoder
+  (varint LEB128 + length-delimited submessages) that walks the
+  per-class request histogram and writes one Sample / Location /
+  Function per non-zero class plus a Huge overflow row. Encoder
+  is malloc-free (single 64 KiB BSS scratch) so it stays safe to
+  invoke from the destructor after the dispatcher has been torn
+  down. Coverage in `tests/test_pprof.c` (smoke test asserts the
+  emitted file starts with the sample_type tag and the
+  string_table contains `alloc_objects`). Real call-stack capture
+  is a future cycle that needs per-allocation PC unwinding.
+
+### Performance
+- Slab-page deferred munmap (the spec's slab analog of buddy's
+  drained-arena pattern). `struct v8m_slab_pool` gained an
+  8-entry drained cache; when `v8m_slab_pool_free` empties a
+  page, `release_slab_page` applies `MADV_DONTNEED` (kernel
+  reclaims physical frames, virtual mapping intact) and parks
+  the raw page pointer instead of releasing immediately. The
+  next `acquire_slab_page` pops the cache LIFO so a revival
+  within the bg-purge grace window reuses the slot without an
+  mmap/munmap round trip. Slab metadata co-locates with the data
+  area, so dropped pages get re-inited (fresh meta header) on
+  revival — no separate handshake needed. Sweep
+  (`v8m_slab_pool_sweep_idle`) wired into `v8m_dispatch_bg_tick`
+  ages parked entries one tick per pass and releases those past
+  4 ticks (≈ 4 s at the default purge interval). `v8m_purge`
+  calls `v8m_slab_pool_purge_drained` for every arena to give an
+  explicit caller immediate VMA / RSS relief. Diagnostic
+  accessor `v8m_slab_pool_drained_count`. Coverage in
+  `tests/test_slab_pool.c::check_drained_cache_round_trip`.
+- Bounded-budget partials priority queue. The slab pool's
+  `try_partials` previously walked the entire partials list
+  per refill picking the max `used_count` (O(N) per refill).
+  Now scans the first `V8M_PARTIALS_SCAN_BUDGET = 4` partials
+  and picks the max among them — constant cost per refill, and
+  since the insert path always pushes at head with `used_count =
+  capacity - 1`, the recently-inserted entries clustered at the
+  head are where the max overwhelmingly lives. Older entries
+  deeper in the list have had more time to lose `used_count`
+  and are by construction less utilized on average. The
+  bounded scan retains the max-pick semantics — distinguishes
+  it from a pure head-pop, which is wrong because partial pages
+  can accumulate frees after insertion (a newer head entry can
+  have lower `used_count` than an older entry that took fewer
+  frees, as `tests/test_slab_pool.c::check_partials_pick_most_utilized`
+  encodes).
+- Predict prefetch + lifetime tracker hooks now wire through
+  the full malloc family. `v8m_calloc` / `v8m_realloc` (the
+  alloc path and the realloc(NULL, n) shortcut) /
+  `v8m_aligned_alloc` / `v8m_posix_memalign` route through the
+  new internal `do_malloc_pc(size, caller_pc)` and
+  `do_aligned_alloc_pc` helpers, each entry point capturing its
+  own `__builtin_return_address(0)` so the predict table and
+  lifetime tracker see the user's actual call site rather than
+  the v8malloc internal frame that would result from one entry
+  point thunking through another.
+
+### Added
 - Public `v8m_estimate_lifetime(caller_pc)` and the
   `enum v8m_lifetime_class { EPHEMERAL, SHORT, LONG, UNKNOWN }`
   it returns. Backed by `v8m_thread_cache_lifetime_classify`

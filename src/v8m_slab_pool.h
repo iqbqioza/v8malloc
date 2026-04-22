@@ -45,6 +45,26 @@ struct v8m_slab_pool_class {
 	struct v8m_page_meta *partials;
 };
 
+/*
+ * Drained-slab-page cache (mirror of the buddy pool's drained-arena
+ * pattern). When a slab page becomes empty in `v8m_slab_pool_free`,
+ * release_slab_page first tries to park the page in this cache:
+ * applies MADV_DONTNEED (kernel reclaims physical pages, virtual
+ * mapping stays intact) and pushes the raw page pointer onto the
+ * stack. A subsequent acquire_slab_page pops the cache first so a
+ * revival within the bg-purge grace window reuses the slot without
+ * an mmap/munmap round trip. Caller of acquire treats the returned
+ * page as fresh and re-runs slab init — that overwrites the meta
+ * header, which the kernel had zeroed on the next fault, so the
+ * "metadata co-located with data area" constraint is satisfied
+ * without a separate handshake. The cache is per-pool so isolated
+ * test pools do not share parked pages. Cap is small (8) so the
+ * worst-case retained mapping is bounded; pages that age past the
+ * sweep threshold are released to the underlying source
+ * (numa_pool or page_heap) via the original release path.
+ */
+#define V8M_SLAB_DRAINED_CAP 8U
+
 struct v8m_slab_pool {
 	/* Indices V8M_MEDIUM_FIRST_CLASS and above are unused; the
 	 * pool only serves Tiny + Small. */
@@ -64,6 +84,13 @@ struct v8m_slab_pool {
 	 * (avoids cross-pool slab-page sharing through the global
 	 * numa_pool). */
 	bool use_numa_pool;
+	/* Drained-page cache. Parallel arrays so the hot scan over
+	 * `drained_count` entries reads contiguous memory; idle_ticks
+	 * is touched only on sweep so it stays separate from the
+	 * page-pointer array the acquire path scans. */
+	void *drained[V8M_SLAB_DRAINED_CAP];
+	uint32_t drained_idle[V8M_SLAB_DRAINED_CAP];
+	uint32_t drained_count;
 };
 
 /*
@@ -127,6 +154,31 @@ struct v8m_slab_pool_aggregate_stats {
 
 void v8m_slab_pool_get_aggregate_stats(
     struct v8m_slab_pool *pool, struct v8m_slab_pool_aggregate_stats *out);
+
+/*
+ * Age every entry in the drained-page cache by one tick and release
+ * those that have reached `max_idle_ticks` to the underlying source
+ * (numa_pool or page_heap). Returns the number of pages released.
+ * Mirror of `v8m_buddy_pool_sweep_idle`. Called by the dispatcher's
+ * bg_tick callback. Safe to call on a NULL pool or one that never
+ * cached anything.
+ */
+size_t v8m_slab_pool_sweep_idle(struct v8m_slab_pool *pool,
+				uint32_t max_idle_ticks);
+
+/*
+ * Force-release every page in the drained cache to the underlying
+ * source. Equivalent to `v8m_slab_pool_sweep_idle(pool, 0)`. Used
+ * by `v8m_purge` for immediate VMA / RSS relief.
+ */
+size_t v8m_slab_pool_purge_drained(struct v8m_slab_pool *pool);
+
+/*
+ * Snapshot of the drained-page cache's occupancy, exposed for
+ * tests and diagnostics. Counts the number of currently parked
+ * pages (0..V8M_SLAB_DRAINED_CAP).
+ */
+uint32_t v8m_slab_pool_drained_count(struct v8m_slab_pool *pool);
 
 /*
  * Initialize the global per-NUMA huge-page pool that sources slab
