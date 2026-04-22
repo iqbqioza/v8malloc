@@ -686,8 +686,14 @@ V8M_EXPORT int v8m_purge(void)
 	/* The slab pool returns empty pages to the page heap on free,
 	 * the buddy pool reclaims fully-drained arenas, and Large/Huge
 	 * regions are unmapped on free — there is nothing left to
-	 * release synchronously in v0. The contract lands here so the
-	 * future bg purge thread cycle has a public hook to wire up. */
+	 * release synchronously in v0. We do, however, run the bg
+	 * purge thread's scan pass on the calling thread so that an
+	 * explicit caller gets the diagnostics (VMA-threshold check,
+	 * verbose stats line) immediately rather than waiting up to
+	 * one V8M_OPT_PURGE_INTERVAL second for the next bg tick.
+	 * Future per-NUMA empty-page sweep / TLC bin shrink will hook
+	 * into the same scan body. */
+	v8m_bg_purge_run_once();
 	return 0;
 }
 

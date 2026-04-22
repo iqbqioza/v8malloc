@@ -156,3 +156,8 @@ bool v8m_bg_purge_running(void)
 {
 	return atomic_load_explicit(&g_running, memory_order_acquire);
 }
+
+void v8m_bg_purge_run_once(void)
+{
+	run_scan_pass();
+}

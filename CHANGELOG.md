@@ -6,6 +6,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `v8m_purge()` is no longer a stub. The public API now invokes
+  the bg purge thread's scan pass synchronously on the calling
+  thread, so an explicit `v8m_purge()` call gets the
+  diagnostics — `V8M_VMA_WARN_THRESHOLD` check, optional
+  `V8M_VERBOSE` stats line — immediately rather than waiting up
+  to one `V8M_OPT_PURGE_INTERVAL` second for the next bg tick.
+  No actual page reclamation today (the slab and buddy pools
+  already release empty pages eagerly on free); future per-NUMA
+  empty-page sweep / TLC bin shrink hooks into the same scan
+  body. New internal `v8m_bg_purge_run_once()` (in
+  `src/v8m_bg_purge.h`) is the synchronous entry point.
+
 ### Added
 - VMA-count threshold warning in the bg purge thread
   (`src/v8m_bg_purge.c`, huge-pages.md §6.2). New

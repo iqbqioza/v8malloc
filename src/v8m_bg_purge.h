@@ -48,4 +48,15 @@ void v8m_bg_purge_shutdown(void);
  */
 bool v8m_bg_purge_running(void);
 
+/*
+ * Run one scan pass synchronously on the calling thread. Same body
+ * the bg thread runs each tick — VMA-threshold check, optional
+ * verbose stats log. Useful from `v8m_purge()` so an explicit
+ * caller can trigger the diagnostics without waiting up to one
+ * `V8M_OPT_PURGE_INTERVAL` second for the next bg tick. Safe to
+ * call before / after `v8m_bg_purge_init` / `_shutdown` — the scan
+ * touches no thread state.
+ */
+void v8m_bg_purge_run_once(void);
+
 #endif
