@@ -162,12 +162,105 @@ static int check_destructor_fires_on_thread_exit(void)
 	return 0;
 }
 
+/*
+ * Fast-path coverage: exercise the bin pop / push helpers
+ * directly against a cache the test owns. The dispatcher-level
+ * round-trip (malloc / free → TLC → slab pool) is exercised by
+ * the rest of the suite; this test asserts the helper-level
+ * invariants the dispatcher relies on.
+ */
+static int check_alloc_free_round_trip(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	const uint32_t cls = 0; /* smallest Tiny class — 8-byte slots */
+
+	/* Empty bin → alloc returns NULL. */
+	if (v8m_thread_cache_alloc(cache, cls) != NULL) {
+		return fail("empty-bin alloc did not return NULL");
+	}
+
+	/* Push three sentinel objects, pop them in LIFO order. The
+	 * objects are local 8-byte buffers — the bin overwrites
+	 * their first 8 bytes with the next-pointer link, which is
+	 * exactly what the production path does on freed slots. */
+	uint64_t slots[3];
+	for (int i = 0; i < 3; i++) {
+		slots[i] = 0;
+		bool overflow = v8m_thread_cache_free(cache, cls, &slots[i]);
+		if (overflow) {
+			return fail("push under capacity reported overflow");
+		}
+	}
+
+	for (int i = 2; i >= 0; i--) {
+		const void *got = v8m_thread_cache_alloc(cache, cls);
+		if (got != &slots[i]) {
+			return fail("LIFO alloc returned the wrong slot");
+		}
+	}
+	if (v8m_thread_cache_alloc(cache, cls) != NULL) {
+		return fail("post-drain alloc did not return NULL");
+	}
+	return 0;
+}
+
+/*
+ * Push to capacity and verify the next push reports overflow.
+ * The objects are heap-allocated via malloc so the bin's writes
+ * to their first 8 bytes do not stomp local stack state. We
+ * do NOT free the objects here — the dispatcher's normal flow
+ * has the slab pool take them via flush_half; the parent thread's
+ * pthread_key destructor will drain at thread exit.
+ */
+static int check_overflow_signal(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	const uint32_t cls = 1; /* Tiny class 1 — 16-byte slots */
+	uint16_t cap = cache->bin_capacity[cls];
+	if (cap < V8M_BIN_CAPACITY_MIN || cap > V8M_BIN_CAPACITY_MAX) {
+		return fail("bin_capacity outside the documented clamp band");
+	}
+
+	/* Pre-load the bin to (capacity - 1) by recycling a single
+	 * 16-byte slot — every push uses the same address, so the
+	 * bin's `next` chain becomes self-referential after the
+	 * second push. That breaks the "drain in LIFO" invariant
+	 * but is fine for the overflow-signal test, which only
+	 * checks the boolean return of the push that crosses the
+	 * threshold. The test doesn't drain the bin afterward;
+	 * the parent thread's exit destructor handles cleanup. */
+	cache->bin_count[cls] = (uint16_t)(cap - 1U);
+	uint64_t slot[2] = {0};
+	bool overflow = v8m_thread_cache_free(cache, cls, slot);
+	if (!overflow) {
+		return fail("push at capacity did not signal overflow");
+	}
+	/* Restore the bin to a sane state so the parent's exit
+	 * destructor's drain doesn't walk our self-referential
+	 * chain. Pop the one slot we just pushed; bin_count goes
+	 * back to where it started before this test. */
+	(void)v8m_thread_cache_alloc(cache, cls);
+	cache->bin_count[cls] = 0;
+	cache->bin_heads[cls] = NULL;
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
 	result |= check_same_thread_returns_same_cache();
 	result |= check_distinct_threads_get_distinct_caches();
 	result |= check_destructor_fires_on_thread_exit();
+	result |= check_alloc_free_round_trip();
+	result |= check_overflow_signal();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

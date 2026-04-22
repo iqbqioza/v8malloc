@@ -121,6 +121,13 @@ int main(void)
 		return fail("one or more worker threads reported failure");
 	}
 
+	/* The parent thread's TLC bins accumulated cached free slots
+	 * over the run (every pthread_create internally allocates,
+	 * and the bins hold those slots until thread exit or an
+	 * explicit purge). Drain them so live_regions reflects the
+	 * allocator's steady state rather than the cache holding. */
+	(void)v8m_purge();
+
 	struct v8m_stats after = {0};
 	v8m_get_stats(&after);
 	uint64_t region_delta = (after.live_regions > before.live_regions)

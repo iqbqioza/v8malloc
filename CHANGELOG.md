@@ -6,6 +6,53 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- Thread-cache (L1) fast path (`src/v8m_thread_cache.{h,c}`,
+  `src/v8m_dispatch.{h,c}`, thread-cache.md §2.1 / TODO P0
+  `Malloc fast path`, `Free fast path`, `Bin overflow`, and P1
+  `Per-class bin_capacity[]` rows). The TLC scaffolding from
+  the previous cycle is now wired into the dispatcher: malloc
+  pops from `bin_heads[size_class]`, free pushes back to the
+  same bin, and a push that crosses `bin_capacity[size_class]`
+  triggers a half-bin batch flush via `v8m_slab_pool_free`.
+  Cached objects use their own first 8 bytes as the intrusive
+  next-pointer (the same pattern slab pages already use), so
+  caching adds zero per-object metadata. Per-class capacities
+  ship at `V8M_BIN_CAPACITY_DEFAULT` (64) and stay clamped to
+  the documented `[V8M_BIN_CAPACITY_MIN, V8M_BIN_CAPACITY_MAX]`
+  band (16..256); the future adaptive controller (line 131)
+  tunes them at runtime within that band.
+  Routing is gated on a new `v8m_dispatch::use_tlc` flag —
+  the public-API singleton (`g_dispatch`) opts in, isolated
+  test fixtures that create their own dispatcher leave it off
+  so cached slots cannot cross-link between distinct slab
+  pools. Reentrancy is guarded by a `__thread` flag (the
+  cache struct itself is allocated via the dispatcher, so the
+  initial create would otherwise infinite-recurse). The
+  `pthread_key` destructor now drains the cache via a hook
+  installed by `v8m_api.c` (routing the drain to
+  `g_dispatch.slab`) before freeing the cache struct, and
+  latches a sticky `t_in_destructor` flag so any tail
+  allocation in the thread's exit path bypasses TLC — without
+  this the destructor would immediately re-create a cache
+  via the freed-cache `free()` call, and the pthread runtime
+  would iterate the destructor up to
+  `PTHREAD_DESTRUCTOR_ITERATIONS` (4) times. `v8m_purge` and
+  `v8m_purge_thread` now drain the calling thread's TLC so
+  single-thread workloads (the thread never exits, the
+  destructor never fires) can return cached slots on demand.
+  Coverage in `tests/test_thread_cache.c` adds
+  `check_alloc_free_round_trip` (LIFO order, empty-bin NULL
+  return) and `check_overflow_signal` (push at capacity
+  reports overflow, value within the documented clamp band);
+  `tests/test_thread_churn.c` and `tests/test_soak.c` updated
+  to call `v8m_purge()` before checking residual region
+  counts so the leak invariant reflects the allocator's
+  steady state rather than the cache holding. The remote
+  free-queue drain (lines 71 + 77) and L2 batching land with
+  subsequent cycles; today bin overflow flushes directly to
+  the slab pool.
+
 ### Added
 - Thread-cache (L1) scaffolding (`src/v8m_thread_cache.{h,c}`,
   architecture.md §2.1 + thread-cache.md §2.1 / TODO P0

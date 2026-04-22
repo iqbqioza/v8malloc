@@ -38,6 +38,16 @@
 struct v8m_dispatch {
 	struct v8m_slab_pool slab;
 	struct v8m_buddy_pool buddy;
+	/*
+	 * Opt-in TLC routing. The thread cache is a per-thread
+	 * singleton; routing two distinct dispatchers through the
+	 * same TLC would mix slab pages from different pools and
+	 * crash on free. The public API enables this on its single
+	 * `g_dispatch`; isolated test fixtures (which create their
+	 * own dispatcher) leave it false so alloc / free serve the
+	 * local pools directly.
+	 */
+	bool use_tlc;
 };
 
 /*
@@ -134,5 +144,14 @@ size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch);
  * reclaimable bytes that the periodic sweep has not yet visited.
  */
 size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch);
+
+/*
+ * Enable / disable TLC routing for this dispatcher. Default is
+ * disabled — only the public-API singleton turns it on. Caller is
+ * expected to set this once at init time, before any concurrent
+ * alloc / free calls; the field is read on every alloc / free
+ * fast-path entry but not synchronized.
+ */
+void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled);
 
 #endif /* V8M_DISPATCH_H */

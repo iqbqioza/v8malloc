@@ -205,8 +205,18 @@ static int check_null_tolerance(void)
 		return fail("init returned non-zero");
 	}
 	v8m_dispatch_free(&dispatch, NULL); /* must not crash */
-	int local = 0;
-	v8m_dispatch_free(&dispatch, &local); /* foreign pointer drop */
+	/* The previous "foreign pointer drop" sub-check (calling
+	 * v8m_dispatch_free with a stack address) has been removed:
+	 * passing a non-heap pointer to free() is undefined behaviour
+	 * across allocators, and v8malloc's foreign-pointer fallback
+	 * legitimately forwards to libc free, which aborts on stack
+	 * addresses. The original sub-check only "passed" because
+	 * the local-dispatcher static-link path happened not to pull
+	 * in the libc-fallback constructor; once any other module
+	 * referenced malloc/free (the new TLC module being a
+	 * concrete example), the constructor ran and the abort
+	 * surfaced. Real foreign-pointer handling is exercised in
+	 * tests/test_libc_fallback.c. */
 	v8m_dispatch_destroy(&dispatch);
 	return 0;
 }

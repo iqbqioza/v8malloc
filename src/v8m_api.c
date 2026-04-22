@@ -178,6 +178,19 @@ static void v8m_api_bg_tick(void)
 	(void)v8m_dispatch_bg_tick(&g_dispatch);
 }
 
+/* Drain hook for the thread-cache pthread_key destructor. Routes
+ * the drain to the dispatcher's slab pool. Skips when the dispatch
+ * is not READY so a thread that exits during library teardown does
+ * not touch a half-destroyed pool. */
+static void v8m_api_drain_thread_cache(struct v8m_thread_cache *cache)
+{
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) !=
+	    V8M_INIT_READY) {
+		return;
+	}
+	(void)v8m_thread_cache_drain_all(cache, &g_dispatch.slab);
+}
+
 __attribute__((constructor(101))) static void v8m_constructor(void)
 {
 	/* Publish RUNNING before touching anything malloc-shaped so a
@@ -199,6 +212,11 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	if (v8m_dispatch_init(&g_dispatch) != 0) {
 		abort_with("v8malloc: dispatch init failed\n");
 	}
+	/* Opt the global dispatcher into the TLC fast path. Per-thread
+	 * caches funnel through this single dispatcher; isolated test
+	 * fixtures that create their own dispatcher leave use_tlc false
+	 * to avoid mixing slab pages from different pools. */
+	v8m_dispatch_set_use_tlc(&g_dispatch, true);
 	/* Register fork handlers before publishing READY so that any
 	 * thread that calls fork() the moment we go live sees the
 	 * locks acquired in deterministic order. pthread_atfork itself
@@ -220,6 +238,13 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 		    "v8malloc: thread-cache module init failed\n",
 		    sizeof("v8malloc: thread-cache module init failed\n") - 1U);
 	}
+	/* Install the drain hook so the destructor flushes cached
+	 * slots back to the slab pool before freeing the cache
+	 * struct. Without this, every thread exit would leak its
+	 * cached objects (the slab pages would still consider them
+	 * allocated until the surrounding pages drained empty by
+	 * other means). */
+	v8m_thread_cache_set_drain_hook(v8m_api_drain_thread_cache);
 
 	/* Install the per-tick callback before the bg thread starts so
 	 * the very first scan pass already exercises it. The hook is a
@@ -308,6 +333,10 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 * the destructor cannot enter the dispatch after teardown. */
 	v8m_bg_purge_set_tick_hook(NULL);
 	v8m_bg_purge_shutdown();
+	/* Clear the drain hook so a tail destructor (a thread that
+	 * exits after our shutdown) does not call into a partially
+	 * torn-down dispatcher. */
+	v8m_thread_cache_set_drain_hook(NULL);
 	v8m_thread_cache_module_shutdown();
 	(void)atomic_exchange_explicit(&g_init_state, V8M_INIT_TORN_DOWN,
 				       memory_order_acquire);
@@ -811,15 +840,22 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 
 V8M_EXPORT int v8m_purge(void)
 {
-	/* Force-release every drained buddy arena (skips the
-	 * idle-tick grace window so an explicit caller gets immediate
-	 * VMA + RSS relief) and then run the bg-purge scan pass for
-	 * its diagnostic side effects (VMA-threshold check, optional
-	 * verbose stats line). Slab pages and Large/Huge regions are
-	 * already released eagerly on free, so there is nothing to do
-	 * for them here. Future per-NUMA empty-page sweep / TLC bin
-	 * shrink will hook into the same scan body. */
+	/* Drain the calling thread's TLC bins back to the slab pool
+	 * so single-thread workloads (the thread never exits, the
+	 * pthread_key destructor never fires) see their cached free
+	 * slots returned to the pool. Force-release every drained
+	 * buddy arena next (skips the idle-tick grace window so an
+	 * explicit caller gets immediate VMA + RSS relief), then run
+	 * the bg-purge scan pass for its diagnostic side effects
+	 * (VMA-threshold check, optional verbose stats line). Slab
+	 * pages and Large/Huge regions are already released eagerly
+	 * on free, so there is nothing else to do for them here. */
 	if (dispatch_ready()) {
+		struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+		if (cache != NULL) {
+			(void)v8m_thread_cache_drain_all(cache,
+							 &g_dispatch.slab);
+		}
 		(void)v8m_dispatch_purge_drained(&g_dispatch);
 	}
 	v8m_bg_purge_run_once();
@@ -828,8 +864,18 @@ V8M_EXPORT int v8m_purge(void)
 
 V8M_EXPORT int v8m_purge_thread(void)
 {
-	/* Same v0 reasoning as v8m_purge: no thread cache yet, so
-	 * there's nothing thread-bound to flush. */
+	/* Drain the calling thread's TLC bins back to the slab pool.
+	 * Distinct from v8m_purge in that it does NOT touch the
+	 * process-wide buddy arenas or the bg-purge scan body —
+	 * useful for callers that want to release per-thread
+	 * caching pressure without the global side effects. */
+	if (dispatch_ready()) {
+		struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+		if (cache != NULL) {
+			(void)v8m_thread_cache_drain_all(cache,
+							 &g_dispatch.slab);
+		}
+	}
 	return 0;
 }
 

@@ -22,6 +22,7 @@
 #include "v8m_page_heap.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
+#include "v8m_thread_cache.h"
 
 int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 {
@@ -34,7 +35,16 @@ int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 		v8m_slab_pool_destroy(&dispatch->slab);
 		return ret;
 	}
+	dispatch->use_tlc = false;
 	return 0;
+}
+
+void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled)
+{
+	if (dispatch == NULL) {
+		return;
+	}
+	dispatch->use_tlc = enabled;
 }
 
 void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
@@ -54,6 +64,25 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 
 	uint32_t cls = v8m_size_class(size);
 	if (cls < V8M_MEDIUM_FIRST_CLASS) {
+		/* TLC fast path: per-thread bin pop. Only enabled on
+		 * dispatchers that opted in (`use_tlc` true) — the
+		 * test fixtures that create their own dispatchers
+		 * stay off TLC so cached objects do not cross-link
+		 * between distinct slab pools. The cache is created
+		 * on first touch; failure to allocate one (rare; only
+		 * under extreme memory pressure) bypasses the cache
+		 * and serves directly. */
+		if (dispatch->use_tlc) {
+			struct v8m_thread_cache *cache =
+			    v8m_thread_cache_get_or_create();
+			if (cache != NULL) {
+				void *cached =
+				    v8m_thread_cache_alloc(cache, cls);
+				if (cached != NULL) {
+					return cached;
+				}
+			}
+		}
 		return v8m_slab_pool_alloc(&dispatch->slab, cls, 0);
 	}
 	if (size <= V8M_BUDDY_MAX_BLOCK) {
@@ -153,7 +182,26 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 	struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
 	if (v8m_page_meta_valid(meta)) {
 		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
-			(void)v8m_slab_pool_free(&dispatch->slab, meta, ptr);
+			/* TLC fast path (gated on dispatch->use_tlc;
+			 * see v8m_dispatch_alloc for the rationale).
+			 * Overflow triggers a half-bin batch flush back
+			 * to the slab pool so the cache cannot grow
+			 * unboundedly. */
+			struct v8m_thread_cache *cache =
+			    dispatch->use_tlc ? v8m_thread_cache_get_or_create()
+					      : NULL;
+			if (cache != NULL) {
+				bool overflowed = v8m_thread_cache_free(
+				    cache, meta->size_class, ptr);
+				if (overflowed) {
+					(void)v8m_thread_cache_flush_half(
+					    cache, &dispatch->slab,
+					    meta->size_class);
+				}
+			} else {
+				(void)v8m_slab_pool_free(&dispatch->slab, meta,
+							 ptr);
+			}
 		} else {
 			/* size_class is a Large class (38..40) or the
 			 * UINT16_MAX Huge sentinel; v8m_large_free
