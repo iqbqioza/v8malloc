@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "v8m_buddy.h"
+#include "v8m_debug.h"
 
 static_assert(V8M_BUDDY_LEVELS ==
 		  (V8M_BUDDY_MAX_SHIFT - V8M_BUDDY_MIN_SHIFT + 1),
@@ -107,6 +108,14 @@ void v8m_buddy_init(struct v8m_buddy *buddy, void *arena)
 		buddy->split_bitmap[i] = 0;
 	}
 	list_push(&buddy->free_lists[V8M_BUDDY_LEVELS - 1U], arena);
+	/* DEBUG-mode UAF detector: pre-poison the arena's body so the
+	 * first-alloc verify sees the expected pattern. The first
+	 * sizeof(struct v8m_buddy_node) bytes hold the top-level
+	 * free-list head's prev/next and are excluded from the poison
+	 * window. The helper is a no-op when V8M_OPT_DEBUG is 0. */
+	v8m_debug_uaf_poison(
+	    (unsigned char *)arena + sizeof(struct v8m_buddy_node),
+	    V8M_BUDDY_MAX_BLOCK - sizeof(struct v8m_buddy_node));
 }
 
 void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size)
@@ -145,6 +154,18 @@ void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size)
 
 	uint32_t idx = addr_to_index(buddy, node, target);
 	buddy->alloc_bitmap[target] |= (uint64_t)1U << idx;
+	/* DEBUG-mode UAF detector: verify the body poison left by the
+	 * prior free (or by the init-time pre-poison for the first
+	 * alloc on this address range) is intact. The first
+	 * sizeof(struct v8m_buddy_node) bytes were prev/next we just
+	 * consumed and are not part of the verify window. No-op in
+	 * release builds. */
+	size_t target_size = level_to_size(target);
+	if (target_size > sizeof(struct v8m_buddy_node)) {
+		v8m_debug_uaf_verify(
+		    (unsigned char *)node + sizeof(struct v8m_buddy_node),
+		    target_size - sizeof(struct v8m_buddy_node), "buddy");
+	}
 	return node;
 }
 
@@ -188,6 +209,15 @@ static uint32_t coalesce_upward(struct v8m_buddy *buddy,
 		idx >>= 1;
 		buddy->split_bitmap[level] &= ~((uint64_t)1U << idx);
 	}
+	/* DEBUG-mode UAF poison: stamp the entire merged block with the
+	 * poison pattern before pushing back onto the free list. The
+	 * subsequent list_push overwrites the first sizeof(struct
+	 * v8m_buddy_node) bytes with prev/next, leaving the body
+	 * uniformly poisoned. The full-block stamp also covers the
+	 * sibling's old prev/next bytes that would otherwise create a
+	 * non-poison gap inside the merged block. No-op in release
+	 * builds. */
+	v8m_debug_uaf_poison(current, level_to_size(level));
 	list_push(&buddy->free_lists[level], current);
 	return level;
 }
@@ -219,6 +249,10 @@ void v8m_buddy_free_no_coalesce(struct v8m_buddy *buddy, void *ptr, size_t size)
 	}
 	uint32_t idx = addr_to_index(buddy, ptr, level);
 	buddy->alloc_bitmap[level] &= ~((uint64_t)1U << idx);
+	/* Poison the freed block before installing it on the free list;
+	 * list_push overwrites the first sizeof(struct v8m_buddy_node)
+	 * bytes with prev/next. No-op in release builds. */
+	v8m_debug_uaf_poison(ptr, level_to_size(level));
 	list_push(&buddy->free_lists[level], ptr);
 }
 

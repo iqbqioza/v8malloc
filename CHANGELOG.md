@@ -6,6 +6,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Per-class slab utilization breakdown (fragmentation.md §4.1).
+  New public `v8m_get_slab_class_breakdown(out)` exported under
+  V8MALLOC_1.0 fills a buffer of `V8M_PUBLIC_NUM_SIZE_CLASSES`
+  `struct v8m_slab_class_breakdown` entries with per-class
+  pages_in_use / slots_total / slots_used / utilization_pct.
+  Tiny/Small classes (0..31) carry actual data; Medium and above
+  have no slab backing and read as zero. Backed by the new
+  internal `v8m_slab_pool_get_class_stats` which walks the per-
+  class current + partials lists under the pool lock and
+  partitions the counters that the existing aggregate accessor
+  rolled up. Surfaces the dominant utilization buckets that drive
+  fragmentation decisions (the aggregate
+  `slab_pages_in_use` already exists via `v8m_get_frag_metrics`;
+  this is the per-bucket detail an operator chasing waste wants).
+
+### Performance
+- Use-after-free WRITE detector for buddy blocks in DEBUG mode.
+  Extends the slab-side UAF poison pattern that landed last
+  cycle to the buddy backend. `v8m_buddy_init` pre-poisons the
+  arena body [16, V8M_BUDDY_MAX_BLOCK) so the first-alloc verify
+  sees the expected pattern (kernel-delivered mmap-zero would
+  otherwise falsely fire). `v8m_buddy_free_no_coalesce` poisons
+  the freed block before list_push (which then overwrites the
+  first sizeof(v8m_buddy_node) bytes with prev/next). The
+  immediate-coalesce path's `coalesce_upward` poisons the entire
+  merged block before the final list_push — the full-block stamp
+  also covers the sibling's old prev/next bytes that would
+  otherwise create a non-poison gap inside the merged block.
+  `v8m_buddy_alloc` verifies [node+16, node+target_size) at the
+  end, after the split-down loop, and aborts with a diagnostic
+  naming "buddy" plus the offending offset on mismatch. Helpers
+  are no-ops when DEBUG is off; release builds pay zero cost.
+
 ### Performance
 - Sorted-array region map with binary-search ownership check
   (the spec's "future radix-tree replacement" optimization). The

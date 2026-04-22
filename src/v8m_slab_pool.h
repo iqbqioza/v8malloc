@@ -156,6 +156,27 @@ void v8m_slab_pool_get_aggregate_stats(
     struct v8m_slab_pool *pool, struct v8m_slab_pool_aggregate_stats *out);
 
 /*
+ * Per-class utilization snapshot. Same contract as the aggregate
+ * variant above but partitions the counters per Tiny/Small class.
+ * Caller passes a buffer of `out_capacity` entries; the function
+ * fills entries [0, min(out_capacity, V8M_MEDIUM_FIRST_CLASS)).
+ * Slots are summed across the class's `current` page (when set)
+ * and every partial page. Used by the public
+ * `v8m_get_slab_class_breakdown` reporter so consumers can locate
+ * the dominant utilization buckets driving fragmentation
+ * (fragmentation.md §4.1).
+ */
+struct v8m_slab_pool_class_stats {
+	uint64_t pages_in_use;
+	uint64_t slots_total;
+	uint64_t slots_used;
+};
+
+void v8m_slab_pool_get_class_stats(struct v8m_slab_pool *pool,
+				   struct v8m_slab_pool_class_stats *out,
+				   uint32_t out_capacity);
+
+/*
  * Age every entry in the drained-page cache by one tick and release
  * those that have reached `max_idle_ticks` to the underlying source
  * (numa_pool or page_heap). Returns the number of pages released.

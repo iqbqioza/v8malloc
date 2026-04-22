@@ -942,6 +942,36 @@ V8M_EXPORT uint32_t v8m_size_class_to_bytes(int cls)
 	return v8m_size_class_size((uint32_t)cls);
 }
 
+V8M_EXPORT void v8m_get_slab_class_breakdown(
+    struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES])
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0,
+		     sizeof(struct v8m_slab_class_breakdown) *
+			 V8M_PUBLIC_NUM_SIZE_CLASSES);
+	if (!dispatch_ready()) {
+		return;
+	}
+	struct v8m_slab_pool_class_stats raw[V8M_MEDIUM_FIRST_CLASS] = {0};
+	v8m_slab_pool_get_class_stats(&g_dispatch.slab, raw,
+				      V8M_MEDIUM_FIRST_CLASS);
+	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
+		out[i].pages_in_use = raw[i].pages_in_use;
+		out[i].slots_total = raw[i].slots_total;
+		out[i].slots_used = raw[i].slots_used;
+		out[i].utilization_pct =
+		    raw[i].slots_total == 0U
+			? 0U
+			: (uint32_t)((raw[i].slots_used * 100U) /
+				     raw[i].slots_total);
+	}
+	/* Indices [V8M_MEDIUM_FIRST_CLASS, V8M_PUBLIC_NUM_SIZE_CLASSES)
+	 * cover Medium / Large / Huge classes that have no slab
+	 * backing — leave them zeroed by the memset above. */
+}
+
 V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out)
 {
 	if (out == NULL) {

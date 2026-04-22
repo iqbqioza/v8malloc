@@ -306,6 +306,32 @@ V8M_EXPORT void
 v8m_get_size_class_histogram(struct v8m_size_class_histogram *out);
 
 /*
+ * Per-class slab utilization snapshot (fragmentation.md §4.1).
+ * Reports pages_in_use / slots_total / slots_used / utilization
+ * percentage for each Tiny/Small size class (0..31). Indices ≥ 32
+ * cover Medium and above which are served by the buddy / Large
+ * paths and have no slab backing — those entries always read as
+ * zero so iteration loops can stay simple. Caller passes a buffer
+ * of `V8M_PUBLIC_NUM_SIZE_CLASSES` entries; the function fills
+ * exactly that many. Pre-init returns all zeroes.
+ *
+ * `slab_pages_in_use` already reports the aggregate via
+ * `v8m_get_frag_metrics`; this accessor is the per-class
+ * breakdown that surfaces the dominant utilization buckets a
+ * fragmentation-aware operator wants to see.
+ */
+struct v8m_slab_class_breakdown {
+	uint64_t pages_in_use;
+	uint64_t slots_total;
+	uint64_t slots_used;
+	uint32_t utilization_pct;
+	uint32_t reserved;
+};
+
+V8M_EXPORT void v8m_get_slab_class_breakdown(
+    struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES]);
+
+/*
  * Hot-reload the active size-class size table. Atomically swaps
  * the pointer the slab-init paths read on every fresh-page
  * formatting. Already-allocated pages keep the size baked into

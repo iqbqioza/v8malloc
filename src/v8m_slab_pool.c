@@ -471,6 +471,46 @@ void v8m_slab_pool_get_aggregate_stats(
 	(void)pthread_mutex_unlock(&pool->lock);
 }
 
+/* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
+void v8m_slab_pool_get_class_stats(struct v8m_slab_pool *pool,
+				   struct v8m_slab_pool_class_stats *out,
+				   uint32_t out_capacity)
+/* NOLINTEND(bugprone-easily-swappable-parameters) */
+{
+	if (out == NULL || out_capacity == 0U) {
+		return;
+	}
+	uint32_t fill = out_capacity < V8M_MEDIUM_FIRST_CLASS
+			    ? out_capacity
+			    : V8M_MEDIUM_FIRST_CLASS;
+	for (uint32_t i = 0; i < fill; i++) {
+		out[i].pages_in_use = 0;
+		out[i].slots_total = 0;
+		out[i].slots_used = 0;
+	}
+	if (pool == NULL) {
+		return;
+	}
+	(void)pthread_mutex_lock(&pool->lock);
+	for (uint32_t i = 0; i < fill; i++) {
+		const struct v8m_slab_pool_class *cls = &pool->classes[i];
+		if (cls->current != NULL) {
+			out[i].pages_in_use++;
+			out[i].slots_total += cls->current->capacity;
+			out[i].slots_used += atomic_load_explicit(
+			    &cls->current->used_count, memory_order_relaxed);
+		}
+		for (const struct v8m_page_meta *page = cls->partials;
+		     page != NULL; page = page->next) {
+			out[i].pages_in_use++;
+			out[i].slots_total += page->capacity;
+			out[i].slots_used += atomic_load_explicit(
+			    &page->used_count, memory_order_relaxed);
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
+}
+
 size_t v8m_slab_pool_sweep_idle(struct v8m_slab_pool *pool,
 				uint32_t max_idle_ticks)
 {
