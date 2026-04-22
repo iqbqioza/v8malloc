@@ -352,6 +352,45 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 	return ptr;
 }
 
+/* Double-free detection ring buffer (api.md §6.2). Off the hot
+ * path entirely when V8M_OPT_DEBUG is 0 — the ring touch is gated
+ * behind the config check. When DEBUG is on, every free consults
+ * the ring; if the pointer is already there, abort with a
+ * diagnostic. The ring is small (4096 entries = 32 KiB) and the
+ * overwrite policy is round-robin: a sustained free rate above
+ * 4096 ops between detections will miss the duplicate. That's the
+ * tradeoff for not paying per-pointer hash-table cost. The full
+ * call-site-aware leak detector lands later. */
+#define V8M_DOUBLE_FREE_RING_SIZE 4096
+static void *g_double_free_ring[V8M_DOUBLE_FREE_RING_SIZE];
+static atomic_size_t g_double_free_ring_idx;
+/* NOLINTNEXTLINE(misc-include-cleaner) — pthread.h is included above */
+static pthread_mutex_t g_double_free_ring_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void abort_on_double_free(const void *ptr)
+{
+	(void)fprintf(stderr, "v8malloc DEBUG: double-free detected at %p\n",
+		      ptr);
+	abort();
+}
+
+static void debug_check_double_free(void *ptr)
+{
+	(void)pthread_mutex_lock(&g_double_free_ring_lock);
+	for (size_t i = 0; i < V8M_DOUBLE_FREE_RING_SIZE; i++) {
+		if (g_double_free_ring[i] == ptr) {
+			(void)pthread_mutex_unlock(&g_double_free_ring_lock);
+			abort_on_double_free(ptr);
+			return; /* unreachable */
+		}
+	}
+	size_t slot = atomic_fetch_add_explicit(&g_double_free_ring_idx, 1U,
+						memory_order_relaxed) %
+		      V8M_DOUBLE_FREE_RING_SIZE;
+	g_double_free_ring[slot] = ptr;
+	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
+}
+
 V8M_EXPORT void v8m_free(void *ptr)
 {
 	if (ptr == NULL) {
@@ -372,6 +411,9 @@ V8M_EXPORT void v8m_free(void *ptr)
 	}
 	if (!dispatch_ready()) {
 		return;
+	}
+	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
+		debug_check_double_free(ptr);
 	}
 	v8m_dispatch_free(&g_dispatch, ptr);
 }

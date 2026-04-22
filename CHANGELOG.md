@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `V8M_DEBUG` double-free detection (`src/v8m_api.c`,
+  api.md §6.2). `v8m_free` consults a 4096-entry ring of
+  recently-freed pointers when `V8M_OPT_DEBUG != 0`; a hit
+  aborts with `v8malloc DEBUG: double-free detected at <ptr>`
+  before the underlying free runs (so the second slab/buddy
+  free can never corrupt internal state). Off the hot path
+  entirely when DEBUG is 0 — the ring touch is gated behind
+  the config check, so production builds pay nothing. Ring
+  size of 4096 is the tradeoff for not paying per-pointer
+  hash-table cost; sustained free rates above 4096 ops
+  between a duplicate could miss the detection. New
+  `tests/test_double_free.c` coverage: a fork()'d child
+  intentionally double-frees and the parent verifies the
+  child died with SIGABRT, asserting the abort fires
+  end-to-end.
+
 - `V8M_DEBUG` leak-summary on exit (`src/v8m_api.c`,
   api.md §6.2). When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`),
   the destructor reads `v8m_collect_live_stats` and emits a
