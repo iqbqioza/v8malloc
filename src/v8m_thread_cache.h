@@ -53,6 +53,23 @@
 #define V8M_TLC_GC_INTERVAL 1024U
 
 /*
+ * Predictive prefetch table size (winning-algorithms.md §9). The
+ * cache stores one byte per slot — the most recently observed
+ * size class for the call site that hashes there. Power of two so
+ * the hash → index step is a single AND. 1024 entries fits in 16
+ * cache lines (64 B-aligned) on every supported arch, comfortably
+ * inside L1.
+ */
+#define V8M_PREDICT_TABLE_SIZE 1024U
+
+/*
+ * Sentinel for "no prediction yet" in the table. Stored as the
+ * full uint8_t so a memset(0xFF) at cache create time initializes
+ * every slot to "unknown" without iterating.
+ */
+#define V8M_PREDICT_NONE 0xFFU
+
+/*
  * Forward decl — the slab-class fast path needs to flush back to
  * the slab pool on overflow / module shutdown, but the cache header
  * does not pull v8m_slab_pool.h in. The .c file's include set
@@ -141,6 +158,19 @@ struct v8m_thread_cache {
 	 * having to inspect the per-class EMA directly.
 	 */
 	uint32_t gc_generation;
+	/*
+	 * Predictive prefetch table (winning-algorithms.md §9).
+	 * Indexed by `(caller_pc >> 4) & (V8M_PREDICT_TABLE_SIZE - 1)`,
+	 * stores the most recently observed size class for that call
+	 * site. Updated on each public-API alloc; consulted to issue
+	 * a `__builtin_prefetch` against the predicted bin head so
+	 * the next pop incurs fewer L1 misses. Initialized to
+	 * V8M_PREDICT_NONE on cache create — the prefetch helper
+	 * skips entries it has not yet learned, so the table earns
+	 * its keep only after the first round of allocations from
+	 * each call site.
+	 */
+	uint8_t predict_table[V8M_PREDICT_TABLE_SIZE];
 };
 
 /*
@@ -280,6 +310,31 @@ size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache);
  * pulling the slab-pool pointer through this header.
  */
 void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache);
+
+/*
+ * Issue a `__builtin_prefetch` for the bin head matching the
+ * predicted class for `caller_pc`. No-op when the predict slot
+ * is V8M_PREDICT_NONE (no prior observation) or when the cache
+ * is NULL. Cheap — one table lookup + one prefetch hint; safe to
+ * call on any thread, no locks taken.
+ *
+ * Pair with v8m_thread_cache_predict_update after the actual
+ * allocation: the update records the class the predict was
+ * supposed to forecast.
+ */
+void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
+				       const void *caller_pc);
+
+/*
+ * Record `cls` as the size class observed for `caller_pc`. Hash
+ * uses the same formula as predict_prefetch so the next call
+ * from the same site sees the recorded class. `cls` ≥
+ * V8M_NUM_SIZE_CLASSES is treated as "do not record" — the
+ * Large/Huge sentinel and any out-of-range value bypasses the
+ * write, leaving the prior prediction intact.
+ */
+void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
+				     const void *caller_pc, uint32_t cls);
 
 /*
  * Hook invoked by the pthread_key destructor to drain a cache's

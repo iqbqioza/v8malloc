@@ -434,6 +434,78 @@ static int check_gc_countdown_fires(void)
 	return 0;
 }
 
+/*
+ * Predictive prefetch table state — the hash + lookup + update
+ * paths. The prefetch helper itself only issues a hint, so we
+ * cannot directly observe its effect; this test asserts the
+ * surrounding bookkeeping (the lookup is consistent for the same
+ * PC; updates land at the indexed slot; out-of-range classes are
+ * rejected).
+ */
+static int check_predict_table_round_trip(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	/* Two synthetic call-site PCs whose mid bits land in
+	 * different 1024-entry table slots (the index uses
+	 * (pc >> 4) & (size - 1) — pick values whose low 14 bits
+	 * differ in the [4..14) range so the hash diverges). */
+	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+	const void *pc_a = (const void *)(uintptr_t)0xCAFE0100U;
+	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+	const void *pc_b = (const void *)(uintptr_t)0xBEEF0200U;
+	uintptr_t idx_a =
+	    ((uintptr_t)pc_a >> 4) & (V8M_PREDICT_TABLE_SIZE - 1U);
+	uintptr_t idx_b =
+	    ((uintptr_t)pc_b >> 4) & (V8M_PREDICT_TABLE_SIZE - 1U);
+	/* The constants make this comparison constant-foldable;
+	 * cppcheck rightly notes "always false". The check stays as
+	 * documentation that future tweaks to the synthetic PCs
+	 * cannot silently collapse the test into a no-op. */
+	/* cppcheck-suppress knownConditionTrueFalse */
+	if (idx_a == idx_b) {
+		return fail("synthetic PCs collided in the predict table");
+	}
+
+	/* Wipe the table so prior tests' updates don't leak in. */
+	for (size_t i = 0; i < V8M_PREDICT_TABLE_SIZE; i++) {
+		cache->predict_table[i] = V8M_PREDICT_NONE;
+	}
+
+	/* Update + read-back per PC. Use class 5 for A, class 12 for B. */
+	v8m_thread_cache_predict_update(cache, pc_a, 5U);
+	v8m_thread_cache_predict_update(cache, pc_b, 12U);
+	if (cache->predict_table[idx_a] != 5U) {
+		return fail("predict_update did not record class for PC A");
+	}
+	if (cache->predict_table[idx_b] != 12U) {
+		return fail("predict_update did not record class for PC B");
+	}
+
+	/* Out-of-range class is rejected; prior value stays. */
+	v8m_thread_cache_predict_update(cache, pc_a, V8M_MEDIUM_FIRST_CLASS);
+	if (cache->predict_table[idx_a] != 5U) {
+		return fail("out-of-range class clobbered the slot");
+	}
+	v8m_thread_cache_predict_update(cache, pc_a, 99U); /* well past end */
+	if (cache->predict_table[idx_a] != 5U) {
+		return fail("99 clobbered the slot");
+	}
+
+	/* Prefetch is a hint — call it on both known and unknown PCs
+	 * just to make sure neither path crashes. There is no
+	 * observable post-state. */
+	v8m_thread_cache_predict_prefetch(cache, pc_a);
+	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+	const void *unknown_pc = (const void *)(uintptr_t)0xBADD00DBU;
+	v8m_thread_cache_predict_prefetch(cache, unknown_pc);
+	v8m_thread_cache_predict_prefetch(NULL, pc_a); /* null cache */
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -445,6 +517,7 @@ int main(void)
 	result |= check_drain_remote_routes_to_bin();
 	result |= check_adaptive_capacity_grows_with_demand();
 	result |= check_gc_countdown_fires();
+	result |= check_predict_table_round_trip();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

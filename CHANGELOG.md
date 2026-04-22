@@ -7,6 +7,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Predictive prefetch table for the TLC
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_api.c`,
+  winning-algorithms.md §9 / TODO P2 "Predictive prefetch
+  table" row). Each thread cache now carries a
+  `uint8_t predict_table[V8M_PREDICT_TABLE_SIZE = 1024]`
+  storing the most recently observed size class for the
+  call site that hashes to each slot. `v8m_malloc` captures
+  the caller's PC via `__builtin_return_address(0)` and
+  drives two new helpers:
+  `v8m_thread_cache_predict_prefetch` issues a
+  `__builtin_prefetch` for the bin head matching the
+  predicted class before the dispatch alloc;
+  `v8m_thread_cache_predict_update` records the actual
+  served class after. Hash is `(pc >> 4) & (size - 1)` —
+  drops instruction-alignment noise, single-AND mask. Hot
+  paths that allocate the same class repeatedly from the
+  same call site (the common pattern: a constructor or
+  factory function in a loop) get the bin head warm in L1
+  before the pop reads it. The slot defaults to
+  V8M_PREDICT_NONE (0xFF) on cache create, so the prefetch
+  helper skips entries it has not learned yet — no wasted
+  prefetches on first-touch traffic. Coverage in
+  `tests/test_thread_cache.c::check_predict_table_round_trip`
+  asserts the lookup/update bookkeeping (consistent
+  hashing, out-of-range classes rejected, NULL-cache and
+  unknown-PC paths safe). The prefetch hint itself has no
+  observable post-state, so its effect surfaces only in
+  benchmark runs.
+
 - Adaptive bin-capacity controller for the TLC
   (`src/v8m_thread_cache.{h,c}`, thread-cache.md §5.2 / TODO
   P1 "Adaptive bin capacity" row). The cache now tracks

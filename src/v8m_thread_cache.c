@@ -159,6 +159,10 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 		cache->bin_capacity[i] = V8M_BIN_CAPACITY_DEFAULT;
 	}
 	cache->gc_countdown = V8M_TLC_GC_INTERVAL;
+	/* Predict table: every slot starts unknown so the prefetch
+	 * helper skips them until the first observation lands. */
+	(void)memset(cache->predict_table, V8M_PREDICT_NONE,
+		     sizeof(cache->predict_table));
 
 	t_cache = cache;
 	if (atomic_load_explicit(&g_key_initialized, memory_order_acquire)) {
@@ -222,6 +226,50 @@ bool v8m_thread_cache_free(struct v8m_thread_cache *cache, uint32_t cls,
 	cache->free_count_per_class[cls]++;
 	tlc_tick_gc(cache);
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
+}
+
+/*
+ * Index a caller PC into the predict table. Drop the low 4 bits
+ * (instruction-alignment noise on every supported arch) and
+ * mask down to the table size. The table size is a power of two
+ * so the mask collapses to a single AND.
+ */
+static inline size_t predict_index(const void *caller_pc)
+{
+	uintptr_t pc_bits = (uintptr_t)caller_pc;
+	return (size_t)((pc_bits >> 4U) & (V8M_PREDICT_TABLE_SIZE - 1U));
+}
+
+void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
+				       const void *caller_pc)
+{
+	if (cache == NULL) {
+		return;
+	}
+	size_t idx = predict_index(caller_pc);
+	uint8_t predicted = cache->predict_table[idx];
+	if (predicted >= V8M_MEDIUM_FIRST_CLASS) {
+		/* No observation yet (V8M_PREDICT_NONE) or a class the
+		 * TLC does not cache (Medium / Large / Huge). Skip the
+		 * prefetch — there is no bin head to warm. */
+		return;
+	}
+	/* `&cache->bin_heads[predicted]` is naturally `void **`; the
+	 * cast to `const void *` keeps clang-tidy's
+	 * multi-level-pointer rule happy without changing the
+	 * generated prefetch (it remains a hint at the same
+	 * address). */
+	__builtin_prefetch((const void *)&cache->bin_heads[predicted], 0, 3);
+}
+
+void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
+				     const void *caller_pc, uint32_t cls)
+{
+	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+		return;
+	}
+	size_t idx = predict_index(caller_pc);
+	cache->predict_table[idx] = (uint8_t)cls;
 }
 
 void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)

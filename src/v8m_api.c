@@ -419,12 +419,34 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 			return NULL;
 		}
 	}
+	/* Predictive prefetch (winning-algorithms.md §9): hash the
+	 * caller PC, look up the most recently observed class for
+	 * that call site, prefetch the matching bin head into L1.
+	 * Cheap (one indexed byte read + one prefetch hint) and
+	 * harmless when the table has not learned this call site
+	 * yet. v8m_thread_cache_peek avoids creating a cache just
+	 * for the prefetch — the dispatcher's own cache_get will
+	 * create one if needed for the actual alloc. */
+	const void *caller_pc = __builtin_return_address(0);
+	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		v8m_thread_cache_predict_prefetch(cache, caller_pc);
+	}
 	void *ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	if (ptr == NULL && oom_handler_says_retry(size)) {
 		ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	}
 	if (ptr == NULL) {
 		errno = ENOMEM;
+		return ptr;
+	}
+	/* Update the predict slot with the class we actually served.
+	 * Re-peek the cache because the dispatcher may have just
+	 * created one if this was the thread's first allocation. */
+	cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		v8m_thread_cache_predict_update(cache, caller_pc,
+						v8m_size_class(size));
 	}
 	return ptr;
 }
