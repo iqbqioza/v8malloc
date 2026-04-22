@@ -140,6 +140,7 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 	}
 
 	uint32_t cls = v8m_size_class(size);
+	v8m_thread_cache_record_alloc(cls, size);
 	if (cls < V8M_MEDIUM_FIRST_CLASS) {
 		/* TLC fast path: per-thread bin pop. Only enabled on
 		 * dispatchers that opted in (`use_tlc` true) — the
@@ -189,6 +190,12 @@ void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 	if (alignment <= V8M_MALLOC_NATURAL_ALIGN) {
 		return v8m_dispatch_alloc(dispatch, size);
 	}
+	/* Record the user's raw `size` (not the alignment-bumped
+	 * effective size) so the histogram reflects request intent. The
+	 * delegating branch above already routed through
+	 * v8m_dispatch_alloc, which records on its own; everything past
+	 * this point bypasses that path and needs the explicit call. */
+	v8m_thread_cache_record_alloc(v8m_size_class(size), size);
 	/* Hard cap: alignments above V8M_BUDDY_MAX_BLOCK have no in-v0
 	 * backend that can satisfy them — the slab data offset tops out
 	 * at V8M_SLAB_HEADER_SIZE, the buddy arena at

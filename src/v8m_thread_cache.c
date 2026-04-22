@@ -94,6 +94,92 @@ static _Atomic uint64_t g_destructor_calls;
  * pool before freeing the cache struct. */
 static atomic_uintptr_t g_drain_hook;
 
+/* Mirror the public histogram class count to the internal size-class
+ * count. Bumping V8M_NUM_SIZE_CLASSES without bumping the public
+ * mirror would silently truncate one direction of the snapshot. */
+_Static_assert(V8M_NUM_SIZE_CLASSES == V8M_PUBLIC_NUM_SIZE_CLASSES,
+	       "public histogram class count must match internal class count");
+
+/*
+ * Cache registry — singly-linked list of every live TLC. The
+ * histogram aggregator walks this under g_registry_lock; cache
+ * create / destroy mutates it under the same lock. The lock is
+ * never held during malloc/free fast-path work, so the alloc path
+ * never blocks on a concurrent aggregator.
+ */
+/* NOLINTNEXTLINE(misc-include-cleaner) — pthread.h is included */
+static pthread_mutex_t g_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct v8m_thread_cache *g_registry_head;
+
+/*
+ * Global histogram counters — cover allocations that bypassed TLC
+ * (bootstrap, signal-safe) and accumulate the carry-over from caches
+ * that have already exited (the destructor folds the cache's per-class
+ * counts in here before freeing it). Atomic so the rare cross-thread
+ * touches stay race-free; the per-TLC counters are plain uint64_t
+ * because only the owning thread writes them.
+ */
+static _Atomic uint64_t g_global_request_count[V8M_NUM_SIZE_CLASSES];
+static _Atomic uint64_t g_global_request_bytes[V8M_NUM_SIZE_CLASSES];
+static _Atomic uint64_t g_global_huge_request_count;
+static _Atomic uint64_t g_global_huge_request_bytes;
+/*
+ * Sample tick for the no-TLC fallback path. Bumped on every
+ * histogram-record call that didn't find a per-thread cache; when a
+ * tick crosses the sample-rate boundary we add to the global
+ * counters. Atomic to keep the cross-thread sampling cadence
+ * well-defined despite the path being rare (bootstrap + signal-safe).
+ */
+static _Atomic uint64_t g_global_histogram_tick;
+
+/*
+ * Unlink `cache` from the registry list and fold its accumulated
+ * histogram counters into the global carry-over. Called from the
+ * destructor + module-shutdown paths so the snapshot does not lose
+ * counts when a TLC goes away. Acquires the registry lock briefly;
+ * histogram recording on other threads stays unaffected because
+ * those bump their own per-cache counters without touching the lock.
+ */
+static void registry_unregister_and_fold(struct v8m_thread_cache *cache)
+{
+	if (cache == NULL) {
+		return;
+	}
+	(void)pthread_mutex_lock(&g_registry_lock);
+	struct v8m_thread_cache **link = &g_registry_head;
+	while (*link != NULL && *link != cache) {
+		link = &(*link)->registry_next;
+	}
+	if (*link == cache) {
+		*link = cache->registry_next;
+		cache->registry_next = NULL;
+	}
+	(void)pthread_mutex_unlock(&g_registry_lock);
+
+	for (uint32_t cls = 0; cls < V8M_NUM_SIZE_CLASSES; cls++) {
+		if (cache->request_count[cls] != 0U) {
+			atomic_fetch_add_explicit(&g_global_request_count[cls],
+						  cache->request_count[cls],
+						  memory_order_relaxed);
+		}
+		if (cache->request_bytes[cls] != 0U) {
+			atomic_fetch_add_explicit(&g_global_request_bytes[cls],
+						  cache->request_bytes[cls],
+						  memory_order_relaxed);
+		}
+	}
+	if (cache->huge_request_count != 0U) {
+		atomic_fetch_add_explicit(&g_global_huge_request_count,
+					  cache->huge_request_count,
+					  memory_order_relaxed);
+	}
+	if (cache->huge_request_bytes != 0U) {
+		atomic_fetch_add_explicit(&g_global_huge_request_bytes,
+					  cache->huge_request_bytes,
+					  memory_order_relaxed);
+	}
+}
+
 static void destroy_cache(void *arg)
 {
 	struct v8m_thread_cache *cache = arg;
@@ -114,6 +200,7 @@ static void destroy_cache(void *arg)
 		hook = (v8m_thread_cache_drain_hook)hook_raw;
 		hook(cache);
 	}
+	registry_unregister_and_fold(cache);
 	/* Latch the bypass flag BEFORE the free — the free routes
 	 * through the dispatcher's TLC fast path and would otherwise
 	 * lazily install a fresh cache, which the pthread runtime
@@ -195,6 +282,13 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 		 * allocator stays usable. */
 		(void)pthread_setspecific(g_destructor_key, cache);
 	}
+	/* Register on the histogram-aggregation list. Holding the lock
+	 * across only the link-update keeps the critical section short;
+	 * no allocations happen while it is held. */
+	(void)pthread_mutex_lock(&g_registry_lock);
+	cache->registry_next = g_registry_head;
+	g_registry_head = cache;
+	(void)pthread_mutex_unlock(&g_registry_lock);
 	return cache;
 }
 
@@ -561,6 +655,7 @@ void v8m_thread_cache_module_shutdown(void)
 	struct v8m_thread_cache *cache = t_cache;
 	t_cache = NULL;
 	if (cache != NULL) {
+		registry_unregister_and_fold(cache);
 		free(cache);
 	}
 	(void)pthread_key_delete(g_destructor_key);
@@ -570,4 +665,80 @@ void v8m_thread_cache_module_shutdown(void)
 uint64_t v8m_thread_cache_destructor_calls(void)
 {
 	return atomic_load_explicit(&g_destructor_calls, memory_order_relaxed);
+}
+
+void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
+{
+	struct v8m_thread_cache *cache = t_cache;
+	if (cache != NULL && cache->initialized != 0U) {
+		/* Sample-rate cadence: only every Nth observation lands.
+		 * Increment unconditionally so the cadence holds; the
+		 * AND mask collapses the predicate to a single branch on
+		 * the histogram's hot exit. */
+		cache->histogram_tick++;
+		if ((cache->histogram_tick &
+		     (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U) {
+			return;
+		}
+		if (cls < V8M_NUM_SIZE_CLASSES) {
+			cache->request_count[cls]++;
+			cache->request_bytes[cls] += (uint64_t)request_size;
+		} else {
+			cache->huge_request_count++;
+			cache->huge_request_bytes += (uint64_t)request_size;
+		}
+		return;
+	}
+	/* No TLC available: fall back to the global counters. The path
+	 * is rare (bootstrap chain + signal-safe), so the relaxed
+	 * atomic adds do not show up on profiles. */
+	uint64_t tick = atomic_fetch_add_explicit(&g_global_histogram_tick, 1U,
+						  memory_order_relaxed) +
+			1U;
+	if ((tick & (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U) {
+		return;
+	}
+	if (cls < V8M_NUM_SIZE_CLASSES) {
+		atomic_fetch_add_explicit(&g_global_request_count[cls], 1U,
+					  memory_order_relaxed);
+		atomic_fetch_add_explicit(&g_global_request_bytes[cls],
+					  (uint64_t)request_size,
+					  memory_order_relaxed);
+	} else {
+		atomic_fetch_add_explicit(&g_global_huge_request_count, 1U,
+					  memory_order_relaxed);
+		atomic_fetch_add_explicit(&g_global_huge_request_bytes,
+					  (uint64_t)request_size,
+					  memory_order_relaxed);
+	}
+}
+
+void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0, sizeof(*out));
+	for (uint32_t cls = 0; cls < V8M_NUM_SIZE_CLASSES; cls++) {
+		out->request_count[cls] = atomic_load_explicit(
+		    &g_global_request_count[cls], memory_order_relaxed);
+		out->request_bytes[cls] = atomic_load_explicit(
+		    &g_global_request_bytes[cls], memory_order_relaxed);
+	}
+	out->huge_request_count = atomic_load_explicit(
+	    &g_global_huge_request_count, memory_order_relaxed);
+	out->huge_request_bytes = atomic_load_explicit(
+	    &g_global_huge_request_bytes, memory_order_relaxed);
+
+	(void)pthread_mutex_lock(&g_registry_lock);
+	for (struct v8m_thread_cache *cache = g_registry_head; cache != NULL;
+	     cache = cache->registry_next) {
+		for (uint32_t cls = 0; cls < V8M_NUM_SIZE_CLASSES; cls++) {
+			out->request_count[cls] += cache->request_count[cls];
+			out->request_bytes[cls] += cache->request_bytes[cls];
+		}
+		out->huge_request_count += cache->huge_request_count;
+		out->huge_request_bytes += cache->huge_request_bytes;
+	}
+	(void)pthread_mutex_unlock(&g_registry_lock);
 }

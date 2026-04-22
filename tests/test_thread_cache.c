@@ -563,6 +563,74 @@ static int check_numa_migration_records_node(void)
 	return 0;
 }
 
+/*
+ * size-class histogram (size-classes.md §9). Sample-rate is 64 today;
+ * issue enough allocations to make the sampled bucket counts move
+ * deterministically and confirm the snapshot reflects them.
+ */
+static int check_size_class_histogram(void)
+{
+	enum { ALLOC_BURST = 4096 };
+
+	struct v8m_size_class_histogram before = {0};
+	v8m_get_size_class_histogram(&before);
+
+	void *ptrs[ALLOC_BURST];
+	for (int i = 0; i < ALLOC_BURST; i++) {
+		ptrs[i] = malloc(8); /* class 0 (8B) */
+	}
+
+	struct v8m_size_class_histogram after = {0};
+	v8m_get_size_class_histogram(&after);
+
+	for (int i = 0; i < ALLOC_BURST; i++) {
+		free(ptrs[i]);
+	}
+
+	uint64_t cls0_delta = after.request_count[0] - before.request_count[0];
+	if (cls0_delta == 0U) {
+		return fail("class 0 histogram count did not advance after "
+			    "4096 8-byte allocations");
+	}
+	uint64_t cls0_bytes_delta =
+	    after.request_bytes[0] - before.request_bytes[0];
+	if (cls0_bytes_delta == 0U) {
+		return fail("class 0 histogram byte total did not advance");
+	}
+	/* Sampled count * sample rate ≈ true count. With 4096 mallocs
+	 * at rate 64 we expect ≈ 64 samples; allow a wide window for
+	 * the cadence offset against other tests' allocations. */
+	if (cls0_delta * (uint64_t)V8M_HISTOGRAM_SAMPLE_RATE >
+	    (uint64_t)ALLOC_BURST * 4U) {
+		return fail("sampled class 0 count overshoots true count by "
+			    "more than 4× — sample rate broken");
+	}
+
+	/* Huge bucket: a single allocation above V8M_LARGE_MAX_SIZE
+	 * (2 MiB) routes into the huge overflow pair. The sampling
+	 * cadence may swallow a single hit, so issue enough to
+	 * guarantee at least one sample lands. */
+	struct v8m_size_class_histogram huge_before = {0};
+	v8m_get_size_class_histogram(&huge_before);
+	enum { HUGE_BURST = 128 };
+	void *huge_ptrs[HUGE_BURST];
+	for (int i = 0; i < HUGE_BURST; i++) {
+		huge_ptrs[i] =
+		    malloc((size_t)3U * 1024U * 1024U); /* 3 MiB Huge */
+	}
+	struct v8m_size_class_histogram huge_after = {0};
+	v8m_get_size_class_histogram(&huge_after);
+	for (int i = 0; i < HUGE_BURST; i++) {
+		free(huge_ptrs[i]);
+	}
+	if (huge_after.huge_request_count <= huge_before.huge_request_count) {
+		return fail("huge histogram count did not advance after 128 "
+			    "3 MiB allocations");
+	}
+
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -576,6 +644,7 @@ int main(void)
 	result |= check_gc_countdown_fires();
 	result |= check_predict_table_round_trip();
 	result |= check_numa_migration_records_node();
+	result |= check_size_class_histogram();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

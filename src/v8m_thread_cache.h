@@ -31,6 +31,7 @@
 #include "v8m_arch.h" /* V8M_CACHELINE_ALIGNED for false-sharing isolation */
 #include "v8m_remote_free.h" /* v8m_mpsc_queue */
 #include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
+#include "v8malloc/v8malloc.h" /* V8M_OPT_*, struct v8m_size_class_histogram */
 
 /*
  * Per-class bin-capacity bounds (thread-cache.md §5.2). The cache
@@ -69,6 +70,20 @@
  * every slot to "unknown" without iterating.
  */
 #define V8M_PREDICT_NONE 0xFFU
+
+/*
+ * Size-class histogram sample rate (size-classes.md §9). Every
+ * V8M_HISTOGRAM_SAMPLE_RATE-th allocation observed by the dispatcher
+ * is recorded into the per-class histogram; 1024 / 1024 = full
+ * recording would cost two 8-byte writes per malloc fast path, so
+ * the spec calls for sampling. Power of two so the modulo collapses
+ * to a single AND on the cadence check.
+ *
+ * Sampled count → true count: multiply by V8M_HISTOGRAM_SAMPLE_RATE.
+ * Sampled bytes → true bytes: same factor. The estimator is
+ * unbiased in the limit of many allocations.
+ */
+#define V8M_HISTOGRAM_SAMPLE_RATE 64U
 
 /*
  * Forward decl — the slab-class fast path needs to flush back to
@@ -206,6 +221,35 @@ struct v8m_thread_cache {
 	 * each call site.
 	 */
 	uint8_t predict_table[V8M_PREDICT_TABLE_SIZE];
+	/*
+	 * Size-class request histogram (size-classes.md §9). Every
+	 * V8M_HISTOGRAM_SAMPLE_RATE-th allocation through the
+	 * dispatcher bumps the bucket matching its size class with the
+	 * raw user-requested byte count. Owning thread is the sole
+	 * writer (no atomics needed); the aggregation reader walks
+	 * the cache registry under g_registry_lock and accepts
+	 * statistically-stale reads. Non-class (Huge) requests land
+	 * in the `huge_request_*` overflow pair below.
+	 */
+	uint64_t request_count[V8M_NUM_SIZE_CLASSES];
+	uint64_t request_bytes[V8M_NUM_SIZE_CLASSES];
+	uint64_t huge_request_count;
+	uint64_t huge_request_bytes;
+	/*
+	 * Sample-rate counter — incremented on every alloc observed
+	 * by the dispatcher; one-in-V8M_HISTOGRAM_SAMPLE_RATE pulses
+	 * trigger a histogram bucket bump. Power-of-two rate folds
+	 * the predicate to a single AND.
+	 */
+	uint64_t histogram_tick;
+	/*
+	 * Registry list link (size-class histogram aggregation).
+	 * Manipulated only at cache create / destroy under
+	 * g_registry_lock; the aggregation walk reads it under the
+	 * same lock. Plain pointer (not atomic) because every
+	 * touch is lock-protected.
+	 */
+	struct v8m_thread_cache *registry_next;
 };
 
 /*
@@ -411,5 +455,28 @@ void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
  */
 typedef void (*v8m_thread_cache_drain_hook)(struct v8m_thread_cache *);
 void v8m_thread_cache_set_drain_hook(v8m_thread_cache_drain_hook hook);
+
+/*
+ * Sample one allocation request into the size-class histogram. Cheap
+ * fast-path entry: looks up the calling thread's TLC via the read-only
+ * peek (no lazy create — the caller may itself be in the middle of
+ * creating one), advances the per-cache sample tick, and records the
+ * sampled allocation into the matching class bucket. Allocations made
+ * before the calling thread has a TLC (bootstrap chain, signal-safe)
+ * route into the global fallback bucket.
+ *
+ * `cls` ≥ V8M_NUM_SIZE_CLASSES (i.e. V8M_CLASS_HUGE) routes to the
+ * huge overflow pair instead.
+ */
+void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size);
+
+/*
+ * Snapshot the aggregated histogram across every live cache plus the
+ * global carry-over (fallback path + cache-destroy fold-in) into
+ * `*out`. Tolerates NULL. Holds the registry lock briefly during the
+ * walk; allocations on other threads continue uninterrupted but their
+ * snapshot value may be stale by one increment.
+ */
+void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out);
 
 #endif /* V8M_THREAD_CACHE_H */

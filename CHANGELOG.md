@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Size-class request histogram + public snapshot API
+  (`v8m_get_size_class_histogram`, TODO P2 row 153 —
+  size-classes.md §9 "workload-adaptive size classes").
+  Foundation for the dynamic size-class adjustment row:
+  every dispatcher allocation is sampled
+  (1-in-`V8M_HISTOGRAM_SAMPLE_RATE` = 64 today) and the
+  raw user-requested size lands in the bucket matching
+  the routed class. `request_bytes[cls]` tracks the sum
+  of raw requests so internal-frag per bucket is
+  `request_count[cls] * v8m_class_to_size[cls] -
+  request_bytes[cls]` — what the future hot-reload step
+  of §9 will consume to decide whether a new sub-class
+  would shrink the dominant waste bucket. Per-TLC
+  counters with no atomics on the hot path; a global
+  carry-over absorbs the bootstrap / signal-safe
+  fallback path and the per-cache fold-in at thread
+  exit so the snapshot does not lose history.
+  Aggregation walks a registry list under a brief mutex;
+  allocating threads are unaffected. Public struct
+  `struct v8m_size_class_histogram` carries 41 class
+  buckets plus a `huge_request_*` overflow pair.
+  Coverage in
+  `tests/test_thread_cache.c::check_size_class_histogram`.
 - End-to-end MPSC remote-free drain coverage
   (`tests/test_remote_free.c::check_alloc_remote_realloc`,
   TODO [Test] row 171). The existing

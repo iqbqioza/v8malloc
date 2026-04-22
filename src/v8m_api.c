@@ -799,6 +799,19 @@ V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out)
 	out->bin_overflow_flushes = 0;
 }
 
+V8M_EXPORT void
+v8m_get_size_class_histogram(struct v8m_size_class_histogram *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	if (!dispatch_ready()) {
+		(void)memset(out, 0, sizeof(*out));
+		return;
+	}
+	v8m_thread_cache_aggregate_histogram(out);
+}
+
 V8M_EXPORT uint64_t v8m_count_vmas(void)
 {
 	/* Open /proc/self/maps with raw read() to avoid an alloc on

@@ -240,6 +240,58 @@ struct v8m_thread_stats {
 V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out);
 
 /*
+ * Number of size classes the histogram below indexes. Mirrors the
+ * internal V8M_NUM_SIZE_CLASSES; the matching `_Static_assert` in
+ * v8m_thread_cache.c keeps the two in lock-step. Bumping this is a
+ * binary-compat break for `struct v8m_size_class_histogram`.
+ */
+#define V8M_PUBLIC_NUM_SIZE_CLASSES 41
+
+/*
+ * Per-class allocation request histogram (size-classes.md §9 —
+ * "workload-adaptive size classes"). Foundation for the dynamic
+ * size-class adjustment row: every public alloc is sampled
+ * (1-in-V8M_HISTOGRAM_SAMPLE_RATE — 64 today) and the sample's raw
+ * user-requested size is added to its class bucket. The histogram
+ * is therefore an unbiased estimator of the true distribution at
+ * 1/N the recording cost — multiply each `request_count[cls]` by
+ * the sample rate for the implied true count.
+ *
+ * Index `cls` corresponds to the `v8m_class_to_size[cls]` mapping
+ * (Tiny: 0..7, Small: 8..31, Medium: 32..37, Large: 38..40).
+ * Requests above V8M_LARGE_MAX_SIZE (2 MiB) accumulate in the
+ * `huge_request_*` overflow pair instead — they bypass the size
+ * class table and route through the direct mmap path.
+ *
+ * `request_bytes[cls]` carries the sum of raw user-requested sizes
+ * (NOT the rounded class size); the per-bucket internal-frag rate
+ * is therefore `(request_count[cls] * v8m_class_to_size[cls]) -
+ * request_bytes[cls]`. This is what the future hot-reload step of
+ * §9 will consume to decide whether a new sub-class would shrink
+ * the dominant waste bucket.
+ *
+ * Snapshot semantics: aggregated across every live thread cache plus
+ * a process-wide carry-over for caches that have already exited and
+ * for the rare bootstrap / signal-safe paths that bypassed TLC. A
+ * concurrent allocation may bump a per-cache counter mid-aggregation;
+ * the snapshot is statistically accurate but not strictly
+ * point-in-time.
+ */
+struct v8m_size_class_histogram {
+	uint64_t request_count[V8M_PUBLIC_NUM_SIZE_CLASSES];
+	uint64_t request_bytes[V8M_PUBLIC_NUM_SIZE_CLASSES];
+	uint64_t huge_request_count;
+	uint64_t huge_request_bytes;
+};
+
+/*
+ * Snapshot the size-class histogram into `*out`. Tolerates NULL.
+ * Pre-init returns all zeroes.
+ */
+V8M_EXPORT void
+v8m_get_size_class_histogram(struct v8m_size_class_histogram *out);
+
+/*
  * Fragmentation snapshot. Reports the page-heap-derived metrics plus
  * the aggregate slab utilization across every Tiny/Small class. The
  * slab counters cover pages currently held in the per-class
