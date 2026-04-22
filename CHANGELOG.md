@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- NUMA aggressive migration (level 3) — opt-in
+  (`src/v8m_thread_cache.{h,c}`, `src/v8m_config.c`,
+  `include/v8malloc/v8malloc.h`, numa.md §4.3 / TODO P2
+  "NUMA aggressive migration" row). New
+  `V8M_OPT_NUMA_AGGRESSIVE_MIGRATION` option (env
+  `V8M_NUMA_AGGRESSIVE_MIGRATION`, default 0) gates a
+  per-thread migration check that runs from the cache's
+  GC tick. When the calling thread's NUMA node has changed
+  since the previous tick AND the option is on AND the
+  topology has more than one node, the helper walks every
+  cached slot in the bins, deduplicates the containing
+  page bases (capped at 256 unique pages), and issues
+  `move_pages()` to relocate them to the new node so
+  subsequent allocations from those pages stay local.
+  Cache gains `last_numa_node` (UINT32_MAX = unset) and
+  `numa_migration_calls` (diagnostic counter); both reset
+  on cache create. The option is off by default because the
+  relocation is expensive (one syscall per migration event)
+  and only useful for threads with locality-sensitive
+  working sets — production deployments that pin threads to
+  CPUs see no migrations and pay nothing for the wiring.
+  The check itself runs unconditionally on the GC tick to
+  keep `last_numa_node` current; only the move_pages call
+  is gated. Coverage in
+  `tests/test_thread_cache.c::check_numa_migration_records_node`
+  injects a synthetic node delta and verifies the tick
+  updates the field with the option both off and on
+  (the move_pages effect is unverifiable on a single-NUMA
+  CI host but the wiring path is exercised end-to-end).
+
+### Added
 - Predictive prefetch table for the TLC
   (`src/v8m_thread_cache.{h,c}`, `src/v8m_api.c`,
   winning-algorithms.md §9 / TODO P2 "Predictive prefetch

@@ -159,6 +159,26 @@ struct v8m_thread_cache {
 	 */
 	uint32_t gc_generation;
 	/*
+	 * Last NUMA node observed for the calling thread. Used by
+	 * the aggressive-migration path (numa.md §4.3, gated on
+	 * V8M_OPT_NUMA_AGGRESSIVE_MIGRATION) to detect when the
+	 * thread has been rescheduled onto a different node and
+	 * relocate the cached slot pages via `move_pages()`.
+	 * Initialized to UINT32_MAX so the first GC tick sees a
+	 * delta and updates without firing migration on a fresh
+	 * cache (no slots to migrate yet).
+	 */
+	uint32_t last_numa_node;
+	/*
+	 * Cumulative count of move_pages() calls the
+	 * aggressive-migration path has issued from this cache.
+	 * Diagnostic; tests use it to confirm the wiring fires
+	 * without inspecting kernel state. Stays zero on hosts
+	 * where the option is off or where the topology has only
+	 * one node.
+	 */
+	uint64_t numa_migration_calls;
+	/*
 	 * Predictive prefetch table (winning-algorithms.md §9).
 	 * Indexed by `(caller_pc >> 4) & (V8M_PREDICT_TABLE_SIZE - 1)`,
 	 * stores the most recently observed size class for that call

@@ -20,10 +20,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/syscall.h> /* SYS_move_pages */
+#include <unistd.h> /* syscall */
+
+#include "v8m_config.h" /* v8m_config_get for the migration opt-in */
+#include "v8m_internal.h" /* V8M_PAGE_MASK */
+#include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_page.h" /* v8m_ptr_to_meta — meta recovery on flush */
 #include "v8m_remote_free.h" /* v8m_mpsc_init */
 #include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
 #include "v8m_slab_pool.h" /* v8m_slab_pool_free on overflow flush */
+#include "v8malloc/v8malloc.h" /* V8M_OPT_NUMA_AGGRESSIVE_MIGRATION */
 
 /*
  * Per-thread cache pointer. NULL until the thread first calls
@@ -163,6 +170,10 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 	 * helper skips them until the first observation lands. */
 	(void)memset(cache->predict_table, V8M_PREDICT_NONE,
 		     sizeof(cache->predict_table));
+	/* UINT32_MAX = "no node observed yet" — the first GC tick
+	 * after the cache populates will always update this without
+	 * firing migration (the cache has nothing to migrate yet). */
+	cache->last_numa_node = UINT32_MAX;
 
 	t_cache = cache;
 	if (atomic_load_explicit(&g_key_initialized, memory_order_acquire)) {
@@ -272,11 +283,82 @@ void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
 	cache->predict_table[idx] = (uint8_t)cls;
 }
 
+/*
+ * Aggressive NUMA migration (numa.md §4.3, gated on
+ * V8M_OPT_NUMA_AGGRESSIVE_MIGRATION). When the calling thread's
+ * NUMA node has changed since the last GC tick, walk every cached
+ * slot in the bins, collect each slot's containing page base into
+ * a small unique-set, and call `move_pages()` to relocate those
+ * pages to the new node. Skips on single-node hosts (nothing to
+ * relocate to) and silently ignores syscall failures (the
+ * relocation is a perf hint, not a correctness requirement).
+ *
+ * The unique-page array is sized at 256 — enough to cover a fully
+ * loaded TLC at typical capacities (worst case 256 slots/class ×
+ * 32 classes = 8192 slots, but each slab page holds many slots so
+ * the unique page count is far smaller). When the actual count
+ * exceeds the cap we migrate what we tracked and let the next
+ * tick handle the rest.
+ */
+#define V8M_TLC_MIGRATION_MAX_PAGES 256U
+
+static void check_numa_migration(struct v8m_thread_cache *cache)
+{
+	uint32_t current_node = v8m_numa_current_node();
+	uint32_t last_node = cache->last_numa_node;
+	cache->last_numa_node = current_node;
+
+	if (last_node == current_node || last_node == UINT32_MAX) {
+		return;
+	}
+	if (v8m_config_get(V8M_OPT_NUMA_AGGRESSIVE_MIGRATION) == 0) {
+		return;
+	}
+	if (v8m_numa_node_count() <= 1U) {
+		return;
+	}
+
+	void *pages[V8M_TLC_MIGRATION_MAX_PAGES];
+	int nodes[V8M_TLC_MIGRATION_MAX_PAGES];
+	size_t count = 0;
+	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS &&
+			       count < V8M_TLC_MIGRATION_MAX_PAGES;
+	     cls++) {
+		void *slot = cache->bin_heads[cls];
+		while (slot != NULL && count < V8M_TLC_MIGRATION_MAX_PAGES) {
+			void *page_base =
+			    /* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+			    (void *)((uintptr_t)slot & V8M_PAGE_MASK);
+			bool seen = false;
+			for (size_t i = 0; i < count; i++) {
+				if (pages[i] == page_base) {
+					seen = true;
+					break;
+				}
+			}
+			if (!seen) {
+				pages[count] = page_base;
+				nodes[count] = (int)current_node;
+				count++;
+			}
+			void *next = NULL;
+			(void)memcpy((void *)&next, slot, sizeof(next));
+			slot = next;
+		}
+	}
+	if (count == 0U) {
+		return;
+	}
+	(void)syscall(SYS_move_pages, 0, count, pages, nodes, NULL, 0);
+	cache->numa_migration_calls++;
+}
+
 void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)
 {
 	if (cache == NULL) {
 		return;
 	}
+	check_numa_migration(cache);
 	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS; cls++) {
 		uint16_t allocs = cache->alloc_count_per_class[cls];
 		uint16_t frees = cache->free_count_per_class[cls];

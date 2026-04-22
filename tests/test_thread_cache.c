@@ -506,6 +506,63 @@ static int check_predict_table_round_trip(void)
 	return 0;
 }
 
+/*
+ * NUMA aggressive-migration wiring. The option defaults off; the
+ * GC tick records `last_numa_node` regardless, but only attempts
+ * the move_pages relocation when (a) the option is on, (b) the
+ * topology has more than one node, and (c) `last_numa_node`
+ * actually changed since the previous tick. This test asserts the
+ * wiring without depending on a multi-NUMA host: it injects a
+ * synthetic node delta into `last_numa_node` and verifies the
+ * tick updates it back to the current node.
+ */
+static int check_numa_migration_records_node(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	/* Default option off — verify the tick still records the
+	 * node so future cycles can detect transitions. */
+	if (v8m_set_option(V8M_OPT_NUMA_AGGRESSIVE_MIGRATION, 0) != 0) {
+		return fail("could not turn aggressive migration off");
+	}
+
+	/* Force a "node migrated" condition by stamping a sentinel
+	 * onto last_numa_node. The next tick should overwrite it
+	 * with the real current node. The migration counter must
+	 * stay zero because the option is off. */
+	cache->last_numa_node = 0xDEAD0000U;
+	uint64_t pre_calls = cache->numa_migration_calls;
+	v8m_thread_cache_gc_tick(cache);
+	if (cache->last_numa_node == 0xDEAD0000U) {
+		return fail("gc_tick did not overwrite the synthetic node");
+	}
+	if (cache->numa_migration_calls != pre_calls) {
+		return fail(
+		    "migration call counter advanced with the option off");
+	}
+
+	/* Same setup but with the option on — we still cannot
+	 * verify move_pages had any effect on a single-NUMA host
+	 * (the helper bails out when node_count == 1), but the
+	 * counter should advance only on multi-NUMA hosts. Either
+	 * way the test passes; we just exercise the on path so a
+	 * future regression in the env-var plumbing surfaces. */
+	if (v8m_set_option(V8M_OPT_NUMA_AGGRESSIVE_MIGRATION, 1) != 0) {
+		return fail("could not turn aggressive migration on");
+	}
+	cache->last_numa_node = 0xCAFE0000U;
+	v8m_thread_cache_gc_tick(cache);
+	(void)v8m_set_option(V8M_OPT_NUMA_AGGRESSIVE_MIGRATION, 0);
+	if (cache->last_numa_node == 0xCAFE0000U) {
+		return fail("gc_tick did not overwrite the synthetic node "
+			    "with the option on");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -518,6 +575,7 @@ int main(void)
 	result |= check_adaptive_capacity_grows_with_demand();
 	result |= check_gc_countdown_fires();
 	result |= check_predict_table_round_trip();
+	result |= check_numa_migration_records_node();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

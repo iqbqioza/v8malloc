@@ -124,6 +124,17 @@ enum v8m_option {
 				     * which the bg purge thread emits a
 				     * one-line warning to stderr; 0
 				     * disables. Default 1024. */
+	V8M_OPT_NUMA_AGGRESSIVE_MIGRATION, /* 0 / 1 — when on, the per-thread
+					    * cache's GC tick checks if the
+					    * calling thread's NUMA node has
+					    * changed since the last tick and
+					    * issues `move_pages()` to
+					    * relocate the cached free slots'
+					    * pages to the new node. Off by
+					    * default — relocation is
+					    * expensive and only useful for
+					    * threads with locality-sensitive
+					    * working sets. */
 	V8M_OPT_COUNT
 };
 
