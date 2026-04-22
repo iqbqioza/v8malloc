@@ -214,12 +214,91 @@ static int check_concurrent_push_pop(void)
 	return 0;
 }
 
+/*
+ * Batch op coverage. push_batch single-CAS pushes a chain;
+ * pop_batch returns up to N nodes assembled into a forward
+ * chain. Both are pure data manipulation given the test owns
+ * the stack — no concurrency in this scenario, just the
+ * push/pop bookkeeping.
+ */
+static int check_batch_round_trip(void)
+{
+	struct v8m_core_cache *cache = v8m_core_cache_for_cpu(2);
+	if (cache == NULL) {
+		return fail("for_cpu(2) returned NULL");
+	}
+	const uint32_t cls = 9;
+	while (v8m_core_cache_pop(cache, cls) != NULL) {
+	}
+
+	enum { COUNT = 32 };
+	uint64_t slots[COUNT];
+
+	/* Pre-link COUNT slots into a forward chain, head=slot[0]. */
+	for (int i = 0; i < COUNT - 1; i++) {
+		void *next = &slots[i + 1];
+		(void)memcpy(&slots[i], (const void *)&next, sizeof(next));
+	}
+	void *terminator = NULL;
+	(void)memcpy(&slots[COUNT - 1], (const void *)&terminator,
+		     sizeof(terminator));
+
+	if (!v8m_core_cache_push_batch(cache, cls, &slots[0],
+				       &slots[COUNT - 1])) {
+		return fail("push_batch returned false");
+	}
+
+	void *out_head = NULL;
+	void *out_tail = NULL;
+	size_t got =
+	    v8m_core_cache_pop_batch(cache, cls, COUNT, &out_head, &out_tail);
+	if (got != COUNT) {
+		(void)fprintf(
+		    stderr, "test_core_cache: pop_batch got %zu, expected %d\n",
+		    got, COUNT);
+		return 1;
+	}
+	if (out_head != &slots[0]) {
+		return fail("pop_batch out_head != pushed head");
+	}
+	/* Walk the chain and verify each node appears exactly once. */
+	int seen[COUNT] = {0};
+	void *node = out_head;
+	for (int i = 0; i < COUNT; i++) {
+		size_t idx = (uint64_t *)node - slots;
+		if (idx >= COUNT) {
+			return fail("popped chain points outside slot array");
+		}
+		seen[idx]++;
+		void *next = NULL;
+		(void)memcpy((void *)&next, node, sizeof(next));
+		node = next;
+	}
+	if (node != NULL) {
+		return fail("chain not terminated after COUNT walks");
+	}
+	for (int i = 0; i < COUNT; i++) {
+		if (seen[i] != 1) {
+			return fail("a slot did not appear exactly once in "
+				    "the popped chain");
+		}
+	}
+
+	/* Empty stack — pop_batch returns 0 with NULL outs. */
+	got = v8m_core_cache_pop_batch(cache, cls, COUNT, &out_head, &out_tail);
+	if (got != 0U || out_head != NULL || out_tail != NULL) {
+		return fail("empty pop_batch did not return zero/NULL");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
 	result |= check_single_thread_round_trip();
 	result |= check_out_of_range_class();
 	result |= check_concurrent_push_pop();
+	result |= check_batch_round_trip();
 	if (result == 0) {
 		(void)printf("test_core_cache: OK\n");
 	}

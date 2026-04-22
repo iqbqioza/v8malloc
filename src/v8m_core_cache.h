@@ -129,4 +129,33 @@ bool v8m_core_cache_push(struct v8m_core_cache *cache, uint32_t cls,
  */
 void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls);
 
+/*
+ * Push a pre-linked chain of nodes onto the `cls` stack atomically.
+ * `head` is the first node (becomes the new stack head); `tail` is
+ * the last node in the chain (its first 8 bytes will be
+ * overwritten with the previous stack head). The chain must be
+ * intact (head reachable from `head` via the next-pointer chain
+ * to `tail`) before the call. Single CAS on the tagged head;
+ * amortizes the CAS cost over `count` nodes.
+ *
+ * Returns true on success. False on out-of-range `cls`, NULL
+ * cache, NULL head/tail, or zero count.
+ */
+bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
+			       void *head, void *tail);
+
+/*
+ * Pop up to `max` nodes from the `cls` stack into a chain
+ * starting at `*out_head` and ending at `*out_tail` (the chain
+ * is linked via the same intrusive next-pointer scheme push uses).
+ * Returns the actual count, possibly zero. The implementation is a
+ * loop of single pops — concurrent consumers walking a shared
+ * chain would race on internal `next` reads, so the safe amortized
+ * variant trades CAS amortization for correctness on the pop side.
+ * The CAS amortization on push (the larger half of TLC overflow
+ * traffic) is the substantive win.
+ */
+size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
+				size_t max, void **out_head, void **out_tail);
+
 #endif /* V8M_CORE_CACHE_H */

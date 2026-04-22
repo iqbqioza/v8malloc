@@ -6,6 +6,41 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- TLC↔L2 plumbing with single-CAS batch push
+  (`src/v8m_core_cache.{h,c}`, `src/v8m_thread_cache.{h,c}`,
+  `src/v8m_dispatch.{h,c}`, `src/v8m_api.c`,
+  architecture.md §2.2 / TODO P1 "push_batch / pop_batch to
+  amortize CAS" row). New `v8m_core_cache_push_batch`
+  pushes a pre-linked chain onto a per-core L2 stack with a
+  single tagged-pointer CAS — amortizes the CAS over every
+  node in the batch (typically 32 = V8M_DISPATCH_L2_BATCH).
+  Companion `v8m_core_cache_pop_batch` returns up to N
+  nodes assembled into a forward chain (loop of single
+  pops, since concurrent consumers walking a shared chain
+  would race on internal next-pointer reads). Wired into
+  the dispatcher: TLC bin overflow now drains a chain via
+  the new `v8m_thread_cache_drain_chain` and ships it to
+  the calling CPU's L2 with one CAS, falling back to the
+  per-object `flush_half` only when the L2 is unreachable;
+  TLC bin underflow on the slow path pulls a batch from
+  the L2 via `v8m_thread_cache_install_chain` before
+  falling through to the slab pool. Single-thread workloads
+  see the L2 act as a transparent caching layer for slots
+  that overflow the bin's adaptive capacity; multi-thread
+  workloads on the same CPU share the batch. Both
+  `v8m_purge` and `v8m_purge_thread` now also drain the
+  calling thread's current-CPU L2 via the new
+  `v8m_dispatch_drain_local_l2` so explicit purges return
+  cached slots through every layer. Refactored the
+  dispatcher's slab-class fast path into the small helpers
+  `try_tlc_fast_paths` and `slab_overflow_to_l2_or_slab`
+  to keep clang-tidy's cognitive-complexity score in band.
+  Coverage in
+  `tests/test_core_cache.c::check_batch_round_trip`
+  asserts a 32-node push_batch + pop_batch round-trip
+  preserves every pointer.
+
 ### Added
 - L2 per-core core cache primitive
   (`src/v8m_core_cache.{h,c}`, `src/v8m_numa.{h,c}`,

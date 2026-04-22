@@ -146,6 +146,22 @@ size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch);
 size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch);
 
 /*
+ * Drain every Tiny / Small slot held by the calling thread's
+ * current-CPU L2 cache back to the dispatcher's slab pool. Used
+ * by `v8m_purge()` so an explicit caller sees their L2 cached
+ * slots returned to the page-counting tier; without this, the
+ * cached slots would hold slab pages alive past the leak-check
+ * window in tests like ST-01 soak. Returns the number of slots
+ * drained.
+ *
+ * Only the calling thread's CPU is drained — iterating every
+ * V8M_NUMA_MAX_CPUS L2 instance per purge would be unreasonably
+ * expensive. Other CPUs' L2 stays intact until a thread
+ * scheduled there issues its own purge.
+ */
+size_t v8m_dispatch_drain_local_l2(struct v8m_dispatch *dispatch);
+
+/*
  * Enable / disable TLC routing for this dispatcher. Default is
  * disabled — only the public-API singleton turns it on. Caller is
  * expected to set this once at init time, before any concurrent

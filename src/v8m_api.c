@@ -878,6 +878,10 @@ V8M_EXPORT int v8m_purge(void)
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
 		}
+		/* Drain the calling thread's current-CPU L2 too —
+		 * slots cached there hold slab pages alive past the
+		 * tier the dispatch's drained-arena counter measures. */
+		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 		(void)v8m_dispatch_purge_drained(&g_dispatch);
 	}
 	v8m_bg_purge_run_once();
@@ -890,13 +894,16 @@ V8M_EXPORT int v8m_purge_thread(void)
 	 * Distinct from v8m_purge in that it does NOT touch the
 	 * process-wide buddy arenas or the bg-purge scan body —
 	 * useful for callers that want to release per-thread
-	 * caching pressure without the global side effects. */
+	 * caching pressure without the global side effects. Also
+	 * drains the calling thread's current-CPU L2 so cached
+	 * slots there release the slab pages they pin. */
 	if (dispatch_ready()) {
 		struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 		if (cache != NULL) {
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
 		}
+		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 	}
 	return 0;
 }

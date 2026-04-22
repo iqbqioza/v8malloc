@@ -436,6 +436,59 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 	return total;
 }
 
+size_t v8m_thread_cache_drain_chain(struct v8m_thread_cache *cache,
+				    uint32_t cls, size_t count, void **out_head,
+				    void **out_tail)
+{
+	if (out_head != NULL) {
+		*out_head = NULL;
+	}
+	if (out_tail != NULL) {
+		*out_tail = NULL;
+	}
+	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U ||
+	    out_head == NULL || out_tail == NULL) {
+		return 0;
+	}
+
+	void *first = v8m_thread_cache_alloc(cache, cls);
+	if (first == NULL) {
+		return 0;
+	}
+	void *tail = first;
+	size_t got = 1;
+	while (got < count) {
+		void *node = v8m_thread_cache_alloc(cache, cls);
+		if (node == NULL) {
+			break;
+		}
+		(void)memcpy(tail, (const void *)&node, sizeof(node));
+		tail = node;
+		got++;
+	}
+	void *terminator = NULL;
+	(void)memcpy(tail, (const void *)&terminator, sizeof(terminator));
+	*out_head = first;
+	*out_tail = tail;
+	return got;
+}
+
+void v8m_thread_cache_install_chain(struct v8m_thread_cache *cache,
+				    uint32_t cls, void *head, void *tail,
+				    size_t count)
+{
+	if (cache == NULL || head == NULL || tail == NULL ||
+	    cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U) {
+		return;
+	}
+	/* Splice the chain at the head of the bin: tail->next =
+	 * existing bin head, then bin_heads[cls] = chain head. */
+	void *prev_head = cache->bin_heads[cls];
+	(void)memcpy(tail, (const void *)&prev_head, sizeof(prev_head));
+	cache->bin_heads[cls] = head;
+	cache->bin_count[cls] = (uint16_t)(cache->bin_count[cls] + count);
+}
+
 size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache)
 {
 	if (cache == NULL) {

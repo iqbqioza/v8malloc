@@ -11,9 +11,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h> /* memcpy for the L2 chain traversal */
 
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
+#include "v8m_core_cache.h"
 #include "v8m_dispatch.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
@@ -23,6 +25,81 @@
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
 #include "v8m_thread_cache.h"
+
+/*
+ * Batch sizes for the TLC↔L2 plumbing. Bigger batches amortize
+ * the L2 CAS over more nodes; smaller batches keep the
+ * interactions short. 32 is a comfortable middle — enough to
+ * cover a typical TLC overflow + a typical underflow refill in
+ * one L2 round trip without overshooting bin capacity.
+ */
+#define V8M_DISPATCH_L2_BATCH 32U
+
+/*
+ * Slab-class fast path: try the TLC bin, drain the remote queue
+ * on miss, refill from the L2 core cache on still-miss. Returns
+ * the served pointer or NULL when every cache layer is empty
+ * (caller falls through to the slab pool). Keeps
+ * v8m_dispatch_alloc inside clang-tidy's cognitive-complexity
+ * threshold by hoisting the multi-layer fast path here.
+ */
+static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return NULL;
+	}
+	void *cached = v8m_thread_cache_alloc(cache, cls);
+	if (cached != NULL) {
+		return cached;
+	}
+	if (v8m_thread_cache_drain_remote(cache) > 0U) {
+		cached = v8m_thread_cache_alloc(cache, cls);
+		if (cached != NULL) {
+			return cached;
+		}
+	}
+	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
+	if (l2_cache == NULL) {
+		(void)dispatch;
+		return NULL;
+	}
+	void *batch_head = NULL;
+	void *batch_tail = NULL;
+	size_t got = v8m_core_cache_pop_batch(
+	    l2_cache, cls, V8M_DISPATCH_L2_BATCH, &batch_head, &batch_tail);
+	if (got == 0U) {
+		return NULL;
+	}
+	v8m_thread_cache_install_chain(cache, cls, batch_head, batch_tail, got);
+	return v8m_thread_cache_alloc(cache, cls);
+}
+
+/*
+ * Slab-class free overflow path: build a chain of half the bin
+ * and push it to the L2 core cache via a single CAS, falling back
+ * to the slab pool's per-object flush_half when the L2 is
+ * unavailable.
+ */
+static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
+					struct v8m_thread_cache *cache,
+					uint32_t cls)
+{
+	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
+	if (l2_cache != NULL) {
+		void *chain_head = NULL;
+		void *chain_tail = NULL;
+		size_t drained = v8m_thread_cache_drain_chain(
+		    cache, cls, V8M_DISPATCH_L2_BATCH, &chain_head,
+		    &chain_tail);
+		if (drained > 0U) {
+			(void)v8m_core_cache_push_batch(l2_cache, cls,
+							chain_head, chain_tail);
+			return;
+		}
+	}
+	(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
+}
 
 int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 {
@@ -82,21 +159,9 @@ void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
 		 * thread-owned-slab refactor wires owner-thread
 		 * routing. */
 		if (dispatch->use_tlc) {
-			struct v8m_thread_cache *cache =
-			    v8m_thread_cache_get_or_create();
-			if (cache != NULL) {
-				void *cached =
-				    v8m_thread_cache_alloc(cache, cls);
-				if (cached != NULL) {
-					return cached;
-				}
-				if (v8m_thread_cache_drain_remote(cache) > 0U) {
-					cached =
-					    v8m_thread_cache_alloc(cache, cls);
-					if (cached != NULL) {
-						return cached;
-					}
-				}
+			void *served = try_tlc_fast_paths(dispatch, cls);
+			if (served != NULL) {
+				return served;
 			}
 		}
 		return v8m_slab_pool_alloc(&dispatch->slab, cls, 0);
@@ -210,9 +275,8 @@ void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
 				bool overflowed = v8m_thread_cache_free(
 				    cache, meta->size_class, ptr);
 				if (overflowed) {
-					(void)v8m_thread_cache_flush_half(
-					    cache, &dispatch->slab,
-					    meta->size_class);
+					slab_overflow_to_l2_or_slab(
+					    dispatch, cache, meta->size_class);
 				}
 			} else {
 				(void)v8m_slab_pool_free(&dispatch->slab, meta,
@@ -295,4 +359,47 @@ size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch)
 	/* max_idle_ticks = 0 → every drained arena passes the
 	 * release test on the first walk. */
 	return v8m_buddy_pool_sweep_idle(&dispatch->buddy, 0U);
+}
+
+size_t v8m_dispatch_drain_local_l2(struct v8m_dispatch *dispatch)
+{
+	if (dispatch == NULL) {
+		return 0;
+	}
+	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
+	if (l2_cache == NULL) {
+		return 0;
+	}
+	size_t total = 0;
+	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS; cls++) {
+		for (;;) {
+			void *head = NULL;
+			void *tail = NULL;
+			size_t got = v8m_core_cache_pop_batch(
+			    l2_cache, cls, V8M_DISPATCH_L2_BATCH, &head, &tail);
+			if (got == 0U) {
+				break;
+			}
+			void *node = head;
+			for (size_t i = 0; i < got; i++) {
+				void *next = NULL;
+				/* Read `next` BEFORE handing the node
+				 * to slab_pool_free — the slab pool may
+				 * overwrite the freed slot's first 8
+				 * bytes with its own free-list link,
+				 * which would clobber the chain
+				 * traversal otherwise. */
+				/* NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion)
+				 */
+				(void)memcpy((void *)&next, node, sizeof(next));
+				struct v8m_page_meta *meta =
+				    v8m_ptr_to_meta(node);
+				(void)v8m_slab_pool_free(&dispatch->slab, meta,
+							 node);
+				node = next;
+				total++;
+			}
+		}
+	}
+	return total;
 }

@@ -81,3 +81,70 @@ void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls)
 		}
 	}
 }
+
+bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
+			       void *head, void *tail)
+{
+	if (cache == NULL || head == NULL || tail == NULL ||
+	    cls >= V8M_NUM_SIZE_CLASSES) {
+		return false;
+	}
+	v8m_tagged_ptr old_head =
+	    atomic_load_explicit(&cache->stacks[cls], memory_order_acquire);
+	for (;;) {
+		void *old_ptr = v8m_tagptr_ptr(old_head);
+		/* Link the tail of our chain to the previous stack
+		 * head. Same store-into-our-own-node trick as the
+		 * single push, just on the chain's tail node. */
+		(void)memcpy(tail, (const void *)&old_ptr, sizeof(old_ptr));
+		uint16_t new_tag = (uint16_t)(v8m_tagptr_tag(old_head) + 1U);
+		v8m_tagged_ptr new_head = v8m_tagptr_make(head, new_tag);
+		if (atomic_compare_exchange_weak_explicit(
+			&cache->stacks[cls], &old_head, new_head,
+			memory_order_release, memory_order_acquire)) {
+			return true;
+		}
+	}
+}
+
+size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
+				size_t max, void **out_head, void **out_tail)
+{
+	if (cache == NULL || cls >= V8M_NUM_SIZE_CLASSES || max == 0U ||
+	    out_head == NULL || out_tail == NULL) {
+		if (out_head != NULL) {
+			*out_head = NULL;
+		}
+		if (out_tail != NULL) {
+			*out_tail = NULL;
+		}
+		return 0;
+	}
+	void *first = v8m_core_cache_pop(cache, cls);
+	if (first == NULL) {
+		*out_head = NULL;
+		*out_tail = NULL;
+		return 0;
+	}
+	void *tail = first;
+	size_t count = 1;
+	while (count < max) {
+		void *node = v8m_core_cache_pop(cache, cls);
+		if (node == NULL) {
+			break;
+		}
+		/* Chain `node` after `tail` so the caller receives a
+		 * forward-linked list head→...→tail with NULL after
+		 * tail. Each pop already cleared `node`'s next slot
+		 * (no — pop reads next but does not clear it; we must
+		 * write the chain link explicitly). */
+		(void)memcpy(tail, (const void *)&node, sizeof(node));
+		tail = node;
+		count++;
+	}
+	void *terminator = NULL;
+	(void)memcpy(tail, (const void *)&terminator, sizeof(terminator));
+	*out_head = first;
+	*out_tail = tail;
+	return count;
+}

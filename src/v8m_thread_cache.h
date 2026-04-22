@@ -312,6 +312,33 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache);
 
 /*
+ * Pop up to `count` slots from the cls bin and assemble them
+ * into a forward-linked chain via the existing intrusive
+ * next-pointer scheme. Returns the actual count, possibly
+ * smaller than `count` if the bin had fewer entries (or zero
+ * when the bin is empty). On a non-zero return, `*out_head`
+ * points at the chain's head and `*out_tail` at the last node;
+ * the chain is terminated (tail's next slot is NULL). Used by
+ * the dispatcher's overflow path to ship a batch to the L2
+ * core cache via a single push_batch instead of N individual
+ * slab_pool_free calls.
+ */
+size_t v8m_thread_cache_drain_chain(struct v8m_thread_cache *cache,
+				    uint32_t cls, size_t count, void **out_head,
+				    void **out_tail);
+
+/*
+ * Install a forward-linked chain of `count` slots onto the cls
+ * bin. The chain is the output of v8m_core_cache_pop_batch (or
+ * v8m_thread_cache_drain_chain on another cache). Used by the
+ * dispatcher's underflow path when a batch refill from the L2
+ * lands cleanly on the local bin.
+ */
+void v8m_thread_cache_install_chain(struct v8m_thread_cache *cache,
+				    uint32_t cls, void *head, void *tail,
+				    size_t count);
+
+/*
  * Adaptive bin-capacity GC tick. Walks every Tiny/Small class,
  * folds the per-class allocation / free demand into the EMA
  * (α = 0.25), and recomputes bin_capacity = EMA × 2 clamped to
