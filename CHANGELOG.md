@@ -6,6 +6,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `V8M_DEBUG` leak-summary on exit (`src/v8m_api.c`,
+  api.md §6.2). When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`),
+  the destructor reads `v8m_collect_live_stats` and emits a
+  one-line stderr summary when `live_bytes > 1 MiB` OR
+  `live_regions > 4`. The thresholds skip the "one slab page
+  residue from internal state" false positive routine clean
+  shutdowns produce (the allocator retains a slab page across
+  the destructor for late libc / stderr-buffer allocations);
+  a real user leak of a few MiB+ surfaces immediately. No
+  per-allocation tracking — that's the future cycle's
+  guard-pages / red-zones / call-site-aware leak detector
+  (the substantive Debug-mode work this row reserves).
+
 ### Changed
 - `v8m_purge()` is no longer a stub. The public API now invokes
   the bg purge thread's scan pass synchronously on the calling

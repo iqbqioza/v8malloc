@@ -238,6 +238,35 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 		(void)malloc_info(0, stderr);
 	}
 
+	/* If V8M_DEBUG is set, emit a one-line leak summary so a
+	 * bug that drops a free() on the floor surfaces at process
+	 * exit instead of being absorbed by the OS reaping our
+	 * mappings. Reads the same `live_bytes` / `live_regions`
+	 * counters `v8m_get_stats` exposes — no per-allocation
+	 * tracking, just the aggregate. The threshold cuts out the
+	 * "one slab page residue from internal state" false
+	 * positive (the allocator routinely retains a single slab
+	 * page across the destructor for late libc / stderr-buffer
+	 * allocations); a real per-allocation leak detector with
+	 * call-site capture lands in a future cycle (api.md §6.2). */
+	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
+		struct v8m_live_stats live = {0};
+		v8m_collect_live_stats(&live);
+		const uint64_t bytes_threshold = (uint64_t)1 << 20U; /* 1 MiB */
+		const uint64_t region_threshold = 4U;
+		if (live.live_bytes > bytes_threshold ||
+		    live.live_regions > region_threshold) {
+			(void)fprintf(stderr,
+				      "v8malloc DEBUG: leak summary at exit — "
+				      "live_bytes=%llu live_regions=%llu "
+				      "(thresholds: bytes>%llu regions>%llu)\n",
+				      (unsigned long long)live.live_bytes,
+				      (unsigned long long)live.live_regions,
+				      (unsigned long long)bytes_threshold,
+				      (unsigned long long)region_threshold);
+		}
+	}
+
 	/* Stop the bg purge thread before flipping state so the
 	 * thread's last loop body sees READY (avoids it spinning on
 	 * stale state during shutdown). The shutdown path uses a
