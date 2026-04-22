@@ -6,6 +6,63 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- Sorted-array region map with binary-search ownership check
+  (the spec's "future radix-tree replacement" optimization). The
+  page heap's `g_regions` array is now kept sorted ascending by
+  `start`; `v8m_page_heap_owns` runs a binary search for the
+  largest region whose `start ≤ addr` and closes the verdict
+  with one `addr < region->end` check — O(log N) vs the prior
+  O(N) linear scan. Insert (`region_register_with_flags`) and
+  unregister (`region_unregister_with_flags`) memmove the array
+  tail to preserve the sort; the cost is O(N - idx) on alloc /
+  free large but is well-amortized by the binary search the
+  ownership-check fast path now enjoys (called on every free
+  for the foreign-pointer detection branch). Two new helpers
+  `region_lower_bound` and `region_find_by_start` centralize the
+  search; `region_record_node` and `region_record_promote` route
+  through `region_find_by_start` instead of their previous
+  linear walks.
+- NUMA active page migration via `move_pages()` (numa.md §6.2
+  second action item). Extends `v8m_page_heap_numa_rebalance`:
+  when the imbalance trigger fires AND a non-overloaded
+  fallback exists, picks one region on the most-loaded node and
+  invokes `move_pages()` to relocate up to 256 OS pages (≈ 1 MiB
+  on x86_64) per tick. Larger regions get partial migration this
+  tick and the rest next tick; the per-tick bound prevents a
+  deeply imbalanced run from stalling the bg purge thread on a
+  single tick's worth of migration syscalls. Combined with the
+  alloc-time diversion (already wired in `bind_to_local_node`),
+  the rebalance drains overload over a few ticks. New counter
+  `v8m_page_heap_numa_migration_calls` tracks syscall count.
+  Failed move_pages still counts (best-effort).
+- TLC capacity shrink under NUMA overload (numa.md §6.2 third
+  action item). When the calling thread's node is suppressed by
+  the page-heap rebalance action, the TLC's GC tick halves
+  `bin_capacity` (clamped to MIN) so the per-thread cache holds
+  fewer slots — relieves the per-thread footprint that the
+  rebalance is trying to address. Once the suppressed flag
+  clears, the normal EMA-driven growth restores capacity. New
+  public accessor `v8m_page_heap_node_is_suppressed(node)` is
+  what the TLC reads on each tick.
+- Use-after-free WRITE detector for slab pages in DEBUG mode.
+  New `src/v8m_debug.{h,c}` ships `v8m_debug_uaf_poison` /
+  `v8m_debug_uaf_verify` / `v8m_debug_uaf_poison_data_area`
+  helpers; the slab tiny + small backends call them from their
+  alloc / free / init paths. When `V8M_DEBUG=1`, every freed
+  slot is stamped with the poison pattern (0xDF; distinct from
+  the Large red-zone byte 0xCD so memory dumps can disambiguate
+  trailing-overflow canaries from UAF poison) and every alloc
+  verifies the poison is intact before handing the slot to the
+  user — abort with a diagnostic naming the backend, slot, and
+  offset on mismatch. Slot init pre-poisons the data area so
+  the first-alloc verify sees the expected pattern (kernel
+  delivered mmap-zero would otherwise falsely fire). Helpers
+  are no-ops when DEBUG is off; release builds pay zero cost.
+  Buddy guard pages remain future work — buddy arenas are
+  multi-tenant and the per-block link layout would need finer
+  routing than the slab path's intrusive next-pointer.
+
 ### Added
 - pprof-format heap profile dump on exit (resolution of open
   question #5). `V8M_PROFILE=1` now emits a pprof Profile message

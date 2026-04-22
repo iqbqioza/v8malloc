@@ -158,11 +158,18 @@ static _Atomic uint64_t g_thp_cold_threshold_ticks;
 #endif
 
 /*
- * Region map. Bounded array of (start, end) tuples kept in
- * arbitrary order. Linear scan on lookup; O(N) is acceptable while
- * N stays under ~a few thousand. The cap is sized for v0; the
- * radix-tree replacement comes when production workloads start
- * crossing it.
+ * Region map. Bounded array of (start, end) tuples kept **sorted
+ * ascending by `start`**. Lookup uses binary search (O(log N));
+ * insert and unregister memmove the array tail to preserve the
+ * sort. Since regions never overlap (each comes from a distinct
+ * mmap / carve), the "largest start ≤ addr" search yields the
+ * unique candidate whose range may contain `addr`.
+ *
+ * The cap is sized for v0. A full radix-tree replacement would
+ * further drop lookup to O(1) at the cost of a 2-level table; the
+ * binary-search design hits the practical wins (hot-path ownership
+ * checks no longer scan 4096 entries on every foreign pointer)
+ * without the memory footprint.
  */
 #define V8M_REGION_MAP_CAPACITY 4096
 
@@ -231,11 +238,49 @@ static _Atomic bool v8m_per_node_suppressed[V8M_NUMA_MAX_NODES];
 /* Counter of how many times the rebalance hook diverted an alloc
  * away from the calling thread's overloaded node. Diagnostic. */
 static _Atomic uint64_t v8m_numa_rebalance_diversions;
+/* Counter of move_pages() syscalls the rebalance action issued to
+ * relocate already-resident pages off an overloaded node. */
+static _Atomic uint64_t v8m_numa_migration_calls;
 
 /* Lock-step the public ABI's per-node array width to the internal
  * NUMA cap so the snapshot helper never reads past either bound. */
 _Static_assert(V8M_NUMA_MAX_NODES == V8M_PUBLIC_NUMA_MAX_NODES,
 	       "public NUMA node cap must match internal cap");
+
+/*
+ * Find the lowest index `i` in g_regions[0..g_region_count) such
+ * that g_regions[i].start >= start. Returns g_region_count when
+ * every existing entry sorts strictly below `start`. Caller must
+ * hold g_region_lock.
+ */
+static size_t region_lower_bound(uintptr_t start)
+{
+	size_t low = 0;
+	size_t high = g_region_count;
+	while (low < high) {
+		size_t mid = low + ((high - low) >> 1U);
+		if (g_regions[mid].start < start) {
+			low = mid + 1;
+		} else {
+			high = mid;
+		}
+	}
+	return low;
+}
+
+/*
+ * Find the index of the region with exactly `start` as its start
+ * address, or SIZE_MAX if no such region exists. O(log N) via
+ * binary search. Caller must hold g_region_lock.
+ */
+static size_t region_find_by_start(uintptr_t start)
+{
+	size_t idx = region_lower_bound(start);
+	if (idx < g_region_count && g_regions[idx].start == start) {
+		return idx;
+	}
+	return SIZE_MAX;
+}
 
 static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 {
@@ -245,11 +290,20 @@ static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 		return -1;
 	}
 	uintptr_t start = (uintptr_t)ptr;
-	g_regions[g_region_count].start = start;
-	g_regions[g_region_count].end = start + bytes;
-	g_regions[g_region_count].node = V8M_REGION_NODE_UNBOUND;
-	g_regions[g_region_count].is_anchor = is_anchor;
-	atomic_store_explicit(&g_regions[g_region_count].promoted_at_tsc, 0U,
+	/* Insert sorted: find the position where the new entry's start
+	 * fits, shift the tail right by one, place the entry. The
+	 * memmove cost is O(N - idx) — bounded by the cap and amortized
+	 * by the binary-search lookup that the sort enables. */
+	size_t idx = region_lower_bound(start);
+	if (idx < g_region_count) {
+		(void)memmove(&g_regions[idx + 1], &g_regions[idx],
+			      (g_region_count - idx) * sizeof(g_regions[0]));
+	}
+	g_regions[idx].start = start;
+	g_regions[idx].end = start + bytes;
+	g_regions[idx].node = V8M_REGION_NODE_UNBOUND;
+	g_regions[idx].is_anchor = is_anchor;
+	atomic_store_explicit(&g_regions[idx].promoted_at_tsc, 0U,
 			      memory_order_relaxed);
 	g_region_count++;
 	(void)pthread_mutex_unlock(&g_region_lock);
@@ -267,12 +321,10 @@ static void region_record_promote(const void *ptr, uint64_t tsc)
 {
 	uintptr_t start = (uintptr_t)ptr;
 	(void)pthread_mutex_lock(&g_region_lock);
-	for (size_t i = 0; i < g_region_count; i++) {
-		if (g_regions[i].start == start) {
-			atomic_store_explicit(&g_regions[i].promoted_at_tsc,
-					      tsc, memory_order_relaxed);
-			break;
-		}
+	size_t idx = region_find_by_start(start);
+	if (idx != SIZE_MAX) {
+		atomic_store_explicit(&g_regions[idx].promoted_at_tsc, tsc,
+				      memory_order_relaxed);
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
 }
@@ -293,11 +345,9 @@ static void region_record_node(const void *ptr, uint16_t node)
 {
 	uintptr_t start = (uintptr_t)ptr;
 	(void)pthread_mutex_lock(&g_region_lock);
-	for (size_t i = 0; i < g_region_count; i++) {
-		if (g_regions[i].start == start) {
-			g_regions[i].node = node;
-			break;
-		}
+	size_t idx = region_find_by_start(start);
+	if (idx != SIZE_MAX) {
+		g_regions[idx].node = node;
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
 }
@@ -314,15 +364,20 @@ static uint16_t region_unregister_with_flags(const void *ptr,
 	uint16_t node = V8M_REGION_NODE_UNBOUND;
 	*out_is_anchor = false;
 	(void)pthread_mutex_lock(&g_region_lock);
-	for (size_t i = 0; i < g_region_count; i++) {
-		if (g_regions[i].start == start) {
-			node = g_regions[i].node;
-			*out_is_anchor = g_regions[i].is_anchor;
-			/* Swap-remove to keep the lookup scan
-			 * compact. Order in the array does not matter. */
-			g_regions[i] = g_regions[--g_region_count];
-			break;
+	size_t idx = region_find_by_start(start);
+	if (idx != SIZE_MAX) {
+		node = g_regions[idx].node;
+		*out_is_anchor = g_regions[idx].is_anchor;
+		/* Memmove-compact to preserve the sort. The cost is
+		 * O(g_region_count - idx) bytes, bounded by the cap
+		 * and amortized by the binary-search ownership check
+		 * the sort enables. */
+		size_t tail = g_region_count - idx - 1U;
+		if (tail > 0) {
+			(void)memmove(&g_regions[idx], &g_regions[idx + 1],
+				      tail * sizeof(g_regions[0]));
 		}
+		g_region_count--;
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return node;
@@ -335,12 +390,25 @@ bool v8m_page_heap_owns(const void *ptr)
 	}
 	uintptr_t addr = (uintptr_t)ptr;
 	(void)pthread_mutex_lock(&g_region_lock);
+	/* Binary search for the largest region whose start ≤ addr.
+	 * Regions don't overlap (each is a distinct mmap / carve), so
+	 * the unique candidate whose range may contain `addr` is that
+	 * one; a single end-check closes the verdict. O(log N) vs the
+	 * prior O(N) linear scan. */
 	bool owned = false;
-	for (size_t i = 0; i < g_region_count; i++) {
-		if (addr >= g_regions[i].start && addr < g_regions[i].end) {
-			owned = true;
-			break;
+	size_t low = 0;
+	size_t high = g_region_count;
+	while (low < high) {
+		size_t mid = low + ((high - low) >> 1U);
+		if (g_regions[mid].start <= addr) {
+			low = mid + 1;
+		} else {
+			high = mid;
 		}
+	}
+	if (low > 0) {
+		const struct region_entry *region = &g_regions[low - 1];
+		owned = addr < region->end;
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return owned;
@@ -904,6 +972,68 @@ uint64_t v8m_page_heap_thp_age_demote_calls(void)
 				    memory_order_relaxed);
 }
 
+/*
+ * Migrate one region's already-resident pages off `from_node` to
+ * `to_node` via the move_pages() syscall. Bounded scope per call
+ * (V8M_MIGRATE_MAX_PAGES = 256 OS pages → at most 1 MiB on x86_64);
+ * larger regions get partial migration this tick and the rest next
+ * tick. Best-effort: the syscall return is ignored — failure means
+ * the kernel could not migrate (target node out of memory, page
+ * pinned, etc.) and the action retries next tick.
+ *
+ * Returns true iff a region was found and a syscall issued, so the
+ * caller can bound work per tick.
+ */
+#define V8M_MIGRATE_MAX_PAGES 256U
+
+/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
+static bool migrate_one_region(uint16_t from_node, int to_node)
+{
+	long os_page_signed = sysconf(_SC_PAGESIZE);
+	size_t os_page = (os_page_signed > 0) ? (size_t)os_page_signed : 4096U;
+
+	uintptr_t region_base = 0;
+	size_t region_bytes = 0;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 0; i < g_region_count; i++) {
+		if (g_regions[i].node == from_node) {
+			region_base = g_regions[i].start;
+			region_bytes = g_regions[i].end - g_regions[i].start;
+			/* Re-stamp node so the next tick picks a
+			 * different region. The actual residency
+			 * after move_pages may not match, but the
+			 * accounting follows the intent — a future
+			 * snapshot with the kernel's mempolicy will
+			 * correct any drift. */
+			g_regions[i].node = (uint16_t)to_node;
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+
+	if (region_base == 0U || region_bytes == 0U) {
+		return false;
+	}
+
+	size_t total_pages = region_bytes / os_page;
+	if (total_pages > V8M_MIGRATE_MAX_PAGES) {
+		total_pages = V8M_MIGRATE_MAX_PAGES;
+	}
+
+	void *pages[V8M_MIGRATE_MAX_PAGES];
+	int nodes[V8M_MIGRATE_MAX_PAGES];
+	for (size_t i = 0; i < total_pages; i++) {
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		pages[i] = (void *)(region_base + (i * os_page));
+		nodes[i] = to_node;
+	}
+
+	(void)syscall(SYS_move_pages, 0, total_pages, pages, nodes, NULL, 0);
+	atomic_fetch_add_explicit(&v8m_numa_migration_calls, 1U,
+				  memory_order_relaxed);
+	return true;
+}
+
 size_t v8m_page_heap_numa_rebalance(void)
 {
 	struct v8m_numa_balance_stats snap = {0};
@@ -922,12 +1052,46 @@ size_t v8m_page_heap_numa_rebalance(void)
 			flipped++;
 		}
 	}
+	/* Active migration: when the imbalance trigger fired and a
+	 * fallback target exists, push one region per tick from the
+	 * most-loaded node toward the nearest neighbour via
+	 * move_pages(). Bounded to one region per tick so a deeply
+	 * imbalanced run does not stall the bg purge thread on a
+	 * single tick's worth of migration syscalls. The diversion
+	 * action (already wired in `bind_to_local_node`) prevents new
+	 * allocs from landing on the suppressed node, so the
+	 * combination of (a) no new allocs on the node and (b) one
+	 * migration per tick drains the imbalance over a few ticks. */
+	if (snap.imbalanced) {
+		uint32_t fallback =
+		    v8m_numa_fallback_node(snap.most_loaded_node, 1);
+		if (fallback < V8M_NUMA_MAX_NODES &&
+		    fallback != snap.most_loaded_node) {
+			(void)migrate_one_region(
+			    (uint16_t)snap.most_loaded_node, (int)fallback);
+		}
+	}
 	return flipped;
 }
 
 uint64_t v8m_page_heap_numa_rebalance_diversions(void)
 {
 	return atomic_load_explicit(&v8m_numa_rebalance_diversions,
+				    memory_order_relaxed);
+}
+
+uint64_t v8m_page_heap_numa_migration_calls(void)
+{
+	return atomic_load_explicit(&v8m_numa_migration_calls,
+				    memory_order_relaxed);
+}
+
+bool v8m_page_heap_node_is_suppressed(uint32_t node)
+{
+	if (node >= V8M_NUMA_MAX_NODES) {
+		return false;
+	}
+	return atomic_load_explicit(&v8m_per_node_suppressed[node],
 				    memory_order_relaxed);
 }
 

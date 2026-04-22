@@ -159,6 +159,24 @@ size_t v8m_page_heap_numa_rebalance(void);
 uint64_t v8m_page_heap_numa_rebalance_diversions(void);
 
 /*
+ * Migration counter — total move_pages() calls the rebalance
+ * action issued to relocate already-resident pages off an
+ * overloaded node. Monotonic. A failed syscall still counts toward
+ * the call count (the migration is best-effort).
+ */
+uint64_t v8m_page_heap_numa_migration_calls(void);
+
+/*
+ * Read the per-node suppressed flag the rebalance action sets.
+ * Out-of-range nodes return false. Read by the thread cache's GC
+ * tick to shrink bin capacity for threads whose current node is
+ * suppressed (numa.md §6.2 "TLC capacity shrink for threads pinned
+ * to the overloaded node"). Lock-free; the value may lag a single
+ * tick behind a concurrent rebalance call.
+ */
+bool v8m_page_heap_node_is_suppressed(uint32_t node);
+
+/*
  * Per-region THP age sweep (huge-pages.md §5.1 cold detection).
  * Walks every registered region and demotes (MADV_NOHUGEPAGE) any
  * region whose alloc-time PROMOTE stamp has aged past

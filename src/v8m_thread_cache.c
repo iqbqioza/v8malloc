@@ -30,6 +30,7 @@
 #include "v8m_internal.h" /* V8M_PAGE_MASK */
 #include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_page.h" /* v8m_ptr_to_meta — meta recovery on flush */
+#include "v8m_page_heap.h" /* v8m_page_heap_node_is_suppressed for TLC shrink */
 #include "v8m_remote_free.h" /* v8m_mpsc_init */
 #include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
 #include "v8m_slab_pool.h" /* v8m_slab_pool_free on overflow flush */
@@ -587,6 +588,17 @@ void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)
 		return;
 	}
 	check_numa_migration(cache);
+	/* NUMA overload pressure: when the calling thread's node is
+	 * suppressed by the page-heap rebalance action (numa.md §6.2),
+	 * shrink the demand-driven capacity below the steady-state
+	 * cap so the per-thread cache holds fewer slots — reduces
+	 * the per-thread footprint that the rebalance is trying to
+	 * relieve. The shrink is multiplicative (halve), so a thread
+	 * that was at MAX cap drops toward MIN over a few overloaded
+	 * ticks. Once the rebalance clears the suppressed flag, the
+	 * normal EMA-driven growth restores capacity. */
+	bool node_overloaded =
+	    v8m_page_heap_node_is_suppressed(v8m_numa_current_node());
 	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS; cls++) {
 		uint16_t allocs = cache->alloc_count_per_class[cls];
 		uint16_t frees = cache->free_count_per_class[cls];
@@ -605,6 +617,9 @@ void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)
 		cache->ema_demand[cls] = (uint16_t)ema;
 
 		uint32_t new_cap = ema * 2U;
+		if (node_overloaded) {
+			new_cap >>= 1U;
+		}
 		if (new_cap < V8M_BIN_CAPACITY_MIN) {
 			new_cap = V8M_BIN_CAPACITY_MIN;
 		}

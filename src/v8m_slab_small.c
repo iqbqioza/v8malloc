@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_debug.h"
 #include "v8m_internal.h"
 #include "v8m_page.h"
 #include "v8m_size_class.h"
@@ -85,6 +86,14 @@ void v8m_slab_small_init(void *page_base, uint32_t size_class,
 		head = obj;
 	}
 	meta->free_list_head = head;
+
+	/* DEBUG-mode UAF detector: poison every slot's body bytes
+	 * (everything past the sizeof(void *) free-list link the loop
+	 * above just wrote). On first alloc the verify step sees this
+	 * poison and passes; subsequent free re-stamps the poison
+	 * itself. The helper is a no-op when V8M_OPT_DEBUG is 0. */
+	v8m_debug_uaf_poison_data_area(data, object_size, capacity,
+				       sizeof(void *));
 }
 
 void *v8m_slab_small_alloc(struct v8m_page_meta *meta)
@@ -96,6 +105,16 @@ void *v8m_slab_small_alloc(struct v8m_page_meta *meta)
 	void **link = (void **)head;
 	meta->free_list_head = *link;
 	atomic_fetch_add_explicit(&meta->used_count, 1U, memory_order_relaxed);
+	/* Verify the body poison left by the prior free (or by the
+	 * init-time pre-poison for the first alloc). The first
+	 * sizeof(void *) bytes hold the next-link we just consumed
+	 * and are not part of the verify window. No-op in release
+	 * builds. */
+	if (meta->object_size > sizeof(void *)) {
+		v8m_debug_uaf_verify((unsigned char *)head + sizeof(void *),
+				     (size_t)meta->object_size - sizeof(void *),
+				     "small slab");
+	}
 	return head;
 }
 
@@ -104,6 +123,15 @@ bool v8m_slab_small_free(struct v8m_page_meta *meta, void *obj)
 	void **link = (void **)obj;
 	*link = meta->free_list_head;
 	meta->free_list_head = obj;
+	/* Stamp the slot's body bytes with the UAF-poison pattern;
+	 * the first sizeof(void *) bytes hold the next-link we just
+	 * wrote and are excluded from the poison. No-op in release
+	 * builds. */
+	if (meta->object_size > sizeof(void *)) {
+		v8m_debug_uaf_poison((unsigned char *)obj + sizeof(void *),
+				     (size_t)meta->object_size -
+					 sizeof(void *));
+	}
 	uint32_t previous = atomic_fetch_sub_explicit(&meta->used_count, 1U,
 						      memory_order_relaxed);
 	return previous == 1U;

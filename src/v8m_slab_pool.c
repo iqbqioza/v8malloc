@@ -328,7 +328,7 @@ static void *try_partials(struct v8m_slab_pool_class *cls)
  * object from it.
  */
 /* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
-static void *acquire_fresh_page(const struct v8m_slab_pool *pool,
+static void *acquire_fresh_page(struct v8m_slab_pool *pool,
 				struct v8m_slab_pool_class *cls,
 				uint32_t size_class, uint64_t owner_thread,
 				uint8_t arena_id)

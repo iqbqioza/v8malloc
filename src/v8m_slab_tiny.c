@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_debug.h"
 #include "v8m_internal.h"
 #include "v8m_page.h"
 #include "v8m_size_class.h"
@@ -92,6 +93,14 @@ void v8m_slab_tiny_init(void *page_base, uint32_t size_class,
 		uint32_t bit = slot % BITS_PER_WORD;
 		meta->bitmap[word] |= (uint64_t)1U << bit;
 	}
+
+	/* DEBUG-mode UAF detector: poison every slot's bytes so the
+	 * first-alloc verify sees the expected pattern. The kernel
+	 * delivered mmap-zero memory; without this, the first verify
+	 * after a slab-init would falsely abort. The helper is a
+	 * no-op when V8M_OPT_DEBUG is 0. */
+	v8m_debug_uaf_poison_data_area(slab_data((struct v8m_page_meta *)meta),
+				       object_size, capacity, 0);
 }
 
 static void *claim_slot(struct v8m_tiny_page_meta *tiny, uint32_t word,
@@ -101,8 +110,15 @@ static void *claim_slot(struct v8m_tiny_page_meta *tiny, uint32_t word,
 	tiny->search_hint = word;
 	atomic_fetch_add_explicit(&tiny->used_count, 1U, memory_order_relaxed);
 	uint32_t slot = (word * BITS_PER_WORD) + bit;
-	return slab_data((struct v8m_page_meta *)tiny) +
-	       ((size_t)slot * tiny->object_size);
+	void *obj = slab_data((struct v8m_page_meta *)tiny) +
+		    ((size_t)slot * tiny->object_size);
+	/* Verify the poison left by the prior free (or the init-time
+	 * pre-poison for the first alloc on this slot) before handing
+	 * the bytes to the user. A mismatch means someone wrote to the
+	 * slot after free — abort with a diagnostic. No-op in release
+	 * builds. */
+	v8m_debug_uaf_verify(obj, tiny->object_size, "tiny slab");
+	return obj;
 }
 
 void *v8m_slab_tiny_alloc(struct v8m_page_meta *meta)
@@ -140,6 +156,16 @@ bool v8m_slab_tiny_free(struct v8m_page_meta *meta, const void *obj)
 	if (word < tiny->search_hint) {
 		tiny->search_hint = word;
 	}
+
+	/* Stamp the freed slot with the UAF-poison pattern so a
+	 * subsequent dereference returns deterministic "freed" bytes
+	 * (often crashing the caller's pointer chase) and the next
+	 * alloc verifies the poison is intact. No-op in release
+	 * builds. The cast away from const matches the rest of the
+	 * free path: the slot is being returned to the pool, so the
+	 * const promise no longer applies. */
+	/* NOLINTNEXTLINE(cert-exp05-c) */
+	v8m_debug_uaf_poison((void *)obj, tiny->object_size);
 
 	uint32_t previous = atomic_fetch_sub_explicit(&tiny->used_count, 1U,
 						      memory_order_relaxed);
