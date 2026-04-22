@@ -239,6 +239,22 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	atomic_store_explicit(&g_init_state, V8M_INIT_READY,
 			      memory_order_release);
 
+	/* Verbose-mode ISA / cache-line / TSC summary. Runs after
+	 * READY so the runtime probes (LSE, CTR_EL0, TSC calibration)
+	 * have everything they need. The `v8malloc isa:` prefix is
+	 * what a multi-arch CI matrix lane greps to confirm the right
+	 * binary is running on the right runner — resolution of the
+	 * riscv64 follow-on diagnostic note in TODO.md §Phase 3. */
+	if (v8m_config_get(V8M_OPT_VERBOSE) != 0) {
+		char isa_line[160];
+		size_t len =
+		    v8m_arch_format_isa_summary(isa_line, sizeof(isa_line));
+		if (len > 0U) {
+			(void)write(STDERR_FILENO, isa_line, len);
+			(void)write(STDERR_FILENO, "\n", 1);
+		}
+	}
+
 	/* TLC plumbing — wires the pthread_key whose destructor
 	 * reclaims a thread's cache on thread exit. Failure here
 	 * leaks per-thread caches at thread exit; the allocator stays
@@ -320,8 +336,14 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 		const char *path = getenv("V8M_PROFILE_PATH");
 		char path_buf[64];
 		if (path == NULL) {
+			/* Default to the .pb.gz extension so the path
+			 * matches the resolution of open question #5
+			 * verbatim. The gzip wrapper uses STORED DEFLATE
+			 * blocks (no actual compression) — pprof reads
+			 * either form. The .gz extension is what tools
+			 * key off when auto-detecting format. */
 			(void)snprintf(path_buf, sizeof(path_buf),
-				       "/tmp/v8malloc-%d.pb", (int)getpid());
+				       "/tmp/v8malloc-%d.pb.gz", (int)getpid());
 			path = path_buf;
 		}
 		if (v8m_pprof_dump_heap_to_path(path) != 0) {

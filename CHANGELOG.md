@@ -7,6 +7,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Gzip-wrapped pprof emit (`v8m_pprof_dump_heap_gz`). The new
+  helper writes the encoded Profile message inside an RFC 1952
+  gzip stream — 10-byte header + STORED DEFLATE blocks
+  (BTYPE=00, no compression) + 8-byte CRC32+ISIZE footer. The
+  STORED-block strategy avoids pulling libz onto the malloc-free
+  destructor path; pprof reads either form transparently. The
+  destructor's default profile path is now `/tmp/v8malloc-PID.pb.gz`
+  (matches the resolution of open question #5 verbatim);
+  `$V8M_PROFILE_PATH` overrides. Path-based wrapper detects the
+  `.gz` suffix and routes accordingly. `gunzip -t` validates the
+  emitted file. Coverage in `tests/test_pprof.c::check_gzip_dump`
+  asserts the gzip magic bytes (0x1f 0x8b), the inner stored
+  block header, and the embedded sample_type tag at the expected
+  offset.
+- Runtime ISA summary on `V8M_VERBOSE`. The constructor now
+  emits one line `v8malloc isa: arch=<name> cache_line=<size>
+  lse=<yes|no> tsc_mhz=<freq> build_cache_line=<size>` to stderr
+  right after publishing READY, surfacing which arch lane the
+  runtime took plus the runtime-probed cache-line and TSC values.
+  Resolution of the riscv64 follow-on note in TODO.md §Phase 3
+  ("ISA-summary line earns its weight"). New helper
+  `v8m_arch_format_isa_summary(buf, cap)` formats the line; same
+  format runs on every arch so a multi-arch CI matrix lane can
+  grep for the stable `v8malloc isa:` prefix. Coverage in
+  `tests/test_arch.c::check_isa_summary`.
+
+### Added
 - Per-class slab utilization breakdown (fragmentation.md §4.1).
   New public `v8m_get_slab_class_breakdown(out)` exported under
   V8MALLOC_1.0 fills a buffer of `V8M_PUBLIC_NUM_SIZE_CLASSES`

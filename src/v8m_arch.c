@@ -17,6 +17,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h> /* snprintf for the ISA summary */
 #include <time.h>
 
 #include "v8m_arch.h"
@@ -126,4 +127,57 @@ uint32_t v8m_arch_tsc_frequency_mhz(void)
 	 * "ticks per microsecond" is exactly 1000. */
 	return 1000U;
 #endif
+}
+
+/*
+ * Map the compile-time arch macro to a stable short name. The
+ * "v8malloc isa: <name>" prefix is what a CI matrix lane greps for
+ * to confirm the right binary is running on the right runner.
+ */
+static const char *arch_name(void)
+{
+#if defined(V8M_ARCH_X86_64)
+	return "x86_64";
+#elif defined(V8M_ARCH_AARCH64)
+	return "aarch64";
+#elif defined(V8M_ARCH_RISCV64)
+	return "riscv64";
+#elif defined(V8M_ARCH_PPC64LE)
+	return "ppc64le";
+#elif defined(V8M_ARCH_S390X)
+	return "s390x";
+#elif defined(V8M_ARCH_LOONGARCH64)
+	return "loongarch64";
+#else
+	return "unknown";
+#endif
+}
+
+size_t v8m_arch_format_isa_summary(char *buf, size_t cap)
+{
+	if (buf == NULL || cap == 0U) {
+		return 0;
+	}
+	bool lse = v8m_arch_has_lse();
+	size_t cline = v8m_arch_runtime_cache_line_size();
+	uint32_t mhz = v8m_arch_tsc_frequency_mhz();
+	/* `lse` is statically false on every non-aarch64 build; cppcheck
+	 * folds the predicate and warns. The intent here is to surface
+	 * the runtime-probed value when it's meaningful, so keep the
+	 * call and silence the no-op-on-this-arch warning. */
+	/* cppcheck-suppress knownConditionTrueFalse */
+	const char *lse_str = lse ? "yes" : "no";
+	int written = snprintf(
+	    buf, cap,
+	    "v8malloc isa: arch=%s cache_line=%zu lse=%s tsc_mhz=%u "
+	    "build_cache_line=%zu",
+	    arch_name(), cline, lse_str, mhz, (size_t)V8M_CACHE_LINE_SIZE);
+	if (written < 0) {
+		buf[0] = '\0';
+		return 0;
+	}
+	if ((size_t)written >= cap) {
+		return cap - 1U;
+	}
+	return (size_t)written;
 }

@@ -39,9 +39,24 @@
 ssize_t v8m_pprof_dump_heap(int out_fd);
 
 /*
+ * Same as `v8m_pprof_dump_heap` but wraps the encoded bytes in a
+ * gzip stream (RFC 1952). Uses STORED DEFLATE blocks (BTYPE=00),
+ * so the output is gzip-format-compliant but not actually
+ * compressed — the trade-off avoids pulling libz onto the
+ * malloc-free destructor path. The gzip wrapper exists for tools
+ * that look at the file extension or magic bytes (pprof reads
+ * both .pb and .pb.gz transparently). Returns the number of
+ * bytes written, or -1 on encoder overflow / write failure.
+ */
+ssize_t v8m_pprof_dump_heap_gz(int out_fd);
+
+/*
  * Open `path` (O_WRONLY | O_CREAT | O_TRUNC, mode 0600), dump the
- * heap profile, close the fd. Returns 0 on success or -1 on open /
- * dump / close failure (errno preserved from the failing call).
+ * heap profile, close the fd. When `path` ends in `.gz`, routes
+ * through `v8m_pprof_dump_heap_gz`; otherwise emits the raw
+ * uncompressed protobuf via `v8m_pprof_dump_heap`. Returns 0 on
+ * success or -1 on open / dump / close failure (errno preserved
+ * from the failing call).
  */
 int v8m_pprof_dump_heap_to_path(const char *path);
 

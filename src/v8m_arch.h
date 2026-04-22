@@ -167,4 +167,16 @@ uint64_t v8m_arch_rdtsc(void);
  */
 uint32_t v8m_arch_tsc_frequency_mhz(void);
 
+/*
+ * Format a one-line ISA / cache-line / TSC summary into `buf`
+ * (truncated to `cap - 1` chars + NUL). Returns the number of
+ * bytes written (excluding the NUL). Used by the constructor when
+ * V8M_VERBOSE is on to surface which arch lane the runtime took
+ * — the riscv64 line of TODO.md §Phase 3 calls out a "diagnostic
+ * ISA-summary line" as the deliverable for the spec'd hwprobe
+ * future cycle. Same line format runs on every arch so a
+ * multi-arch CI matrix lane can grep for a stable prefix.
+ */
+size_t v8m_arch_format_isa_summary(char *buf, size_t cap);
+
 #endif /* V8M_ARCH_H */

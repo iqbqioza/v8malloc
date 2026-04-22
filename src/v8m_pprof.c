@@ -416,10 +416,101 @@ static int stream_to_fd(int out_fd, const uint8_t *buf, size_t len)
 	return 0;
 }
 
-/* cppcheck-suppress staticFunction
- * — exposed via src/v8m_pprof.h and consumed by tests/test_pprof.c
- *   in a different translation unit. */
-ssize_t v8m_pprof_dump_heap(int out_fd)
+/* CRC32 over `data` (RFC 1952 / IEEE 802.3 polynomial 0xEDB88320,
+ * reflected). Naive bit-at-a-time variant — table-free so the
+ * encoder stays malloc-free without lazy-init machinery. The
+ * destructor's emit volume is small (~kilobytes), so the cost is
+ * negligible. */
+static uint32_t pprof_crc32(const uint8_t *data, size_t len)
+{
+	uint32_t crc = 0xFFFFFFFFU;
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (uint32_t j = 0; j < 8U; j++) {
+			uint32_t mask = (crc & 1U) != 0U ? 0xEDB88320U : 0U;
+			crc = (crc >> 1U) ^ mask;
+		}
+	}
+	return crc ^ 0xFFFFFFFFU;
+}
+
+/* Stored DEFLATE blocks cap LEN at 16 bits = 65535. Multi-MiB
+ * profiles (none today) would emit multiple blocks chained with
+ * BFINAL=0 and a final BFINAL=1 block. */
+#define V8M_GZIP_MAX_STORED_BLOCK 65535U
+
+/* Wrap `buf`/`len` in an RFC 1952 gzip stream using STORED DEFLATE
+ * blocks (BTYPE=00 — no actual compression). pprof reads .pb.gz
+ * regardless of whether the inner DEFLATE actually compressed; the
+ * gzip wrapper here exists for filename / magic-byte expectations.
+ *
+ * Layout:
+ *   10-byte gzip header: magic(2) cm(1) flg(1) mtime(4) xfl(1) os(1)
+ *   one or more stored DEFLATE blocks: bfinal+btype(1) len(2) ~len(2) data
+ *   8-byte gzip footer: crc32(4) isize(4)
+ *
+ * Returns 0 on success or -1 on write failure. */
+static int stream_gzip_to_fd(int out_fd, const uint8_t *buf, size_t len)
+{
+	const uint8_t header[10] = {
+	    0x1FU, 0x8BU, /* gzip magic */
+	    0x08U, /* CM = deflate */
+	    0x00U, /* FLG = none */
+	    0x00U, 0x00U, 0x00U, 0x00U, /* MTIME = 0 (unset) */
+	    0x00U, /* XFL = no extra */
+	    0x03U /* OS = Unix */
+	};
+	if (stream_to_fd(out_fd, header, sizeof(header)) != 0) {
+		return -1;
+	}
+
+	size_t pos = 0;
+	if (len == 0U) {
+		const uint8_t empty[5] = {0x01U, 0x00U, 0x00U, 0xFFU, 0xFFU};
+		if (stream_to_fd(out_fd, empty, sizeof(empty)) != 0) {
+			return -1;
+		}
+	}
+	while (pos < len) {
+		size_t remain = len - pos;
+		bool is_final = remain <= V8M_GZIP_MAX_STORED_BLOCK;
+		size_t block_len =
+		    is_final ? remain : V8M_GZIP_MAX_STORED_BLOCK;
+		uint8_t block_hdr[5];
+		block_hdr[0] = is_final ? 0x01U : 0x00U;
+		block_hdr[1] = (uint8_t)(block_len & 0xFFU);
+		block_hdr[2] = (uint8_t)((block_len >> 8U) & 0xFFU);
+		uint16_t nlen = (uint16_t)~(uint16_t)block_len;
+		block_hdr[3] = (uint8_t)(nlen & 0xFFU);
+		block_hdr[4] = (uint8_t)((nlen >> 8U) & 0xFFU);
+		if (stream_to_fd(out_fd, block_hdr, sizeof(block_hdr)) != 0) {
+			return -1;
+		}
+		if (stream_to_fd(out_fd, buf + pos, block_len) != 0) {
+			return -1;
+		}
+		pos += block_len;
+	}
+
+	uint32_t crc = pprof_crc32(buf, len);
+	uint32_t isize = (uint32_t)(len & 0xFFFFFFFFU);
+	uint8_t footer[8];
+	footer[0] = (uint8_t)(crc & 0xFFU);
+	footer[1] = (uint8_t)((crc >> 8U) & 0xFFU);
+	footer[2] = (uint8_t)((crc >> 16U) & 0xFFU);
+	footer[3] = (uint8_t)((crc >> 24U) & 0xFFU);
+	footer[4] = (uint8_t)(isize & 0xFFU);
+	footer[5] = (uint8_t)((isize >> 8U) & 0xFFU);
+	footer[6] = (uint8_t)((isize >> 16U) & 0xFFU);
+	footer[7] = (uint8_t)((isize >> 24U) & 0xFFU);
+	return stream_to_fd(out_fd, footer, sizeof(footer));
+}
+
+/* Build the entire pprof Profile message into the BSS scratch
+ * buffer. Returns the number of bytes encoded on success or
+ * SIZE_MAX on overflow. Sets errno on failure so the caller can
+ * convert to the public -1 / EOVERFLOW contract. */
+static size_t encode_heap_profile(void)
 {
 	struct v8m_size_class_histogram hist = {0};
 	v8m_get_size_class_histogram(&hist);
@@ -437,33 +528,70 @@ ssize_t v8m_pprof_dump_heap(int out_fd)
 	off = emit_sample_types(buf, cap, off);
 	if (off == SIZE_MAX) {
 		errno = EOVERFLOW;
-		return -1;
+		return off;
 	}
 	off = emit_samples(buf, cap, off, &hist, alive, huge_alive);
 	if (off == SIZE_MAX) {
 		errno = EOVERFLOW;
-		return -1;
+		return off;
 	}
 	off = emit_locations(buf, cap, off, alive, huge_alive);
 	if (off == SIZE_MAX) {
 		errno = EOVERFLOW;
-		return -1;
+		return off;
 	}
 	off = emit_functions(buf, cap, off, alive, huge_alive);
 	if (off == SIZE_MAX) {
 		errno = EOVERFLOW;
-		return -1;
+		return off;
 	}
 	off = emit_string_table(buf, cap, off);
 	if (off == SIZE_MAX) {
 		errno = EOVERFLOW;
+		return off;
+	}
+	return off;
+}
+
+/* cppcheck-suppress staticFunction
+ * — exposed via src/v8m_pprof.h and consumed by tests/test_pprof.c
+ *   in a different translation unit. */
+ssize_t v8m_pprof_dump_heap(int out_fd)
+{
+	size_t off = encode_heap_profile();
+	if (off == SIZE_MAX) {
 		return -1;
 	}
-
-	if (stream_to_fd(out_fd, buf, off) != 0) {
+	if (stream_to_fd(out_fd, g_pprof_buf, off) != 0) {
 		return -1;
 	}
 	return (ssize_t)off;
+}
+
+/* cppcheck-suppress staticFunction
+ * — exposed via src/v8m_pprof.h and consumed by tests/test_pprof.c
+ *   in a different translation unit. */
+ssize_t v8m_pprof_dump_heap_gz(int out_fd)
+{
+	size_t off = encode_heap_profile();
+	if (off == SIZE_MAX) {
+		return -1;
+	}
+	if (stream_gzip_to_fd(out_fd, g_pprof_buf, off) != 0) {
+		return -1;
+	}
+	return (ssize_t)off;
+}
+
+/* True iff `path` ends in the case-sensitive ".gz" suffix. */
+static bool path_ends_with_gz(const char *path)
+{
+	size_t len = strlen(path);
+	if (len < 3U) {
+		return false;
+	}
+	return path[len - 3U] == '.' && path[len - 2U] == 'g' &&
+	       path[len - 1U] == 'z';
 }
 
 int v8m_pprof_dump_heap_to_path(const char *path)
@@ -476,7 +604,8 @@ int v8m_pprof_dump_heap_to_path(const char *path)
 	if (out_fd < 0) {
 		return -1;
 	}
-	ssize_t got = v8m_pprof_dump_heap(out_fd);
+	ssize_t got = path_ends_with_gz(path) ? v8m_pprof_dump_heap_gz(out_fd)
+					      : v8m_pprof_dump_heap(out_fd);
 	int saved = errno;
 	if (close(out_fd) != 0 && got >= 0) {
 		return -1;

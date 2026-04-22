@@ -38,6 +38,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "v8m_arch.h"
 #include "v8m_internal.h" /* V8M_PAGE_SHIFT / SIZE / MASK */
@@ -321,6 +322,48 @@ static int check_bitops_builtins(void)
 	return 0;
 }
 
+/*
+ * The ISA summary helper writes a one-line "v8malloc isa: …" string.
+ * Tests verify the prefix and the presence of the arch=, cache_line=,
+ * lse=, and tsc_mhz= fields so a future field rename triggers this
+ * regression. Also asserts cap=0 / NULL inputs return 0 cleanly.
+ */
+static int check_isa_summary(void)
+{
+	char buf[160];
+	size_t len = v8m_arch_format_isa_summary(buf, sizeof(buf));
+	if (len == 0U) {
+		return fail("ISA summary returned 0 bytes");
+	}
+	if (len >= sizeof(buf)) {
+		return fail("ISA summary length out of bounds");
+	}
+	if (buf[len] != '\0') {
+		return fail("ISA summary missing trailing NUL");
+	}
+	if (strncmp(buf, "v8malloc isa:", 13) != 0) {
+		return fail("ISA summary missing 'v8malloc isa:' prefix");
+	}
+	const char *needles[] = {"arch=", "cache_line=", "lse=", "tsc_mhz="};
+	for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+		if (strstr(buf, needles[i]) == NULL) {
+			(void)fprintf(stderr,
+				      "test_arch: ISA summary missing field "
+				      "'%s' (got: %s)\n",
+				      needles[i], buf);
+			return 1;
+		}
+	}
+
+	if (v8m_arch_format_isa_summary(NULL, sizeof(buf)) != 0U) {
+		return fail("ISA summary with NULL buf returned non-zero");
+	}
+	if (v8m_arch_format_isa_summary(buf, 0) != 0U) {
+		return fail("ISA summary with cap=0 returned non-zero");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -332,6 +375,7 @@ int main(void)
 	result |= check_runtime_probes();
 	result |= check_tsc();
 	result |= check_bitops_builtins();
+	result |= check_isa_summary();
 	if (result == 0) {
 		(void)printf("test_arch: OK\n");
 	}
