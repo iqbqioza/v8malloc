@@ -7,6 +7,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Huge-page slab carve primitive
+  (`src/v8m_huge_slab.{h,c}`, TODO P0 row 88 partial —
+  huge-pages.md §4.2). Implements the spec's
+  `struct v8m_huge_slab` verbatim: per-huge-page
+  descriptor with a 32-bit bitmap (each bit tracks one
+  V8M_PAGE_SIZE = 64 KiB slab page within the
+  V8M_HUGE_PAGE_SIZE = 2 MiB / 1 MiB-on-s390x huge
+  page), `numa_node` for the future per-NUMA pool's
+  routing, `next` link for partial / full / empty
+  list chaining. `v8m_huge_slab_alloc` carves the next
+  free slot via `__builtin_ctz`, `v8m_huge_slab_free`
+  clears the matching bit while rejecting misaligned /
+  out-of-range / double-free pointers,
+  `v8m_huge_slab_is_full` / `is_empty` /
+  `live_count` round out the predicate surface that
+  the future per-NUMA HugePage pool will consume.
+  `V8M_HUGE_SLABS_PER_HUGE` = `V8M_HUGE_PAGE_SIZE /
+  V8M_PAGE_SIZE` (32 default, 16 on s390x), exactly
+  matching the spec's per-arch table. Two
+  `_Static_assert`s pin the bitmap-fits-in-32-bits
+  invariant. Ships standalone because the per-NUMA
+  HugePage pool that consumes it is multi-cycle work;
+  shipping the primitive on its own now means the
+  future pool cycle wires up against a tested, frozen
+  API. Coverage in `tests/test_huge_slab.c` (init
+  state, fill + drain round-trip with per-slot
+  alignment / range / uniqueness validation, free
+  rejection of bad pointers, partial slabs_per_huge
+  clamping, NULL tolerance).
 - Time-based EMA refill controller module
   (`src/v8m_refill_controller.{h,c}`, TODO P1 row 132 —
   winning-algorithms.md §4.2). Implements the spec

@@ -191,6 +191,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_config.c
 	src/v8m_core_cache.c
 	src/v8m_dispatch.c
+	src/v8m_huge_slab.c
 	src/v8m_large.c
 	src/v8m_libc_fallback.c
 	src/v8m_numa.c
