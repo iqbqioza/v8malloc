@@ -120,6 +120,10 @@ enum v8m_option {
 	V8M_OPT_PROFILE, /* 0 / 1 — emit allocation profile */
 	V8M_OPT_COMPACT_THRESHOLD, /* page utilization % below which a
 				    * page becomes a compaction candidate */
+	V8M_OPT_VMA_WARN_THRESHOLD, /* /proc/self/maps line count above
+				     * which the bg purge thread emits a
+				     * one-line warning to stderr; 0
+				     * disables. Default 1024. */
 	V8M_OPT_COUNT
 };
 

@@ -25,22 +25,51 @@ static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
 static atomic_bool g_running = false;
 static atomic_bool g_should_stop = false;
 
+/* Hysteresis state for the VMA threshold warning so we only emit
+ * the line once per crossing — every tick would be log spam, but
+ * suppressing forever after the first crossing would miss a
+ * later regression. Reset to false when the count drops back
+ * under the threshold so the next crossing fires again. */
+static bool g_vma_warning_active;
+
 /*
- * One pass of the periodic scan. v0 stub: when V8M_OPT_VERBOSE is
- * set, emit a single line summarising live page-heap state to
- * stderr so a long-running process leaves a periodic trace. Real
- * purge work (per-NUMA empty-page sweep, TLC bin shrink, etc.)
+ * One pass of the periodic scan. Two outputs today:
+ *   - V8M_OPT_VERBOSE: one stats line per tick (long-running
+ *     trace).
+ *   - V8M_OPT_VMA_WARN_THRESHOLD: a one-time stderr warning
+ *     when the live VMA count crosses the threshold (resets when
+ *     it drops back under). Independent of VERBOSE so production
+ *     hosts can keep VERBOSE off and still get the warning.
+ *
+ * Real purge work (per-NUMA empty-page sweep, TLC bin shrink)
  * hooks in here as those subsystems land.
  */
 static void run_scan_pass(void)
 {
+	uint64_t vma_count = v8m_count_vmas();
+	int64_t threshold = v8m_config_get(V8M_OPT_VMA_WARN_THRESHOLD);
+	if (threshold > 0 && vma_count >= (uint64_t)threshold) {
+		if (!g_vma_warning_active) {
+			(void)fprintf(
+			    stderr,
+			    "v8malloc: VMA count crossed warning threshold "
+			    "(vma=%llu threshold=%lld) — kernel-side "
+			    "fragmentation cost is climbing, expect mmap / "
+			    "fork / page-fault latency hits.\n",
+			    (unsigned long long)vma_count,
+			    (long long)threshold);
+			g_vma_warning_active = true;
+		}
+	} else {
+		/* Reset hysteresis so a future crossing re-warns. */
+		g_vma_warning_active = false;
+	}
 	if (v8m_config_get(V8M_OPT_VERBOSE) == 0) {
 		return;
 	}
 	struct v8m_page_heap_stats stats = {0};
 	v8m_page_heap_get_stats(&stats);
 	uint64_t live_regions = (uint64_t)v8m_page_heap_live_region_count();
-	uint64_t vma_count = v8m_count_vmas();
 	(void)fprintf(stderr,
 		      "v8m_bg_purge: live_regions=%llu vma=%llu "
 		      "bytes_mapped=%llu bytes_unmapped=%llu\n",

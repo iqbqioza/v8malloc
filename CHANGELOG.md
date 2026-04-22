@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- VMA-count threshold warning in the bg purge thread
+  (`src/v8m_bg_purge.c`, huge-pages.md §6.2). New
+  `V8M_OPT_VMA_WARN_THRESHOLD` (env `V8M_VMA_WARN_THRESHOLD`,
+  default 1024) drives the bg purge thread to emit a one-line
+  stderr warning when the live VMA count from
+  `v8m_count_vmas()` crosses the threshold. Hysteresis tracks
+  the last warning state so the line fires once per crossing,
+  not every tick — but a later crossing after the count
+  recovered will re-warn. Independent of `V8M_VERBOSE` so
+  production hosts can keep verbose logging off and still get
+  the warning. 0 disables. Closes the auto-warning half of the
+  VMA monitoring TODO; the MAP_FIXED anchor-reservation
+  refactor remains as separate page-heap-strategy work.
+
 - `malloc_info` XML expanded + `V8M_PROFILE` on-exit dump
   (`src/v8m_api.c`). The XML now covers every counter the
   allocator tracks: `<total>` mmap region count + size,

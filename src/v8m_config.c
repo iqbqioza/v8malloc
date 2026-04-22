@@ -26,6 +26,7 @@ static const int64_t v8m_config_defaults[V8M_OPT_COUNT] = {
     [V8M_OPT_DEBUG] = 0,
     [V8M_OPT_PROFILE] = 0,
     [V8M_OPT_COMPACT_THRESHOLD] = 25,
+    [V8M_OPT_VMA_WARN_THRESHOLD] = 1024,
 };
 
 static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
@@ -37,6 +38,7 @@ static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
     [V8M_OPT_DEBUG] = "V8M_DEBUG",
     [V8M_OPT_PROFILE] = "V8M_PROFILE",
     [V8M_OPT_COMPACT_THRESHOLD] = "V8M_COMPACT_THRESHOLD",
+    [V8M_OPT_VMA_WARN_THRESHOLD] = "V8M_VMA_WARN_THRESHOLD",
 };
 
 static _Atomic int64_t v8m_config_values[V8M_OPT_COUNT];
