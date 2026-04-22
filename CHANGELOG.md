@@ -6,6 +6,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `V8M_OPT_DEBUG` trailing guard pages for Large/Huge
+  allocations (`src/v8m_large.c`, `src/v8m_large.h`,
+  api.md §6.2 / TODO P2 "guard pages, red zones" entry).
+  When `V8M_OPT_DEBUG != 0` (env `V8M_DEBUG=1`) the alloc path
+  appends one V8M_PAGE_SIZE region at the end of every Large /
+  Huge allocation and `mprotect()`s it `PROT_NONE`; an overrun
+  past the user-data window raises SIGSEGV synchronously
+  instead of silently corrupting the next mapping. The guard
+  size is recorded on the meta as `guard_bytes` so
+  `malloc_usable_size` reports the accessible window only.
+  Off the production hot path entirely — production builds run
+  with DEBUG=0, `guard_bytes` stays 0, and `usable_size`
+  matches the pre-cycle behaviour bit-for-bit. Coverage in
+  `tests/test_guard_page.c` covers both directions: with
+  DEBUG off, writing every byte of the reported usable_size
+  succeeds (catches accidental production-mode guards); with
+  DEBUG on, a fork()'d child writing at offset usable_size
+  dies with SIGSEGV (the parent verifies via waitpid).
+  Slab + buddy guard pages remain future work — slab metadata
+  co-locates with the data area, and buddy arenas are
+  multi-tenant so per-allocation guards would need finer
+  routing.
+
 ### Performance
 - Buddy arenas now defer the page-heap munmap when they fully
   drain (`src/v8m_buddy_pool.{h,c}`, fragmentation.md §6.3 /

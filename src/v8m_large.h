@@ -48,6 +48,17 @@ struct v8m_large_page_meta {
 	struct v8m_page_meta *next; /* unused; kept NULL */
 	/* Large/Huge-specific. */
 	size_t mmap_size;
+	/*
+	 * Trailing guard-page size, in bytes. 0 for non-debug
+	 * allocations. When `V8M_OPT_DEBUG` is on, the alloc path
+	 * appends one V8M_PAGE_SIZE guard at the end of `mmap_size`
+	 * and mprotect()s it PROT_NONE so any overrun past the user
+	 * data window faults instead of corrupting the next mapping
+	 * silently. `usable_size` subtracts this so callers see the
+	 * accessible window only; free uses `mmap_size` directly so
+	 * the whole region (including the guard) is unmapped.
+	 */
+	size_t guard_bytes;
 };
 
 /*

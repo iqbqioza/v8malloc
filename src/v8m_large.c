@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/mman.h> /* mprotect for V8M_OPT_DEBUG guard pages */
 
 #include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
 #include "v8m_config.h"
@@ -111,6 +112,15 @@ static size_t round_up_pow2(size_t value, size_t multiple)
  * V8M_PAGE_SIZE) and also drives the mmap_size rounding so the
  * resulting allocation is shaped for the page heap's MAP_HUGETLB
  * attempt when applicable.
+ *
+ * Under V8M_OPT_DEBUG the function appends one V8M_PAGE_SIZE
+ * guard at the end of the region and mprotect()s it PROT_NONE
+ * so any out-of-bounds write past the user-data window
+ * traps instead of silently corrupting an adjacent mapping
+ * (api.md §6.2). The guard size is recorded on the meta so
+ * usable_size can report the accessible window correctly; free
+ * unmaps the whole region (mmap_size already includes the
+ * guard), so no DEBUG/non-DEBUG branching is needed there.
  */
 /* The four parameters share size-or-uint types; the linter flags
  * the adjacent size_t pair as swappable. The naming pins each
@@ -132,9 +142,32 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	size_t total = header_offset + size;
 	size_t mmap_size = round_up_pow2(total, pheap_alignment);
 
+	bool guard_on = v8m_config_get(V8M_OPT_DEBUG) != 0;
+	size_t guard_bytes = 0;
+	if (guard_on) {
+		if (mmap_size > SIZE_MAX - V8M_PAGE_SIZE) {
+			return NULL;
+		}
+		guard_bytes = V8M_PAGE_SIZE;
+		mmap_size += guard_bytes;
+	}
+
 	void *region = v8m_page_heap_alloc(mmap_size, pheap_alignment);
 	if (region == NULL) {
 		return NULL;
+	}
+
+	if (guard_on) {
+		void *guard = (unsigned char *)region + mmap_size - guard_bytes;
+		if (mprotect(guard, guard_bytes, PROT_NONE) != 0) {
+			/* mprotect failure is rare (kernel out of VMAs is
+			 * the realistic cause). Release the region and
+			 * fail the alloc — silently downgrading to a
+			 * no-guard allocation under DEBUG would defeat
+			 * the diagnostic. */
+			v8m_page_heap_free(region, mmap_size);
+			return NULL;
+		}
 	}
 
 	struct v8m_large_page_meta *meta = region;
@@ -152,6 +185,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	meta->free_list_head = NULL;
 	meta->next = NULL;
 	meta->mmap_size = mmap_size;
+	meta->guard_bytes = guard_bytes;
 
 	if (cls == V8M_CLASS_HUGE) {
 		atomic_fetch_add_explicit(&v8m_huge_alloc_count, 1U,
@@ -270,9 +304,11 @@ size_t v8m_large_usable_size(const void *obj)
 	 * base; recover that offset from the pointer's low bits. For the
 	 * default path header_offset == V8M_SLAB_HEADER_SIZE, for the
 	 * aligned variant it equals the requested alignment. Both fit in
-	 * the page (< V8M_PAGE_SIZE), so the low-bits trick is exact. */
+	 * the page (< V8M_PAGE_SIZE), so the low-bits trick is exact.
+	 * Subtract the trailing guard (0 outside V8M_OPT_DEBUG) so the
+	 * reported window stops at the first inaccessible byte. */
 	uintptr_t header_offset = (uintptr_t)obj & (V8M_PAGE_SIZE - 1U);
-	return meta->mmap_size - header_offset;
+	return meta->mmap_size - header_offset - meta->guard_bytes;
 }
 
 void v8m_large_get_stats(struct v8m_large_stats *out)
