@@ -11,6 +11,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h> /* fprintf for the red-zone abort diagnostic */
+#include <stdlib.h> /* abort */
+#include <string.h> /* memset, memchr */
 #include <sys/mman.h> /* mprotect for V8M_OPT_DEBUG guard pages */
 
 #include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
@@ -21,6 +24,28 @@
 #include "v8m_page_heap.h"
 #include "v8m_size_class.h"
 #include "v8malloc/v8malloc.h"
+
+/*
+ * Red zone canary byte. Filled into the tail padding between the
+ * caller's requested size and the usable_size boundary at alloc
+ * time, verified at free time. A mismatched byte is the signature
+ * of a small overflow that did not reach the trailing guard page.
+ * 0xCD matches the convention from MSVC's debug heap so anyone
+ * familiar with Windows debug allocators recognises the pattern.
+ */
+#define V8M_LARGE_REDZONE_BYTE 0xCDU
+
+/*
+ * Maximum red-zone span, in bytes. Capping the canary work bounds
+ * the cost of DEBUG mode for the largest allocations — a Huge
+ * request whose mmap_size rounds up to 2 MiB-multiples would
+ * otherwise trigger ~2 MiB of memset + memcmp on every free. 64
+ * bytes (one cache line on every supported arch) catches the
+ * overwhelming majority of small overflows; anything larger
+ * either falls inside the cap or eventually crosses into the
+ * trailing guard page, which traps synchronously regardless.
+ */
+#define V8M_LARGE_REDZONE_MAX_BYTES 64U
 
 /* Common-prefix offsets must match v8m_page_meta exactly, so generic
  * reverse-lookup code (v8m_ptr_to_meta + magic check) works against
@@ -81,6 +106,62 @@ static _Atomic uint64_t v8m_huge_bytes_in_use;
 static size_t round_up_pow2(size_t value, size_t multiple)
 {
 	return (value + multiple - 1U) & ~(multiple - 1U);
+}
+
+/*
+ * Bytes of red zone available for `requested_size` past the user
+ * pointer, capped at V8M_LARGE_REDZONE_MAX_BYTES. The window is the
+ * difference between the rounded-up usable_size and the caller's
+ * requested size; if the request happened to align exactly to the
+ * page boundary the window is zero and the helper returns zero
+ * (trailing guard page still catches overflows past the page).
+ */
+static size_t large_redzone_span(const struct v8m_large_page_meta *meta,
+				 uintptr_t header_offset)
+{
+	size_t accessible = meta->mmap_size - header_offset - meta->guard_bytes;
+	if (meta->requested_size >= accessible) {
+		return 0U;
+	}
+	size_t tail = accessible - meta->requested_size;
+	if (tail > V8M_LARGE_REDZONE_MAX_BYTES) {
+		tail = V8M_LARGE_REDZONE_MAX_BYTES;
+	}
+	return tail;
+}
+
+static void large_fill_redzone(unsigned char *user_ptr,
+			       const struct v8m_large_page_meta *meta,
+			       uintptr_t header_offset)
+{
+	size_t span = large_redzone_span(meta, header_offset);
+	if (span == 0U) {
+		return;
+	}
+	(void)memset(user_ptr + meta->requested_size, V8M_LARGE_REDZONE_BYTE,
+		     span);
+}
+
+static void large_check_redzone(const unsigned char *user_ptr,
+				const struct v8m_large_page_meta *meta,
+				uintptr_t header_offset)
+{
+	size_t span = large_redzone_span(meta, header_offset);
+	if (span == 0U) {
+		return;
+	}
+	const unsigned char *zone = user_ptr + meta->requested_size;
+	for (size_t i = 0; i < span; i++) {
+		if (zone[i] != V8M_LARGE_REDZONE_BYTE) {
+			(void)fprintf(
+			    stderr,
+			    "v8malloc DEBUG: red-zone corrupted at "
+			    "offset %zu past requested size (%zu) of "
+			    "allocation %p — heap overflow detected\n",
+			    i, meta->requested_size, (const void *)user_ptr);
+			abort();
+		}
+	}
 }
 
 /*
@@ -186,6 +267,12 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	meta->next = NULL;
 	meta->mmap_size = mmap_size;
 	meta->guard_bytes = guard_bytes;
+	meta->requested_size = guard_on ? size : 0U;
+
+	if (guard_on) {
+		unsigned char *user = (unsigned char *)region + header_offset;
+		large_fill_redzone(user, meta, header_offset);
+	}
 
 	if (cls == V8M_CLASS_HUGE) {
 		atomic_fetch_add_explicit(&v8m_huge_alloc_count, 1U,
@@ -273,6 +360,15 @@ void v8m_large_free(const void *obj)
 	struct v8m_large_page_meta *meta = (struct v8m_large_page_meta *)common;
 	size_t mmap_size = meta->mmap_size;
 	bool was_huge = meta->size_class == (uint16_t)V8M_LARGE_HUGE_TAG;
+
+	/* Verify the red zone before tearing down the meta. `guard_bytes`
+	 * is the marker for "DEBUG was on at alloc time" — if it's zero
+	 * the allocation predates DEBUG and there is no canary to check. */
+	if (meta->guard_bytes != 0U) {
+		uintptr_t header_offset = (uintptr_t)obj & (V8M_PAGE_SIZE - 1U);
+		large_check_redzone((const unsigned char *)obj, meta,
+				    header_offset);
+	}
 
 	atomic_store_explicit(&meta->used_count, 0U, memory_order_relaxed);
 	meta->magic = 0U;

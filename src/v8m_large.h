@@ -59,6 +59,16 @@ struct v8m_large_page_meta {
 	 * the whole region (including the guard) is unmapped.
 	 */
 	size_t guard_bytes;
+	/*
+	 * Caller's original `size` request, in bytes. Recorded only
+	 * under `V8M_OPT_DEBUG` so the free path can compute the red
+	 * zone region (the tail padding between size and the
+	 * usable_size boundary) and verify the canary pattern.
+	 * Non-debug allocations leave this 0; the free path's
+	 * red-zone check keys off `guard_bytes != 0` to decide
+	 * whether the field is meaningful.
+	 */
+	size_t requested_size;
 };
 
 /*

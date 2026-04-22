@@ -30,9 +30,11 @@
 
 #include "v8malloc/v8malloc.h"
 
-/* The Large size class starts at 256 KiB. Pick a clean 256 KiB
- * request so the overrun computation stays trivial. */
-enum { LARGE_REQUEST = (size_t)256 * 1024 };
+/* The buddy pool covers up to V8M_BUDDY_MAX_BLOCK (256 KiB); the
+ * Large mmap-direct path takes over above that. Pick 512 KiB so
+ * the allocation lands firmly in v8m_large_alloc where the guard
+ * page + red zone live. */
+enum { LARGE_REQUEST = (size_t)512 * 1024 };
 
 static int fail(const char *msg)
 {
@@ -164,11 +166,80 @@ static int check_guard_on_traps_overrun(void)
 	return 0;
 }
 
+/*
+ * Trip the red zone in a child: allocate, write a few bytes past
+ * the request (well within the tail padding so the guard page is
+ * not involved), then free. The free path's canary check must
+ * detect the corruption and abort with SIGABRT. The parent
+ * verifies via waitpid.
+ */
+static int run_redzone_overrun_in_child(size_t bytes_past_request)
+{
+	/* NOLINTNEXTLINE(misc-include-cleaner) */
+	pid_t pid = fork();
+	if (pid < 0) {
+		return CHILD_WAIT_FAILED;
+	}
+	if (pid == 0) {
+		unsigned char *buf = malloc(LARGE_REQUEST);
+		if (buf == NULL) {
+			_exit(2);
+		}
+		/* Stamp the legal window and the canary span. The
+		 * write-past-request is a one-byte stomp — enough for
+		 * the canary check to see at least one mismatched byte
+		 * and abort. */
+		(void)memset(buf, 0xA5, LARGE_REQUEST);
+		volatile unsigned char *probe =
+		    buf + LARGE_REQUEST + bytes_past_request;
+		*probe = 0x5A;
+		__asm__ volatile("" ::: "memory");
+		free(buf);
+		/* free should not return — abort fired in the canary
+		 * check. If it does, that's the test failure. */
+		_exit(0);
+	}
+
+	int status = 0;
+	if (waitpid(pid, &status, 0) != pid) {
+		return CHILD_WAIT_FAILED;
+	}
+	if (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) {
+		return CHILD_SIGSEGV; /* reuse: "the right signal fired" */
+	}
+	if (WIFSIGNALED(status)) {
+		return CHILD_OTHER_DEATH;
+	}
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		return CHILD_EXIT_OK;
+	}
+	return CHILD_OK;
+}
+
+static int check_redzone_traps_small_overflow(void)
+{
+	if (v8m_set_option(V8M_OPT_DEBUG, 1) != 0) {
+		return fail("could not turn DEBUG on for redzone test");
+	}
+	/* Stomp byte 8 past the requested size — well inside the
+	 * 64-byte canary span and far short of the trailing guard
+	 * (which sits at usable_size, ~62 KiB past the request).
+	 * The free-time canary check should fire SIGABRT. */
+	int outcome = run_redzone_overrun_in_child(8);
+	(void)v8m_set_option(V8M_OPT_DEBUG, 0);
+	if (outcome != CHILD_SIGSEGV) { /* enum reused for SIGABRT */
+		return fail("DEBUG=on but the small overrun was not caught by "
+			    "the red zone");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
 	result |= check_guard_off_by_default();
 	result |= check_guard_on_traps_overrun();
+	result |= check_redzone_traps_small_overflow();
 	if (result == 0) {
 		(void)printf("test_guard_page: OK\n");
 	}

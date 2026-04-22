@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `V8M_OPT_DEBUG` red zones for Large/Huge allocations
+  (`src/v8m_large.c`, api.md §6.2 / TODO P2 "red zones"
+  sub-item). When DEBUG is on, the alloc path fills the
+  first 64 bytes (one cache line) of the tail padding
+  between the caller's requested size and the usable_size
+  boundary with a `0xCD` canary; the free path walks the
+  same span and aborts with
+  `v8malloc DEBUG: red-zone corrupted at offset N past
+  requested size (...) of allocation P` if any byte
+  diverges. Catches the small-overflow class that the
+  trailing guard page (which sits one full V8M_PAGE_SIZE
+  past the request) cannot reach. Cap of 64 bytes bounds
+  the per-allocation memset/memcmp cost so DEBUG mode stays
+  usable on the largest Huge requests; overflows beyond the
+  cap eventually cross into the trailing guard page and
+  trap synchronously regardless. New `requested_size`
+  field on `v8m_large_page_meta` records the original
+  request so the free path can compute the canary span;
+  `guard_bytes != 0` keys whether the canary is meaningful.
+  Production builds (DEBUG=0) leave `requested_size = 0`,
+  skip the fill, and skip the verify — bit-for-bit
+  unchanged. New `tests/test_guard_page.c::check_redzone_traps_small_overflow`
+  forks a child that stomps byte 8 past the request and
+  verifies the parent observes SIGABRT via waitpid. Also
+  bumped the test's `LARGE_REQUEST` from 256 KiB (which
+  routes to the buddy pool) to 512 KiB so the
+  guard-on-overrun check exercises the actual
+  `v8m_large_alloc` guard rather than a coincidental
+  unmapped-arena-edge fault.
+
 - `V8M_OPT_DEBUG` trailing guard pages for Large/Huge
   allocations (`src/v8m_large.c`, `src/v8m_large.h`,
   api.md §6.2 / TODO P2 "guard pages, red zones" entry).
