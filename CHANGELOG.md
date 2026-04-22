@@ -6,6 +6,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- CI failure on `test_guard_page` under UBSan. Two coupled issues
+  surfaced once UBSan landed in the CI matrix: (a) UBSan
+  intercepts `SIGSEGV` and aborts the process, so the child the
+  guard test fork()s died with `SIGABRT` instead of `SIGSEGV` —
+  fix sets `UBSAN_OPTIONS=handle_segv=0` (plus the matching
+  `ASAN_OPTIONS` / `TSAN_OPTIONS`) via the CTest
+  `ENVIRONMENT` property on `test_guard_page` and
+  `test_double_free`, letting the kernel deliver the signal
+  directly. (b) The slab/buddy UAF detector verify path
+  (landed two cycles ago) ran under runtime DEBUG flips,
+  which fired false-positive aborts on slab pages whose slots
+  were initialized while DEBUG was off (the pre-poison was
+  skipped, so the first verify after the flip saw mmap-zero
+  bytes instead of poison). Fix latches the UAF detector at
+  first call instead of reading `V8M_OPT_DEBUG` on every
+  poison/verify — `V8M_DEBUG=1` in the env at process start
+  enables the detector for the lifetime of the process,
+  runtime `v8m_set_option(V8M_OPT_DEBUG, 1)` toggles do not.
+  Other DEBUG features (double-free ring, guard pages, red
+  zones) keep their runtime gating because they are not
+  state-dependent across the flip.
+
 ### Added
 - Persisted bench baseline regression check
   (`scripts/bench-regression-check.sh` — resolution of the

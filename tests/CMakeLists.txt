@@ -64,6 +64,17 @@ v8malloc_add_test(test_signal_safe)
 v8malloc_add_test(test_pprof)
 v8malloc_add_test(test_double_free)
 v8malloc_add_test(test_guard_page)
+# Sanitizers (UBSan / ASan / TSan) intercept SIGSEGV by default and
+# abort with SIGABRT, breaking the WTERMSIG == SIGSEGV check the
+# guard test relies on. handle_segv=0 lets the kernel deliver the
+# signal directly. Plain builds ignore the env var.
+set_tests_properties(test_guard_page PROPERTIES
+	ENVIRONMENT "UBSAN_OPTIONS=handle_segv=0;ASAN_OPTIONS=handle_segv=0;TSAN_OPTIONS=handle_segv=0")
+# test_double_free also produces an intentional SIGABRT in a child;
+# UBSan's own abort_on_error layered on top can confuse the parent's
+# WTERMSIG check. Same opt-out keeps the contract clean.
+set_tests_properties(test_double_free PROPERTIES
+	ENVIRONMENT "UBSAN_OPTIONS=handle_segv=0;ASAN_OPTIONS=handle_segv=0;TSAN_OPTIONS=handle_segv=0")
 v8malloc_add_test(test_thread_cache)
 v8malloc_add_test(test_core_cache)
 v8malloc_add_test(test_libc_fallback)
