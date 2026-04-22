@@ -6,6 +6,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- Buddy arenas now defer the page-heap munmap when they fully
+  drain (`src/v8m_buddy_pool.{h,c}`, fragmentation.md §6.3 /
+  TODO P1 "MADV_DONTNEED on idle pages" entry). When the free
+  path empties an arena it applies `madvise(MADV_DONTNEED)` —
+  which releases the physical frames immediately — and keeps
+  the VMA + buddy bookkeeping in a `drained` state. A revival
+  alloc within the next few bg-purge ticks reuses the slot
+  without an mmap/munmap round trip; the kernel re-faults zero
+  pages on the first touch. Bursty workloads that oscillate
+  between holding and releasing the same arena (the MB-04
+  mixed-size pattern is the canonical example) save one
+  mmap/munmap pair plus the matching region-map insert/remove
+  per cycle. The bg purge thread now owns a per-tick callback
+  (`v8m_bg_purge_set_tick_hook`) routed through the new
+  `v8m_dispatch_bg_tick` → `v8m_buddy_pool_sweep_idle`; arenas
+  drained for ≥4 sweep ticks (≈4 s at the default 1 s purge
+  interval) are released to the page heap. The explicit
+  `v8m_purge()` API now also calls
+  `v8m_dispatch_purge_drained()` to give callers immediate VMA
+  + RSS relief, and the soft-limit refusal path retries after
+  force-purging drained arenas so an OOM handler that frees a
+  buddy block to make headroom always sees the limit drop.
+  New stats accessor `v8m_buddy_pool_get_arena_stats` reports
+  live / drained / total-in-use counts. Coverage in
+  `tests/test_buddy_pool.c::check_drain_and_revive` (asserts a
+  single free leaves the arena in drained state and the next
+  alloc reuses it without a fresh page-heap mmap) and
+  `check_sweep_threshold` (asserts the idle-tick threshold is
+  honoured); existing tests updated to call
+  `v8m_buddy_pool_sweep_idle(0)` / `v8m_purge()` where
+  immediate release is required.
+
 ### Added
 - x86_64 RDTSC time source + lazy frequency calibration
   (`src/v8m_arch.{h,c}`, winning-algorithms.md §4.2 / TODO

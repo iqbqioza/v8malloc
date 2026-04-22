@@ -225,9 +225,15 @@ int main(void)
 		}
 	}
 
-	/* Drain: free every live slot. After this a healthy allocator
-	 * should have live_bytes within a megabyte of baseline. */
+	/* Drain: free every live slot. Buddy arenas that empty during
+	 * the workload go into the drained-but-mapped state and are
+	 * released lazily by the bg purge sweep; an explicit
+	 * v8m_purge() forces immediate release so the leak-check
+	 * invariant ("live_bytes returns within 1 MiB of baseline")
+	 * reflects the allocator's steady-state footprint rather than
+	 * its drain-hold grace window. */
 	drain_live(live, live_count);
+	(void)v8m_purge();
 
 	struct v8m_stats after;
 	v8m_get_stats(&after);

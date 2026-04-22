@@ -59,4 +59,16 @@ bool v8m_bg_purge_running(void);
  */
 void v8m_bg_purge_run_once(void);
 
+/*
+ * Per-tick callback invoked by the bg thread (and by
+ * v8m_bg_purge_run_once on synchronous calls). The pointer is set
+ * by the public-API layer at constructor time so v8m_bg_purge does
+ * not have to know about the dispatcher singleton; clearing it
+ * back to NULL during shutdown is a no-op-safe idiom. The hook is
+ * called outside any pool lock so the implementation is free to
+ * take whichever locks it needs.
+ */
+typedef void (*v8m_bg_purge_tick_hook)(void);
+void v8m_bg_purge_set_tick_hook(v8m_bg_purge_tick_hook hook);
+
 #endif

@@ -41,6 +41,18 @@
 struct v8m_buddy_pool_arena {
 	struct v8m_buddy buddy;
 	bool in_use;
+	/*
+	 * Drain-and-keep state. When a free path empties an arena, we
+	 * apply MADV_DONTNEED to release physical frames but keep the
+	 * VMA + buddy bookkeeping intact, so a follow-up alloc can
+	 * reuse the slot without an mmap/munmap round trip. The arena
+	 * stays `in_use=true` while drained; `idle_ticks` advances by
+	 * one each bg-purge sweep that did not find an alloc reviving
+	 * it. After enough idle ticks the sweep releases the arena
+	 * fully — see v8m_buddy_pool_sweep_idle.
+	 */
+	bool drained;
+	uint32_t idle_ticks;
 };
 
 struct v8m_buddy_pool {
@@ -87,5 +99,38 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr);
  * layer's malloc_usable_size for buddy allocations.
  */
 size_t v8m_buddy_pool_block_size(struct v8m_buddy_pool *pool, const void *ptr);
+
+/*
+ * Periodic idle-arena sweep. Walks every in-use slot; for arenas
+ * that are currently drained (no live blocks, MADV_DONTNEED already
+ * applied) increments `idle_ticks` by one and, if the new count
+ * meets or exceeds `max_idle_ticks`, releases the arena to the page
+ * heap. Returns the number of arenas released this pass.
+ *
+ * Intended caller is the background purge thread; one tick per bg
+ * purge interval. `max_idle_ticks` tunes how long a drained arena
+ * is held for potential revival before the VMA is given back. A
+ * value of 0 releases every drained arena immediately (defeats the
+ * deferred-munmap optimization but useful for tests).
+ *
+ * Concurrency: takes the pool lock for the duration of the scan.
+ */
+size_t v8m_buddy_pool_sweep_idle(struct v8m_buddy_pool *pool,
+				 uint32_t max_idle_ticks);
+
+/*
+ * Snapshot of arena occupancy. Reports the counts the bg purge and
+ * frag-metrics reporters need without exposing the array directly.
+ * Live = in_use && !drained; drained = in_use && drained;
+ * total_in_use = live + drained.
+ */
+struct v8m_buddy_pool_arena_stats {
+	uint32_t live;
+	uint32_t drained;
+	uint32_t total_in_use;
+};
+
+void v8m_buddy_pool_get_arena_stats(struct v8m_buddy_pool *pool,
+				    struct v8m_buddy_pool_arena_stats *out);
 
 #endif /* V8M_BUDDY_POOL_H */

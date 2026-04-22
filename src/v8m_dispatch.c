@@ -204,3 +204,31 @@ void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
 	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }
+
+/*
+ * Idle-buddy-arena hold duration in bg-purge ticks. At the default
+ * V8M_OPT_PURGE_INTERVAL of 1 second, 4 ticks ≈ 4 seconds of grace
+ * before a drained arena is fully released — enough to absorb the
+ * typical alloc/free burst cadence without retaining VMA pressure
+ * on a long idle workload.
+ */
+#define V8M_DISPATCH_BUDDY_IDLE_TICKS 4U
+
+size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch)
+{
+	if (dispatch == NULL) {
+		return 0;
+	}
+	return v8m_buddy_pool_sweep_idle(&dispatch->buddy,
+					 V8M_DISPATCH_BUDDY_IDLE_TICKS);
+}
+
+size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch)
+{
+	if (dispatch == NULL) {
+		return 0;
+	}
+	/* max_idle_ticks = 0 → every drained arena passes the
+	 * release test on the first walk. */
+	return v8m_buddy_pool_sweep_idle(&dispatch->buddy, 0U);
+}

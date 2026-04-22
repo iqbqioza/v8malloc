@@ -24,6 +24,10 @@ static pthread_cond_t g_cond = PTHREAD_COND_INITIALIZER;
 /* NOLINTEND(misc-include-cleaner) */
 static atomic_bool g_running = false;
 static atomic_bool g_should_stop = false;
+/* Per-tick callback into higher-level cleanup (e.g. dispatch idle
+ * sweep). uintptr_t storage so atomics on the function pointer
+ * work portably without UBSAN-tripping casts in the access path. */
+static atomic_uintptr_t g_tick_hook;
 
 /* Hysteresis state for the VMA threshold warning so we only emit
  * the line once per crossing — every tick would be log spam, but
@@ -46,6 +50,18 @@ static bool g_vma_warning_active;
  */
 static void run_scan_pass(void)
 {
+	uintptr_t hook_raw =
+	    atomic_load_explicit(&g_tick_hook, memory_order_acquire);
+	if (hook_raw != 0) {
+		/* The hook pointer is stored as uintptr_t so the atomic
+		 * load/store machinery does not need a function-pointer
+		 * specialization; the cast back here is the only place
+		 * we materialize the function-pointer type. */
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		v8m_bg_purge_tick_hook hook = (v8m_bg_purge_tick_hook)hook_raw;
+		hook();
+	}
+
 	uint64_t vma_count = v8m_count_vmas();
 	int64_t threshold = v8m_config_get(V8M_OPT_VMA_WARN_THRESHOLD);
 	if (threshold > 0 && vma_count >= (uint64_t)threshold) {
@@ -160,4 +176,10 @@ bool v8m_bg_purge_running(void)
 void v8m_bg_purge_run_once(void)
 {
 	run_scan_pass();
+}
+
+void v8m_bg_purge_set_tick_hook(v8m_bg_purge_tick_hook hook)
+{
+	atomic_store_explicit(&g_tick_hook, (uintptr_t)hook,
+			      memory_order_release);
 }

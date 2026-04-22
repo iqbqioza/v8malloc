@@ -164,6 +164,19 @@ static void v8m_atfork_child(void)
 	}
 }
 
+/* Bg-purge per-tick callback. Routed through the dispatch so the
+ * bg_purge module stays oblivious to the dispatcher singleton.
+ * Skips when the dispatcher is not yet (or no longer) READY so we
+ * never touch a teardown-in-progress pool. */
+static void v8m_api_bg_tick(void)
+{
+	if (atomic_load_explicit(&g_init_state, memory_order_acquire) !=
+	    V8M_INIT_READY) {
+		return;
+	}
+	(void)v8m_dispatch_bg_tick(&g_dispatch);
+}
+
 __attribute__((constructor(101))) static void v8m_constructor(void)
 {
 	/* Publish RUNNING before touching anything malloc-shaped so a
@@ -195,6 +208,12 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	}
 	atomic_store_explicit(&g_init_state, V8M_INIT_READY,
 			      memory_order_release);
+
+	/* Install the per-tick callback before the bg thread starts so
+	 * the very first scan pass already exercises it. The hook is a
+	 * thin wrapper around v8m_dispatch_bg_tick; defining it here
+	 * keeps v8m_bg_purge.c free of v8m_dispatch.h knowledge. */
+	v8m_bg_purge_set_tick_hook(v8m_api_bg_tick);
 
 	/* Background purge thread spawns last so the dispatcher and
 	 * fork handlers are fully usable before the thread can run.
@@ -272,7 +291,10 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 * thread's last loop body sees READY (avoids it spinning on
 	 * stale state during shutdown). The shutdown path uses a
 	 * condvar signal, so the join completes within a futex hop
-	 * regardless of the configured purge interval. */
+	 * regardless of the configured purge interval. Clear the
+	 * tick hook first so a synchronous v8m_purge() that races
+	 * the destructor cannot enter the dispatch after teardown. */
+	v8m_bg_purge_set_tick_hook(NULL);
 	v8m_bg_purge_shutdown();
 	(void)atomic_exchange_explicit(&g_init_state, V8M_INIT_TORN_DOWN,
 				       memory_order_acquire);
@@ -303,6 +325,18 @@ static bool over_soft_limit(size_t size)
 	struct v8m_page_heap_stats stats = {0};
 	v8m_page_heap_get_stats(&stats);
 	uint64_t live = stats.bytes_mapped - stats.bytes_unmapped;
+	if (live + size <= limit) {
+		return false;
+	}
+	/* Live bytes count drained-but-still-mapped buddy arenas; under
+	 * pressure those are reclaimable, so force-release them and
+	 * recheck before refusing. Without this an OOM handler that
+	 * frees a buddy block to make headroom would never see the
+	 * limit drop, even though the kernel could give the pages back
+	 * immediately. */
+	(void)v8m_dispatch_purge_drained(&g_dispatch);
+	v8m_page_heap_get_stats(&stats);
+	live = stats.bytes_mapped - stats.bytes_unmapped;
 	return live + size > limit;
 }
 
@@ -764,16 +798,17 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 
 V8M_EXPORT int v8m_purge(void)
 {
-	/* The slab pool returns empty pages to the page heap on free,
-	 * the buddy pool reclaims fully-drained arenas, and Large/Huge
-	 * regions are unmapped on free — there is nothing left to
-	 * release synchronously in v0. We do, however, run the bg
-	 * purge thread's scan pass on the calling thread so that an
-	 * explicit caller gets the diagnostics (VMA-threshold check,
-	 * verbose stats line) immediately rather than waiting up to
-	 * one V8M_OPT_PURGE_INTERVAL second for the next bg tick.
-	 * Future per-NUMA empty-page sweep / TLC bin shrink will hook
-	 * into the same scan body. */
+	/* Force-release every drained buddy arena (skips the
+	 * idle-tick grace window so an explicit caller gets immediate
+	 * VMA + RSS relief) and then run the bg-purge scan pass for
+	 * its diagnostic side effects (VMA-threshold check, optional
+	 * verbose stats line). Slab pages and Large/Huge regions are
+	 * already released eagerly on free, so there is nothing to do
+	 * for them here. Future per-NUMA empty-page sweep / TLC bin
+	 * shrink will hook into the same scan body. */
+	if (dispatch_ready()) {
+		(void)v8m_dispatch_purge_drained(&g_dispatch);
+	}
 	v8m_bg_purge_run_once();
 	return 0;
 }

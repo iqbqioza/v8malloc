@@ -115,4 +115,24 @@ void v8m_dispatch_prefork(struct v8m_dispatch *dispatch);
 void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch);
 void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch);
 
+/*
+ * Background-purge tick handler. Invoked by the bg purge thread once
+ * per V8M_OPT_PURGE_INTERVAL. Today: ages drained buddy arenas one
+ * tick and releases any that exceed the idle threshold. Future: TLC
+ * bin shrink, per-NUMA empty-page sweep. Returns the number of
+ * arenas released this pass — useful for bg-purge stats lines under
+ * V8M_OPT_VERBOSE.
+ */
+size_t v8m_dispatch_bg_tick(struct v8m_dispatch *dispatch);
+
+/*
+ * Force-release every currently drained buddy arena (regardless of
+ * idle-tick count). Returns the number of arenas released. Invoked
+ * by `v8m_purge()` so an explicit caller gets immediate VMA + RSS
+ * relief, and by the soft-limit refusal path so a workload that
+ * sets a tight `v8m_set_soft_limit` cannot be blocked by
+ * reclaimable bytes that the periodic sweep has not yet visited.
+ */
+size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch);
+
 #endif /* V8M_DISPATCH_H */

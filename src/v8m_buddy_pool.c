@@ -20,6 +20,8 @@ int v8m_buddy_pool_init(struct v8m_buddy_pool *pool)
 {
 	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
 		pool->arenas[i].in_use = false;
+		pool->arenas[i].drained = false;
+		pool->arenas[i].idle_ticks = 0;
 	}
 	return pthread_mutex_init(&pool->lock, NULL);
 }
@@ -59,7 +61,12 @@ find_owning_arena(struct v8m_buddy_pool *pool, const void *ptr)
 
 /*
  * Try to satisfy `size` from one of the in-use arenas. Returns the
- * pointer or NULL if every arena is too full.
+ * pointer or NULL if every arena is too full. Drained arenas
+ * (post-MADV_DONTNEED) are valid alloc targets — the buddy
+ * bookkeeping stayed intact, so a successful alloc just clears
+ * the drained flag and the kernel re-faults zero pages on the
+ * first touch. The drain-then-revive cycle is cheaper than
+ * mmap/munmap when allocation patterns oscillate.
  */
 static void *try_existing_arenas(struct v8m_buddy_pool *pool, size_t size)
 {
@@ -70,6 +77,8 @@ static void *try_existing_arenas(struct v8m_buddy_pool *pool, size_t size)
 		}
 		void *obj = v8m_buddy_alloc(&slot->buddy, size);
 		if (obj != NULL) {
+			slot->drained = false;
+			slot->idle_ticks = 0;
 			return obj;
 		}
 	}
@@ -99,6 +108,8 @@ static void *acquire_fresh_arena(struct v8m_buddy_pool *pool, size_t size)
 		}
 		v8m_buddy_init(&slot->buddy, arena);
 		slot->in_use = true;
+		slot->drained = false;
+		slot->idle_ticks = 0;
 		void *obj = v8m_buddy_alloc(&slot->buddy, size);
 		if (obj == NULL) {
 			v8m_page_heap_free(arena, V8M_BUDDY_MAX_BLOCK);
@@ -150,12 +161,77 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 	v8m_buddy_free(&slot->buddy, ptr, size);
 
 	if (v8m_buddy_is_empty(&slot->buddy)) {
-		v8m_page_heap_free(slot->buddy.arena_base, V8M_BUDDY_MAX_BLOCK);
-		slot->in_use = false;
+		/* Defer the munmap: keep the VMA + buddy bookkeeping
+		 * intact, but ask the kernel to reclaim the physical
+		 * frames immediately. A revival alloc within the next
+		 * few bg-purge ticks reuses the slot without an
+		 * mmap/munmap round trip; otherwise the bg purge sweep
+		 * fully releases it (see v8m_buddy_pool_sweep_idle). */
+		slot->drained = true;
+		slot->idle_ticks = 0;
+		v8m_page_heap_advise_dont_need(slot->buddy.arena_base,
+					       V8M_BUDDY_MAX_BLOCK);
 	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
 	return true;
+}
+
+size_t v8m_buddy_pool_sweep_idle(struct v8m_buddy_pool *pool,
+				 uint32_t max_idle_ticks)
+{
+	if (pool == NULL) {
+		return 0;
+	}
+	size_t released = 0;
+	(void)pthread_mutex_lock(&pool->lock);
+	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
+		struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
+		if (!slot->in_use || !slot->drained) {
+			continue;
+		}
+		if (slot->idle_ticks < UINT32_MAX) {
+			slot->idle_ticks++;
+		}
+		if (slot->idle_ticks >= max_idle_ticks) {
+			v8m_page_heap_free(slot->buddy.arena_base,
+					   V8M_BUDDY_MAX_BLOCK);
+			slot->in_use = false;
+			slot->drained = false;
+			slot->idle_ticks = 0;
+			released++;
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
+	return released;
+}
+
+void v8m_buddy_pool_get_arena_stats(struct v8m_buddy_pool *pool,
+				    struct v8m_buddy_pool_arena_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	out->live = 0;
+	out->drained = 0;
+	out->total_in_use = 0;
+	if (pool == NULL) {
+		return;
+	}
+	(void)pthread_mutex_lock(&pool->lock);
+	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
+		const struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
+		if (!slot->in_use) {
+			continue;
+		}
+		out->total_in_use++;
+		if (slot->drained) {
+			out->drained++;
+		} else {
+			out->live++;
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
 }
 
 size_t v8m_buddy_pool_block_size(struct v8m_buddy_pool *pool, const void *ptr)

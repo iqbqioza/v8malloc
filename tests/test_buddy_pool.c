@@ -101,11 +101,22 @@ static int check_single_round_trip(void)
 		return fail("single free did not own the pointer");
 	}
 
+	/* Free now drains the arena (MADV_DONTNEED) and keeps the VMA
+	 * for cheap revival; the actual munmap waits for the bg-purge
+	 * sweep. Force the sweep with idle_ticks=0 so this test still
+	 * verifies that a fully-drained arena is releasable. */
 	struct v8m_page_heap_stats after_free = {0};
 	v8m_page_heap_get_stats(&after_free);
-	if (after_free.munmap_calls <= before_free.munmap_calls) {
+	if (after_free.advise_calls <= before_free.advise_calls) {
 		v8m_buddy_pool_destroy(&pool);
-		return fail("single free did not reclaim the arena");
+		return fail("single free did not MADV_DONTNEED the arena");
+	}
+	(void)v8m_buddy_pool_sweep_idle(&pool, 0U);
+	struct v8m_page_heap_stats after_sweep = {0};
+	v8m_page_heap_get_stats(&after_sweep);
+	if (after_sweep.munmap_calls <= before_free.munmap_calls) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("forced sweep did not release the drained arena");
 	}
 
 	v8m_buddy_pool_destroy(&pool);
@@ -199,6 +210,9 @@ static int check_arena_reclamation(void)
 		return fail(
 		    "the last-allocation free was not recognized as owned");
 	}
+	/* The free drains the arena; force the sweep so munmap fires
+	 * synchronously under the test's observation window. */
+	(void)v8m_buddy_pool_sweep_idle(&pool, 0U);
 
 	struct v8m_page_heap_stats after = {0};
 	v8m_page_heap_get_stats(&after);
@@ -272,6 +286,117 @@ static int check_concurrent(void)
 	return 0;
 }
 
+/*
+ * Drain-and-revive cycle. After an arena fully drains, the next
+ * alloc should land on the same arena (revival) without triggering
+ * a fresh page-heap mmap. The sweep walks one tick at a time; an
+ * arena revived between sweeps must reset its idle counter so the
+ * sweep-with-default-threshold does not race the revival.
+ */
+static int check_drain_and_revive(void)
+{
+	struct v8m_buddy_pool pool;
+	if (v8m_buddy_pool_init(&pool) != 0) {
+		return fail("init returned non-zero");
+	}
+
+	void *first = v8m_buddy_pool_alloc(&pool, BLOCK_SIZE);
+	if (first == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("first alloc returned NULL");
+	}
+
+	struct v8m_page_heap_stats after_first_alloc = {0};
+	v8m_page_heap_get_stats(&after_first_alloc);
+
+	if (!v8m_buddy_pool_free(&pool, first)) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("free did not own the pointer");
+	}
+
+	struct v8m_buddy_pool_arena_stats stats = {0};
+	v8m_buddy_pool_get_arena_stats(&pool, &stats);
+	if (stats.drained != 1U || stats.live != 0U ||
+	    stats.total_in_use != 1U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("arena did not enter drained state on free");
+	}
+
+	/* A second alloc must reuse the drained arena without a fresh
+	 * page-heap mmap. */
+	void *second = v8m_buddy_pool_alloc(&pool, BLOCK_SIZE);
+	if (second == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("revive alloc returned NULL");
+	}
+	struct v8m_page_heap_stats after_revive = {0};
+	v8m_page_heap_get_stats(&after_revive);
+	if (after_revive.mmap_calls != after_first_alloc.mmap_calls) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("revive issued a fresh page-heap mmap");
+	}
+	v8m_buddy_pool_get_arena_stats(&pool, &stats);
+	if (stats.drained != 0U || stats.live != 1U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("revive did not clear drained state");
+	}
+
+	(void)v8m_buddy_pool_free(&pool, second);
+	v8m_buddy_pool_destroy(&pool);
+	return 0;
+}
+
+/*
+ * Sweep with a non-zero idle threshold drops drained arenas only
+ * after they have aged enough ticks. A sweep called immediately
+ * after the drain does NOT release the arena.
+ */
+static int check_sweep_threshold(void)
+{
+	struct v8m_buddy_pool pool;
+	if (v8m_buddy_pool_init(&pool) != 0) {
+		return fail("init returned non-zero");
+	}
+
+	void *obj = v8m_buddy_pool_alloc(&pool, BLOCK_SIZE);
+	if (obj == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("alloc returned NULL");
+	}
+	(void)v8m_buddy_pool_free(&pool, obj);
+
+	/* First sweep with threshold=4: arena's idle_ticks goes 0 -> 1,
+	 * still below threshold, so it stays drained. */
+	size_t released = v8m_buddy_pool_sweep_idle(&pool, 4U);
+	if (released != 0U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("sweep released a too-young arena");
+	}
+	struct v8m_buddy_pool_arena_stats stats = {0};
+	v8m_buddy_pool_get_arena_stats(&pool, &stats);
+	if (stats.drained != 1U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("arena lost drained state under-threshold");
+	}
+
+	/* Three more sweeps push idle_ticks to 4 → release. */
+	for (int i = 0; i < 3; i++) {
+		released = v8m_buddy_pool_sweep_idle(&pool, 4U);
+	}
+	if (released != 1U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("sweep at threshold did not release the arena");
+	}
+	v8m_buddy_pool_get_arena_stats(&pool, &stats);
+	if (stats.total_in_use != 0U) {
+		v8m_buddy_pool_destroy(&pool);
+		return fail("released arena still tracked as in-use");
+	}
+
+	v8m_buddy_pool_destroy(&pool);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_init_destroy();
@@ -291,6 +416,14 @@ int main(void)
 		return status;
 	}
 	status = check_arena_reclamation();
+	if (status != 0) {
+		return status;
+	}
+	status = check_drain_and_revive();
+	if (status != 0) {
+		return status;
+	}
+	status = check_sweep_threshold();
 	if (status != 0) {
 		return status;
 	}
