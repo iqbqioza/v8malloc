@@ -119,6 +119,17 @@ struct v8m_page_heap_stats {
 void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
 
 /*
+ * Snapshot per-node bytes-mapped + computed imbalance flag (numa.md
+ * §6.1). `out` must be non-NULL; pre-init / single-node hosts return
+ * a zeroed struct with `node_count` set to the host's node count.
+ * Defined in v8m_page_heap.c so the page-heap-internal per-node
+ * counters do not need a separate accessor module. The matching
+ * public API surface is `v8m_get_numa_balance` in v8m_api.c.
+ */
+struct v8m_numa_balance_stats;
+void v8m_page_heap_get_numa_balance(struct v8m_numa_balance_stats *out);
+
+/*
  * Test-only knob for the adaptive THP advice (huge-pages.md §5).
  * Overrides the cold-threshold ticks and the live EMA so a test can
  * deterministically exercise the promote / demote branches without

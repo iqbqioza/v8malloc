@@ -835,6 +835,18 @@ V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out)
 	v8m_thread_cache_aggregate_lifetime(out);
 }
 
+V8M_EXPORT void v8m_get_numa_balance(struct v8m_numa_balance_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	if (!dispatch_ready()) {
+		(void)memset(out, 0, sizeof(*out));
+		return;
+	}
+	v8m_page_heap_get_numa_balance(out);
+}
+
 V8M_EXPORT uint64_t v8m_count_vmas(void)
 {
 	/* Open /proc/self/maps with raw read() to avoid an alloc on

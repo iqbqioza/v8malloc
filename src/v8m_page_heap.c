@@ -114,7 +114,17 @@ static _Atomic uint64_t g_thp_cold_threshold_ticks;
 struct region_entry {
 	uintptr_t start;
 	uintptr_t end; /* exclusive */
+	/* NUMA node the region was bound to via mbind(), or
+	 * V8M_REGION_NODE_UNBOUND when no bind happened (NUMA off,
+	 * single-node host, mbind failed, or the alloc path skipped
+	 * bind_to_local_node entirely). The node field drives the
+	 * per-node bytes accounting that surfaces through
+	 * v8m_get_numa_balance — without it, the free path would
+	 * have no way to decrement the right counter. */
+	uint16_t node;
 };
+
+#define V8M_REGION_NODE_UNBOUND UINT16_MAX
 
 static struct region_entry g_regions[V8M_REGION_MAP_CAPACITY];
 static size_t g_region_count;
@@ -123,6 +133,22 @@ static size_t g_region_count;
  * which is an internal glibc header. */
 static pthread_mutex_t g_region_lock = /* NOLINT(misc-include-cleaner) */
     PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Per-node live bytes (numa.md §6.1). Bumped when a region's bind
+ * lands on node N; decremented when the region is freed. Atomic to
+ * support concurrent allocators without taking the region lock —
+ * the lock is already held while updating the region table, but
+ * the read side of v8m_get_numa_balance walks these counters
+ * without the lock. The result is statistically accurate but may
+ * lag a single increment behind concurrent writers.
+ */
+static _Atomic uint64_t v8m_per_node_bytes[V8M_NUMA_MAX_NODES];
+
+/* Lock-step the public ABI's per-node array width to the internal
+ * NUMA cap so the snapshot helper never reads past either bound. */
+_Static_assert(V8M_NUMA_MAX_NODES == V8M_PUBLIC_NUMA_MAX_NODES,
+	       "public NUMA node cap must match internal cap");
 
 static int region_register(void *ptr, size_t bytes)
 {
@@ -134,17 +160,45 @@ static int region_register(void *ptr, size_t bytes)
 	uintptr_t start = (uintptr_t)ptr;
 	g_regions[g_region_count].start = start;
 	g_regions[g_region_count].end = start + bytes;
+	g_regions[g_region_count].node = V8M_REGION_NODE_UNBOUND;
 	g_region_count++;
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return 0;
 }
 
-static void region_unregister(const void *ptr)
+/*
+ * Record `node` against the region rooted at `ptr`. Called from the
+ * alloc path right after a successful mbind so the per-node counter
+ * decrement at free time can find the right bucket. Silent no-op
+ * when the region is no longer registered (race with a concurrent
+ * free — extremely rare but defensive).
+ */
+static void region_record_node(const void *ptr, uint16_t node)
 {
 	uintptr_t start = (uintptr_t)ptr;
 	(void)pthread_mutex_lock(&g_region_lock);
 	for (size_t i = 0; i < g_region_count; i++) {
 		if (g_regions[i].start == start) {
+			g_regions[i].node = node;
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+}
+
+/*
+ * Returns the node previously recorded for the unregistered region,
+ * or V8M_REGION_NODE_UNBOUND if the region was never bound or is
+ * not present.
+ */
+static uint16_t region_unregister(const void *ptr)
+{
+	uintptr_t start = (uintptr_t)ptr;
+	uint16_t node = V8M_REGION_NODE_UNBOUND;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 0; i < g_region_count; i++) {
+		if (g_regions[i].start == start) {
+			node = g_regions[i].node;
 			/* Swap-remove to keep the lookup scan
 			 * compact. Order in the array does not matter. */
 			g_regions[i] = g_regions[--g_region_count];
@@ -152,6 +206,7 @@ static void region_unregister(const void *ptr)
 		}
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
+	return node;
 }
 
 bool v8m_page_heap_owns(const void *ptr)
@@ -294,18 +349,18 @@ static void *reserve_aligned(size_t bytes, size_t alignment)
 	return (void *)aligned;
 }
 
-static void bind_to_local_node(void *addr, size_t bytes)
+static int bind_to_local_node(void *addr, size_t bytes)
 {
 	if (v8m_config_get(V8M_OPT_NUMA_AWARE) == 0) {
-		return;
+		return -1;
 	}
 	uint32_t node_count = v8m_numa_node_count();
 	if (node_count <= 1U) {
-		return;
+		return -1;
 	}
 	uint32_t node = v8m_numa_current_node();
 	if (node >= node_count) {
-		return;
+		return -1;
 	}
 
 	/* Build a unsigned-long bitmap with just our node's bit set.
@@ -327,7 +382,27 @@ static void bind_to_local_node(void *addr, size_t bytes)
 	if (ret != 0) {
 		atomic_fetch_add_explicit(&v8m_mbind_failures, 1U,
 					  memory_order_relaxed);
+		return -1;
 	}
+	return (int)node;
+}
+
+/*
+ * Combine the bind syscall with the per-node accounting and the
+ * region-table node update. Centralizes the "after a successful
+ * bind, the per-node bytes counter and the region's node field
+ * must agree" invariant in one place so the four call sites in
+ * v8m_page_heap_alloc don't have to repeat the pattern.
+ */
+static void bind_and_account(void *addr, size_t bytes)
+{
+	int chosen = bind_to_local_node(addr, bytes);
+	if (chosen < 0) {
+		return;
+	}
+	region_record_node(addr, (uint16_t)chosen);
+	atomic_fetch_add_explicit(&v8m_per_node_bytes[chosen], (uint64_t)bytes,
+				  memory_order_relaxed);
 }
 
 enum v8m_thp_advice {
@@ -425,7 +500,7 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 				record_munmap(bytes);
 				return NULL;
 			}
-			bind_to_local_node(gigantic, bytes);
+			bind_and_account(gigantic, bytes);
 			return gigantic;
 		}
 		atomic_fetch_add_explicit(&v8m_gigantic_alloc_failures, 1U,
@@ -458,7 +533,7 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 				record_munmap(bytes);
 				return NULL;
 			}
-			bind_to_local_node(huge, bytes);
+			bind_and_account(huge, bytes);
 			return huge;
 		}
 		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_failures, 1U,
@@ -515,7 +590,7 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 						  memory_order_relaxed);
 		}
 	}
-	bind_to_local_node(result, bytes);
+	bind_and_account(result, bytes);
 	return result;
 }
 
@@ -524,7 +599,12 @@ void v8m_page_heap_free(void *ptr, size_t bytes)
 	if (ptr == NULL || bytes == 0) {
 		return;
 	}
-	region_unregister(ptr);
+	uint16_t node = region_unregister(ptr);
+	if (node != V8M_REGION_NODE_UNBOUND && node < V8M_NUMA_MAX_NODES) {
+		atomic_fetch_sub_explicit(&v8m_per_node_bytes[node],
+					  (uint64_t)bytes,
+					  memory_order_relaxed);
+	}
 	(void)munmap(ptr, bytes);
 	record_munmap(bytes);
 }
@@ -575,4 +655,46 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
 	out->thp_cold_threshold_ticks = atomic_load_explicit(
 	    &g_thp_cold_threshold_ticks, memory_order_relaxed);
+}
+
+void v8m_page_heap_get_numa_balance(struct v8m_numa_balance_stats *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0, sizeof(*out));
+	uint32_t node_count = v8m_numa_node_count();
+	if (node_count > V8M_PUBLIC_NUMA_MAX_NODES) {
+		node_count = V8M_PUBLIC_NUMA_MAX_NODES;
+	}
+	out->node_count = node_count;
+	uint64_t total = 0;
+	uint64_t most = 0;
+	uint32_t most_node = 0;
+	for (uint32_t node = 0; node < node_count; node++) {
+		uint64_t bytes = atomic_load_explicit(&v8m_per_node_bytes[node],
+						      memory_order_relaxed);
+		out->per_node_bytes[node] = bytes;
+		total += bytes;
+		if (bytes > most) {
+			most = bytes;
+			most_node = node;
+		}
+	}
+	out->total_bytes = total;
+	out->most_loaded_node = most_node;
+	out->most_loaded_bytes = most;
+	if (node_count > 0U) {
+		out->average_bytes_per_node = total / node_count;
+	}
+	/* Imbalance threshold (numa.md §6.1): a node holding ≥ 150 % of
+	 * the average is overloaded. The 1.5× factor is encoded as
+	 * `most * 2 > average * 3` to avoid floating point on the
+	 * snapshot path. The "needs at least 2 nodes" guard keeps a
+	 * single-node host from ever flipping the flag (every byte
+	 * lands on node 0, so most == average always). */
+	if (node_count >= 2U &&
+	    out->most_loaded_bytes * 2U > out->average_bytes_per_node * 3U) {
+		out->imbalanced = true;
+	}
 }

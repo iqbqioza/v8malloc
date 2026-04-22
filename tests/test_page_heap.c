@@ -424,6 +424,77 @@ static int check_thp_adaptive_decision(void)
 	return 0;
 }
 
+/*
+ * NUMA balance snapshot (numa.md §6.1). On a single-node host the
+ * `imbalanced` flag must never flip — every byte lands on node 0,
+ * so most_loaded_bytes always equals the average. On multi-node
+ * hosts the structural invariants still hold (sum of per-node ==
+ * total, most_loaded_bytes <= total). The accessor must tolerate
+ * NULL and report a sensible node_count regardless.
+ */
+static int check_numa_balance_invariants(void)
+{
+	v8m_get_numa_balance(NULL); /* must not crash */
+
+	struct v8m_numa_balance_stats snap = {0};
+	v8m_get_numa_balance(&snap);
+
+	if (snap.node_count == 0U) {
+		return fail("node_count reported as zero");
+	}
+	uint64_t sum = 0;
+	for (uint32_t node = 0; node < snap.node_count; node++) {
+		sum += snap.per_node_bytes[node];
+	}
+	if (sum != snap.total_bytes) {
+		return fail("sum(per_node_bytes) does not equal total_bytes");
+	}
+	if (snap.most_loaded_bytes > snap.total_bytes) {
+		return fail("most_loaded_bytes exceeds total_bytes");
+	}
+	if (snap.most_loaded_node >= snap.node_count &&
+	    snap.most_loaded_bytes > 0U) {
+		return fail("most_loaded_node out of range");
+	}
+	if (snap.node_count == 1U && snap.imbalanced) {
+		return fail("single-node host flagged as imbalanced");
+	}
+	if (snap.node_count > 0U &&
+	    snap.average_bytes_per_node != snap.total_bytes / snap.node_count) {
+		return fail("average_bytes_per_node disagrees with arithmetic");
+	}
+
+	/* Allocate + free a Large region; on a multi-NUMA host the
+	 * per-node counter for the calling thread's node should
+	 * advance during the live window and revert at free. On
+	 * single-node hosts the counters stay at 0 (no bind happens),
+	 * so we only sanity-check the no-leak invariant after free. */
+	struct v8m_numa_balance_stats before = snap;
+	void *region = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
+	if (region == NULL) {
+		return fail("alloc for balance test returned NULL");
+	}
+	struct v8m_numa_balance_stats during = {0};
+	v8m_get_numa_balance(&during);
+	v8m_page_heap_free(region, HUGEPAGE_BYTES);
+	struct v8m_numa_balance_stats after = {0};
+	v8m_get_numa_balance(&after);
+
+	if (during.node_count > 1U &&
+	    during.total_bytes < before.total_bytes + HUGEPAGE_BYTES) {
+		return fail("multi-node alloc did not advance total_bytes");
+	}
+	if (after.total_bytes != before.total_bytes) {
+		(void)fprintf(stderr,
+			      "test_page_heap: per-node bytes leaked across "
+			      "alloc/free (before=%llu after=%llu)\n",
+			      (unsigned long long)before.total_bytes,
+			      (unsigned long long)after.total_bytes);
+		return 1;
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_basic_alignment();
@@ -461,5 +532,9 @@ int main(void)
 	if (status != 0) {
 		return status;
 	}
-	return check_thp_adaptive_decision();
+	status = check_thp_adaptive_decision();
+	if (status != 0) {
+		return status;
+	}
+	return check_numa_balance_invariants();
 }

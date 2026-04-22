@@ -344,6 +344,38 @@ struct v8m_lifetime_stats {
 V8M_EXPORT void v8m_get_lifetime_stats(struct v8m_lifetime_stats *out);
 
 /*
+ * Per-NUMA-node memory balance snapshot (numa.md §6.1 — inter-node
+ * rebalancing detection). `per_node_bytes[n]` is the live byte total
+ * of page-heap regions currently bound to node `n` via the mbind path
+ * the constructor wires up; the sum across nodes equals
+ * `total_bytes`. `most_loaded_node` / `most_loaded_bytes` identify
+ * the highest-pressure node, and `imbalanced` flips to true when
+ * that node holds ≥ 150 % of the average across the live nodes (the
+ * spec's overload trigger). Single-node hosts and pre-init reporters
+ * never flip the flag. Foundation row: detection lands here so a
+ * future cycle can wire the action half (suppress new allocations
+ * from the overloaded node, page migration via `move_pages()`, TLC
+ * shrink) on top.
+ */
+#define V8M_PUBLIC_NUMA_MAX_NODES 64
+
+struct v8m_numa_balance_stats {
+	uint64_t per_node_bytes[V8M_PUBLIC_NUMA_MAX_NODES];
+	uint64_t total_bytes;
+	uint32_t node_count;
+	uint32_t most_loaded_node;
+	uint64_t most_loaded_bytes;
+	uint64_t average_bytes_per_node;
+	bool imbalanced;
+};
+
+/*
+ * Snapshot the per-node memory balance into `*out`. Tolerates NULL.
+ * Pre-init returns all zeroes.
+ */
+V8M_EXPORT void v8m_get_numa_balance(struct v8m_numa_balance_stats *out);
+
+/*
  * Fragmentation snapshot. Reports the page-heap-derived metrics plus
  * the aggregate slab utilization across every Tiny/Small class. The
  * slab counters cover pages currently held in the per-class

@@ -6,6 +6,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Per-NUMA-node memory balance snapshot
+  (`v8m_get_numa_balance`, TODO P2 row 157 — numa.md
+  §6.1 inter-node rebalancing detection). The page heap
+  now stamps each registered region with the NUMA node
+  its `mbind()` landed on (`uint16_t node` on
+  `region_entry`, `V8M_REGION_NODE_UNBOUND` sentinel),
+  bumps a per-node atomic byte counter on bind, and
+  decrements it on free. New public
+  `struct v8m_numa_balance_stats` carries
+  `per_node_bytes[64]`, `total_bytes`, `node_count`,
+  `most_loaded_node`, `most_loaded_bytes`,
+  `average_bytes_per_node`, and the spec's
+  `imbalanced` flag — true when the most-loaded node
+  holds ≥ 150 % of the average across live nodes
+  (encoded as `most * 2 > average * 3` to dodge floats
+  on the snapshot path). Single-node hosts and pre-init
+  reporters never flip the flag. New
+  `bind_and_account` helper centralizes the
+  bind → record_node → counter-bump invariant in one
+  place so the four call sites in `v8m_page_heap_alloc`
+  don't repeat the pattern. The action half of the spec
+  (suppress new allocations from the overloaded node,
+  page migration via `move_pages()`, TLC capacity
+  shrink) is the future cycle that lands once a
+  per-NUMA pool exists to route around. Public
+  `v8m_get_numa_balance` exported under V8MALLOC_1.0.
+  Coverage in
+  `tests/test_page_heap.c::check_numa_balance_invariants`
+  (sum / leak / single-node-flag invariants;
+  multi-NUMA-only assertion gated on `node_count > 1`).
+
 ### Performance
 - Adaptive THP advice (TODO P2 row 155 — huge-pages.md
   §5). The page heap now tracks the EMA of inter-arrival
