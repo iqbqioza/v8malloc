@@ -44,6 +44,26 @@
 #error "Unsupported architecture (see platform-abstraction.md)"
 #endif
 
+/* --- Kernel huge-page geometry ------------------------------------- */
+/*
+ * Default kernel huge-page size, in bytes. Drives both the
+ * MAP_HUGETLB attempt threshold in src/v8m_page_heap.c (we only
+ * try MAP_HUGETLB for size+alignment that meet this threshold) and
+ * the MADV_HUGEPAGE hint threshold in the same file. Per
+ * huge-pages.md §4.2 / platform-abstraction.md §5.4, every Tier 1/2
+ * arch we ship today uses 2 MiB by default; s390x uses 1 MiB
+ * (slabs_per_huge = 16 instead of 32 follows directly).
+ *
+ * This is the size the kernel picks when MAP_HUGETLB is set without
+ * an explicit size flag. The 1 GiB Gigantic path uses MAP_HUGE_1GB
+ * to override; nothing here gates that path.
+ */
+#if defined(V8M_ARCH_S390X)
+#define V8M_HUGE_PAGE_SIZE ((size_t)1 * 1024 * 1024)
+#else
+#define V8M_HUGE_PAGE_SIZE ((size_t)2 * 1024 * 1024)
+#endif
+
 /* --- Compiler attributes ------------------------------------------- */
 
 #define V8M_ALIGNED(n) __attribute__((aligned(n)))

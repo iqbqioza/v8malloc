@@ -6,6 +6,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Kernel huge-page size is now per-arch via the new
+  `V8M_HUGE_PAGE_SIZE` macro in `src/v8m_arch.h`
+  (huge-pages.md §4.2 / TODO Tier 3 s390x entry):
+  s390x uses 1 MiB to match the kernel default, every other
+  Tier 1/2 arch we ship today (x86_64, aarch64, ppc64le,
+  riscv64, loongarch64) keeps 2 MiB. The MAP_HUGETLB attempt
+  threshold + multiple, the MADV_HUGEPAGE hint threshold
+  (`src/v8m_page_heap.c`), and the Huge-allocation alignment
+  bump in `src/v8m_large.c::V8M_LARGE_HUGE_ALIGN` all route
+  through the new constant. Behaviour on x86_64/aarch64/etc.
+  is unchanged (the constant evaluates to the same 2 MiB
+  literal); on s390x a Huge allocation of e.g. 4 MiB now
+  lands as four 1 MiB huge pages instead of being
+  bumped/wasted to 2 MiB alignment that the s390x kernel
+  cannot back with one huge page anyway. The s390x GOT TLS
+  path is compiler-emitted whenever the toolchain targets
+  s390x — `__thread` already does the right thing — so no
+  source-level work is required for that part of the row.
+
 ### Performance
 - `v8m_page_heap_alloc` skips the over-allocate-and-trim path
   when the requested alignment fits within one OS page

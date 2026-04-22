@@ -17,6 +17,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
 #include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node, v8m_numa_node_count */
@@ -44,20 +45,15 @@ static _Atomic uint64_t v8m_gigantic_alloc_calls = 0;
 static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
 
 /*
- * Allocations at or above this size are candidates for the
- * MADV_HUGEPAGE hint. 2 MiB matches the standard transparent-
- * huge-page size on x86_64 and aarch64 — the kernel can back the
- * entire mapping with a single 2 MiB page when memory is available.
+ * Allocations at or above the kernel huge-page size are candidates
+ * for the MADV_HUGEPAGE hint and for MAP_HUGETLB. The constant is
+ * arch-defined in v8m_arch.h: 2 MiB on every Tier 1/2 arch we
+ * support today, 1 MiB on s390x. The kernel can back the entire
+ * mapping with a single huge page when memory is available; on
+ * s390x that's a 1 MiB page, on x86_64/aarch64/ppc64le/riscv64
+ * it's 2 MiB. MAP_HUGETLB additionally requires size to be a
+ * multiple of, and alignment ≥, the kernel huge-page size.
  */
-#define V8M_HUGEPAGE_HINT_MIN_BYTES ((size_t)2 * 1024 * 1024)
-
-/*
- * MAP_HUGETLB requires the size to be a multiple of the system
- * huge-page size (2 MiB on x86_64 / aarch64) and the kernel
- * returns a 2 MiB-aligned address. The same value drives both
- * size-multiple and alignment checks.
- */
-#define V8M_HUGETLB_BYTES ((size_t)2 * 1024 * 1024)
 
 /*
  * 1 GiB Gigantic-page size (huge-pages.md §7). Triggered for
@@ -353,16 +349,17 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 	}
 
 	/* Try MAP_HUGETLB first when the request is shaped for it:
-	 * size is a 2 MiB multiple, alignment is at least 2 MiB, and
-	 * V8M_OPT_HUGE_PAGES allows it. The kernel returns a 2 MiB-
-	 * aligned address so no over-allocate-and-trim is needed; on
-	 * failure (no reserved huge pages — the typical case in
-	 * containers and CI) we fall through to the regular mmap +
-	 * MADV_HUGEPAGE path, which is documented as the supported
-	 * fallback for this code path (huge-pages.md §4.1). */
-	if (bytes >= V8M_HUGETLB_BYTES &&
-	    (bytes & (V8M_HUGETLB_BYTES - 1U)) == 0U &&
-	    alignment >= V8M_HUGETLB_BYTES &&
+	 * size is a multiple of the kernel huge-page size,
+	 * alignment is at least the kernel huge-page size, and
+	 * V8M_OPT_HUGE_PAGES allows it. The kernel returns a
+	 * huge-page-aligned address so no over-allocate-and-trim is
+	 * needed; on failure (no reserved huge pages — the typical
+	 * case in containers and CI) we fall through to the regular
+	 * mmap + MADV_HUGEPAGE path, which is documented as the
+	 * supported fallback for this code path (huge-pages.md §4.1). */
+	if (bytes >= V8M_HUGE_PAGE_SIZE &&
+	    (bytes & (V8M_HUGE_PAGE_SIZE - 1U)) == 0U &&
+	    alignment >= V8M_HUGE_PAGE_SIZE &&
 	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
 		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_calls, 1U,
 					  memory_order_relaxed);
@@ -404,13 +401,15 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		record_munmap(bytes);
 		return NULL;
 	}
-	/* Hint the kernel toward 2 MiB transparent huge pages for
+	/* Hint the kernel toward transparent huge pages for
 	 * Large/Huge-class regions. Honours V8M_OPT_HUGE_PAGES — set
 	 * to 0 to suppress the hint (resolves TODO open question #7
 	 * in favour of opt-out via the env-var contract). The advise
 	 * is best-effort: failure here doesn't change the allocator's
-	 * behaviour, so we don't even check the return value. */
-	if (bytes >= V8M_HUGEPAGE_HINT_MIN_BYTES &&
+	 * behaviour, so we don't even check the return value. The
+	 * threshold is the kernel huge-page size (1 MiB on s390x,
+	 * 2 MiB elsewhere) — anything below that has no THP path. */
+	if (bytes >= V8M_HUGE_PAGE_SIZE &&
 	    v8m_config_get(V8M_OPT_HUGE_PAGES) != 0) {
 		(void)madvise(result, bytes, MADV_HUGEPAGE);
 		atomic_fetch_add_explicit(&v8m_hugepage_advise_calls, 1U,

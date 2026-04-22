@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h" /* V8M_HUGE_PAGE_SIZE */
 #include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_large.h"
@@ -82,12 +83,16 @@ static size_t round_up_pow2(size_t value, size_t multiple)
 }
 
 /*
- * 2 MiB matches Linux's standard huge-page size on x86_64 and
- * aarch64; bumping mmap_size and the page-heap alignment to this
- * value lets the page heap try MAP_HUGETLB for Huge allocations
- * (size > V8M_LARGE_MAX_SIZE) when V8M_OPT_HUGE_PAGES is enabled.
+ * Bumping mmap_size and the page-heap alignment to one kernel
+ * huge page lets the page heap try MAP_HUGETLB for Huge
+ * allocations (size > V8M_LARGE_MAX_SIZE) when V8M_OPT_HUGE_PAGES
+ * is enabled. The constant comes from v8m_arch.h: 2 MiB on every
+ * Tier 1/2 arch we ship today, 1 MiB on s390x where the kernel
+ * default huge page is 1 MiB. An s390x Huge allocation of e.g.
+ * 4 MiB will land as four 1 MiB huge pages instead of two
+ * 2 MiB pages on x86_64.
  */
-#define V8M_LARGE_HUGE_ALIGN ((size_t)2 * 1024 * 1024)
+#define V8M_LARGE_HUGE_ALIGN V8M_HUGE_PAGE_SIZE
 
 /*
  * Gigantic allocations (>= 1 GiB) bump the page-heap alignment to
