@@ -229,6 +229,15 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 *   atexit-based teardown that defers munmaps until after
 	 *   stdio cleanup.
 	 */
+	/* If V8M_PROFILE is set, emit one final malloc_info XML
+	 * snapshot to stderr before tearing anything down. v0
+	 * profile-mode stops at the XML dump; the pprof emit on
+	 * exit (open question #5, resolved to pprof) lands when
+	 * the protobuf encoder lands. */
+	if (v8m_config_get(V8M_OPT_PROFILE) != 0) {
+		(void)malloc_info(0, stderr);
+	}
+
 	/* Stop the bg purge thread before flipping state so the
 	 * thread's last loop body sees READY (avoids it spinning on
 	 * stale state during shutdown). The shutdown path uses a
@@ -883,6 +892,13 @@ V8M_EXPORT int malloc_info(int options, FILE *stream)
 	}
 	struct v8m_live_stats live;
 	v8m_collect_live_stats(&live);
+	struct v8m_page_heap_stats ph_stats = {0};
+	struct v8m_large_stats large_stats = {0};
+	if (dispatch_ready()) {
+		v8m_page_heap_get_stats(&ph_stats);
+		v8m_large_get_stats(&large_stats);
+	}
+	uint64_t vmas = v8m_count_vmas();
 	(void)fprintf(
 	    stream,
 	    "<malloc version=\"v8malloc-%s\">\n"
@@ -890,12 +906,33 @@ V8M_EXPORT int malloc_info(int options, FILE *stream)
 	    "    <total type=\"mmap\" count=\"%llu\" size=\"%llu\"/>\n"
 	    "    <system type=\"current\" size=\"%llu\"/>\n"
 	    "    <aspace type=\"total\" size=\"%llu\"/>\n"
+	    "    <large alloc=\"%llu\" free=\"%llu\" bytes_in_use=\"%llu\"/>\n"
+	    "    <huge alloc=\"%llu\" free=\"%llu\" bytes_in_use=\"%llu\"/>\n"
+	    "    <hugetlb attempts=\"%llu\" failures=\"%llu\"/>\n"
+	    "    <gigantic attempts=\"%llu\" failures=\"%llu\"/>\n"
+	    "    <hugepage_advise calls=\"%llu\"/>\n"
+	    "    <mbind calls=\"%llu\" failures=\"%llu\"/>\n"
+	    "    <vma count=\"%llu\"/>\n"
 	    "  </heap>\n"
 	    "</malloc>\n",
 	    V8M_VERSION_STRING, (unsigned long long)live.live_regions,
 	    (unsigned long long)live.live_bytes,
 	    (unsigned long long)live.live_bytes,
-	    (unsigned long long)live.bytes_mapped);
+	    (unsigned long long)live.bytes_mapped,
+	    (unsigned long long)large_stats.large_alloc_count,
+	    (unsigned long long)large_stats.large_free_count,
+	    (unsigned long long)large_stats.large_bytes_in_use,
+	    (unsigned long long)large_stats.huge_alloc_count,
+	    (unsigned long long)large_stats.huge_free_count,
+	    (unsigned long long)large_stats.huge_bytes_in_use,
+	    (unsigned long long)ph_stats.hugetlb_alloc_calls,
+	    (unsigned long long)ph_stats.hugetlb_alloc_failures,
+	    (unsigned long long)ph_stats.gigantic_alloc_calls,
+	    (unsigned long long)ph_stats.gigantic_alloc_failures,
+	    (unsigned long long)ph_stats.hugepage_advise_calls,
+	    (unsigned long long)ph_stats.mbind_calls,
+	    (unsigned long long)ph_stats.mbind_failures,
+	    (unsigned long long)vmas);
 	return 0;
 }
 

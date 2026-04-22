@@ -7,6 +7,29 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `malloc_info` XML expanded + `V8M_PROFILE` on-exit dump
+  (`src/v8m_api.c`). The XML now covers every counter the
+  allocator tracks: `<total>` mmap region count + size,
+  `<system>` / `<aspace>` page-heap totals, `<large>` and
+  `<huge>` per-class alloc / free / bytes_in_use, `<hugetlb>`
+  and `<gigantic>` MAP_HUGETLB attempt + failure counts,
+  `<hugepage_advise>` MADV_HUGEPAGE calls, `<mbind>` NUMA-pin
+  calls + failures, and `<vma>` live VMA count via
+  `v8m_count_vmas`. The whole document is one allocator-wide
+  snapshot a maintainer can pipe to `xmlstarlet` or grep.
+  `V8M_OPT_PROFILE != 0` (set via the `V8M_PROFILE`
+  environment variable) makes the destructor dump one final
+  malloc_info XML to stderr right before the bg purge thread
+  joins — gives a process-exit summary maintainers can grep
+  from logs without instrumenting the application. The
+  pprof-format heap profile dump-on-exit (open question #5,
+  resolved to pprof) lands once the protobuf encoder cycle
+  ships; v0 profile-mode stops at the XML dump. Test
+  coverage: the existing `malloc_info` block in `test_api`
+  now spot-checks `<large>` / `<huge>` / `<vma>` / `<mbind>`
+  rows so a regression that drops one of them fails the
+  gate.
+
 - Async-signal-safe emergency allocator
   (`src/v8m_signal_safe.{h,c}`, architecture.md §6).
   `malloc` / `free` are not async-signal-safe in general — the

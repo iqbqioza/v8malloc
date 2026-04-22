@@ -445,6 +445,24 @@ static int check_glibc_compat_surface(void)
 		free(buffer);
 		return fail("malloc_info output missing <malloc tag");
 	}
+	/* Spot-check the expanded fields land in the XML so a
+	 * regression that drops a row doesn't go unnoticed. */
+	if (strstr(buffer, "<large ") == NULL) {
+		free(buffer);
+		return fail("malloc_info missing <large> row");
+	}
+	if (strstr(buffer, "<huge ") == NULL) {
+		free(buffer);
+		return fail("malloc_info missing <huge> row");
+	}
+	if (strstr(buffer, "<vma ") == NULL) {
+		free(buffer);
+		return fail("malloc_info missing <vma> row");
+	}
+	if (strstr(buffer, "<mbind ") == NULL) {
+		free(buffer);
+		return fail("malloc_info missing <mbind> row");
+	}
 	free(buffer);
 
 	/* malloc_stats writes to stderr. Redirect stderr through a
