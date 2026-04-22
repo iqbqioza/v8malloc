@@ -964,6 +964,49 @@ V8M_EXPORT uint32_t v8m_size_class_to_bytes(int cls)
 	return v8m_size_class_size((uint32_t)cls);
 }
 
+/* Mirror of arch_name() in src/v8m_arch.c. The arch.c helper is
+ * static so we can't share it across TUs; the surface is small
+ * enough that duplicating it costs less than exposing a private
+ * API. A future cycle can promote arch_name() to v8m_arch.h if
+ * another consumer needs it. */
+static const char *api_arch_name(void)
+{
+#if defined(V8M_ARCH_X86_64)
+	return "x86_64";
+#elif defined(V8M_ARCH_AARCH64)
+	return "aarch64";
+#elif defined(V8M_ARCH_RISCV64)
+	return "riscv64";
+#elif defined(V8M_ARCH_PPC64LE)
+	return "ppc64le";
+#elif defined(V8M_ARCH_S390X)
+	return "s390x";
+#elif defined(V8M_ARCH_LOONGARCH64)
+	return "loongarch64";
+#else
+	return "unknown";
+#endif
+}
+
+V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0, sizeof(*out));
+	const char *name = api_arch_name();
+	size_t name_len = strlen(name);
+	if (name_len >= sizeof(out->arch_name)) {
+		name_len = sizeof(out->arch_name) - 1U;
+	}
+	(void)memcpy(out->arch_name, name, name_len);
+	out->arch_name[name_len] = '\0';
+	out->cache_line_bytes = (uint32_t)v8m_arch_runtime_cache_line_size();
+	out->build_cache_line_bytes = (uint32_t)V8M_CACHE_LINE_SIZE;
+	out->tsc_mhz = v8m_arch_tsc_frequency_mhz();
+	out->has_lse = v8m_arch_has_lse() ? 1U : 0U;
+}
+
 V8M_EXPORT void v8m_get_slab_class_breakdown(
     struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES])
 {

@@ -6,6 +6,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Public `v8m_get_arch_info(out)` API — programmatic counterpart
+  to the `v8malloc isa: …` line the constructor writes to stderr
+  under `V8M_VERBOSE`. Fills `struct v8m_arch_info` with
+  `arch_name` (string), `cache_line_bytes` (runtime probe),
+  `build_cache_line_bytes` (compile-time `V8M_CACHE_LINE_SIZE`),
+  `tsc_mhz`, and `has_lse` (AArch64 LSE bit). Comparing
+  `cache_line_bytes` to `build_cache_line_bytes` surfaces a host
+  that needs wider padding than the build assumed (Apple M1
+  P-cores at 128 B vs the 64 B default). Exported under
+  `V8MALLOC_1.0`. Coverage in `tests/test_api.c::check_arch_info_api`
+  asserts the field shape (NUL-termination, power-of-two cache
+  lines, non-zero TSC, in-bounds `has_lse`, zeroed reserved).
+
 ### Fixed
 - CI failure on `test_guard_page` under UBSan. Two coupled issues
   surfaced once UBSan landed in the CI matrix: (a) UBSan

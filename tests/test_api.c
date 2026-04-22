@@ -968,6 +968,46 @@ static int check_huge_and_frag_stats(void)
 	return 0;
 }
 
+static int check_arch_info_api(void)
+{
+	v8m_get_arch_info(NULL); /* tolerates NULL */
+
+	struct v8m_arch_info info;
+	(void)memset(&info, 0xCC, sizeof(info));
+	v8m_get_arch_info(&info);
+
+	if (info.arch_name[0] == '\0') {
+		return fail("v8m_get_arch_info: arch_name is empty");
+	}
+	if (strnlen(info.arch_name, sizeof(info.arch_name)) ==
+	    sizeof(info.arch_name)) {
+		return fail("v8m_get_arch_info: arch_name not NUL-terminated");
+	}
+	if (info.cache_line_bytes == 0U ||
+	    (info.cache_line_bytes & (info.cache_line_bytes - 1U)) != 0U) {
+		return fail(
+		    "v8m_get_arch_info: cache_line_bytes not power-of-two");
+	}
+	if (info.build_cache_line_bytes == 0U ||
+	    (info.build_cache_line_bytes &
+	     (info.build_cache_line_bytes - 1U)) != 0U) {
+		return fail("v8m_get_arch_info: build_cache_line_bytes not "
+			    "power-of-two");
+	}
+	if (info.tsc_mhz == 0U) {
+		return fail("v8m_get_arch_info: tsc_mhz is zero");
+	}
+	if (info.has_lse > 1U) {
+		return fail("v8m_get_arch_info: has_lse out of bounds");
+	}
+	for (size_t i = 0; i < sizeof(info.reserved); i++) {
+		if (info.reserved[i] != 0U) {
+			return fail("v8m_get_arch_info: reserved not zeroed");
+		}
+	}
+	return 0;
+}
+
 static int check_purge_and_namespaced_compat(void)
 {
 	if (v8m_purge() != 0) {
@@ -1075,6 +1115,10 @@ int main(void)
 		return status;
 	}
 	status = check_huge_and_frag_stats();
+	if (status != 0) {
+		return status;
+	}
+	status = check_arch_info_api();
 	if (status != 0) {
 		return status;
 	}

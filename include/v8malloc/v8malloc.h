@@ -332,6 +332,34 @@ V8M_EXPORT void v8m_get_slab_class_breakdown(
     struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES]);
 
 /*
+ * Architecture / runtime probe snapshot. Programmatic counterpart
+ * to the `v8malloc isa: …` line the constructor writes to stderr
+ * under V8M_VERBOSE — same data, but available to a process that
+ * wants the values without parsing the log line. `arch_name`
+ * carries the same short name the verbose line emits ("x86_64",
+ * "aarch64", "riscv64", "ppc64le", "s390x", "loongarch64", or
+ * "unknown" on an unrecognised arch). `cache_line_bytes` is the
+ * runtime-probed L1 dcache line width (CTR_EL0 on aarch64,
+ * compile-time constant elsewhere). `build_cache_line_bytes` is
+ * the value V8M_CACHELINE_ALIGNED used at struct layout time —
+ * comparing the two surfaces a host that needs wider padding than
+ * the build assumed (Apple M1 P-cores at 128 B vs the 64 B
+ * default). `tsc_mhz` is the TSC frequency on x86_64, 1000 (= 1
+ * tick per ns) on every other arch. `has_lse` is the AArch64 LSE
+ * atomics availability bit; false on every non-aarch64 build.
+ */
+struct v8m_arch_info {
+	char arch_name[16];
+	uint32_t cache_line_bytes;
+	uint32_t build_cache_line_bytes;
+	uint32_t tsc_mhz;
+	uint8_t has_lse;
+	uint8_t reserved[3];
+};
+
+V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out);
+
+/*
  * Hot-reload the active size-class size table. Atomically swaps
  * the pointer the slab-init paths read on every fresh-page
  * formatting. Already-allocated pages keep the size baked into
