@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h" /* V8M_CACHELINE_ALIGNED */
 #include "v8m_buddy.h"
 
 /*
@@ -44,7 +45,8 @@ struct v8m_buddy_pool_arena {
 
 struct v8m_buddy_pool {
 	struct v8m_buddy_pool_arena arenas[V8M_BUDDY_POOL_MAX_ARENAS];
-	pthread_mutex_t lock;
+	/* Cache-line padded — see the matching note on v8m_slab_pool::lock. */
+	V8M_CACHELINE_ALIGNED pthread_mutex_t lock;
 };
 
 /*

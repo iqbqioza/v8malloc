@@ -30,6 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h" /* V8M_CACHELINE_ALIGNED */
 #include "v8m_page.h"
 #include "v8m_size_class.h"
 
@@ -48,7 +49,13 @@ struct v8m_slab_pool {
 	/* Indices V8M_MEDIUM_FIRST_CLASS and above are unused; the
 	 * pool only serves Tiny + Small. */
 	struct v8m_slab_pool_class classes[V8M_MEDIUM_FIRST_CLASS];
-	pthread_mutex_t lock;
+	/* Lock sits on its own cache line so a core spinning on the
+	 * futex doesn't bounce the line every neighbouring field
+	 * touches. The wrapping struct (v8m_dispatch) places buddy
+	 * state immediately after the slab pool, so without padding
+	 * the slab.lock and the head of buddy.arenas[0] would share
+	 * a line on x86_64 (where V8M_CACHE_LINE_SIZE == 64). */
+	V8M_CACHELINE_ALIGNED pthread_mutex_t lock;
 };
 
 /*

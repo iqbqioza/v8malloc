@@ -6,6 +6,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Cache-line pad the slab + buddy pool locks
+  (`src/v8m_slab_pool.h`, `src/v8m_buddy_pool.h`). Both pools'
+  `pthread_mutex_t lock` field now carries
+  `V8M_CACHELINE_ALIGNED`. The single `v8m_dispatch` global
+  embeds `slab` then `buddy`, so without padding the
+  slab.lock futex word and the head of buddy.arenas[0] sat on
+  adjacent cache lines on x86_64 (V8M_CACHE_LINE_SIZE == 64).
+  Two cores hammering the slab lock and the buddy state
+  respectively would ping-pong the line every ownership
+  hand-off, contributing to the negative-scaling we already
+  see in MB-02 / MB-03. The fix is a one-attribute change with
+  no functional impact; it lands the first half of the
+  false-sharing audit (core-cache and NUMA-pool padding land
+  with their structures).
+
 ### Added
 - mimalloc-bench wrapper script
   (`scripts/bench-mimalloc.sh`). Drives the external
