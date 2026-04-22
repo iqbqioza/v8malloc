@@ -135,6 +135,19 @@ enum v8m_option {
 					    * expensive and only useful for
 					    * threads with locality-sensitive
 					    * working sets. */
+	V8M_OPT_DEFERRED_COALESCE, /* 0 / 1 — when on, the buddy pool
+				    * skips the immediate buddy-merge on
+				    * every free; the merge happens lazily
+				    * on the next alloc that would
+				    * otherwise miss. Avoids the
+				    * coalesce/split cycle in
+				    * alloc-free-alloc-free patterns at
+				    * the cost of slightly weaker
+				    * fragmentation guarantees on the
+				    * write-mostly path. Off by default —
+				    * the immediate-coalesce baseline is
+				    * still the better fit for most
+				    * workloads. */
 	V8M_OPT_COUNT
 };
 

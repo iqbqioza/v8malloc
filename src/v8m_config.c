@@ -28,6 +28,7 @@ static const int64_t v8m_config_defaults[V8M_OPT_COUNT] = {
     [V8M_OPT_COMPACT_THRESHOLD] = 25,
     [V8M_OPT_VMA_WARN_THRESHOLD] = 1024,
     [V8M_OPT_NUMA_AGGRESSIVE_MIGRATION] = 0,
+    [V8M_OPT_DEFERRED_COALESCE] = 0,
 };
 
 static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
@@ -41,6 +42,7 @@ static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
     [V8M_OPT_COMPACT_THRESHOLD] = "V8M_COMPACT_THRESHOLD",
     [V8M_OPT_VMA_WARN_THRESHOLD] = "V8M_VMA_WARN_THRESHOLD",
     [V8M_OPT_NUMA_AGGRESSIVE_MIGRATION] = "V8M_NUMA_AGGRESSIVE_MIGRATION",
+    [V8M_OPT_DEFERRED_COALESCE] = "V8M_DEFERRED_COALESCE",
 };
 
 static _Atomic int64_t v8m_config_values[V8M_OPT_COUNT];

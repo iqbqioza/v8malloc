@@ -7,6 +7,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Deferred coalescing for the buddy pool — opt-in
+  (`src/v8m_buddy.{h,c}`, `src/v8m_buddy_pool.c`,
+  `src/v8m_config.c`, `include/v8malloc/v8malloc.h`,
+  winning-algorithms.md §10 / TODO P2 "Deferred coalescing"
+  row). New `V8M_OPT_DEFERRED_COALESCE` option (env
+  `V8M_DEFERRED_COALESCE`, default 0) gates a buddy-pool
+  variant where `v8m_buddy_pool_free` skips the
+  immediate buddy-merge — the freed block lands on
+  `free_lists[level]` directly via the new
+  `v8m_buddy_free_no_coalesce` helper. The merge happens
+  lazily on the next alloc that would otherwise return
+  NULL: `v8m_buddy_pool_alloc` calls the new
+  `v8m_buddy_coalesce_all` sweep on every in-use arena
+  and retries `try_existing_arenas`. This avoids the
+  coalesce/split round trip in alloc-free-alloc-free
+  same-size patterns at the cost of slightly higher
+  steady-state fragmentation; off by default because the
+  immediate-coalesce baseline is still the better fit for
+  most workloads. The spec calls for a 3-buffer epoch GC
+  to avoid a TOCTOU race on the epoch swap; v8malloc's
+  per-pool mutex serializes all buddy operations, so the
+  epoch scheme would add complexity without buying
+  safety. The lazy coalesce-on-alloc-miss design captures
+  the "avoid wasteful coalesce/split cycles" intent
+  without it. Coverage in
+  `tests/test_buddy_pool.c::check_deferred_coalesce`
+  asserts (a) freed buddy pairs stay on `free_lists[0]`
+  with `free_lists[1]` empty, (b) an 8 KiB alloc that
+  needs the merged block succeeds (whether via
+  coalesce-and-retry or higher-level split).
+
+### Added
 - NUMA aggressive migration (level 3) — opt-in
   (`src/v8m_thread_cache.{h,c}`, `src/v8m_config.c`,
   `include/v8malloc/v8malloc.h`, numa.md §4.3 / TODO P2

@@ -93,4 +93,29 @@ size_t v8m_buddy_block_size(const struct v8m_buddy *buddy, const void *ptr);
  */
 bool v8m_buddy_is_empty(const struct v8m_buddy *buddy);
 
+/*
+ * Return a block to the arena WITHOUT running the buddy-merge
+ * loop. Used by the deferred-coalesce path
+ * (V8M_OPT_DEFERRED_COALESCE) so alloc-free-alloc-free patterns
+ * skip the wasted coalesce/split round trip; the merge happens
+ * lazily on the next alloc that would otherwise miss the
+ * requested level (see v8m_buddy_coalesce_all).
+ *
+ * `size` is rounded up to the buddy level the same way
+ * v8m_buddy_free does. Tolerates ptr == NULL.
+ */
+void v8m_buddy_free_no_coalesce(struct v8m_buddy *buddy, void *ptr,
+				size_t size);
+
+/*
+ * Walk every level's free list and merge every coalescable pair of
+ * buddies upward as far as they go. Returns the number of
+ * pairwise merges performed. Used by the deferred-coalesce
+ * fallback when an alloc would otherwise return NULL: an
+ * on-demand sweep can assemble a higher-level block from
+ * scattered low-level blocks that the immediate-coalesce path
+ * would have already merged.
+ */
+size_t v8m_buddy_coalesce_all(struct v8m_buddy *buddy);
+
 #endif /* V8M_BUDDY_H */

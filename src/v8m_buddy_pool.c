@@ -14,7 +14,9 @@
 
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
+#include "v8m_config.h"
 #include "v8m_page_heap.h"
+#include "v8malloc/v8malloc.h" /* V8M_OPT_DEFERRED_COALESCE */
 
 int v8m_buddy_pool_init(struct v8m_buddy_pool *pool)
 {
@@ -133,6 +135,27 @@ void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size)
 	if (obj == NULL) {
 		obj = acquire_fresh_arena(pool, size);
 	}
+	/* Deferred-coalesce fallback: when the regular path returns
+	 * NULL AND deferred mode left scattered low-level blocks
+	 * that could merge into a higher-level block satisfying
+	 * `size`, sweep coalesce on every in-use arena and retry.
+	 * Skipped in immediate-coalesce mode since the merges
+	 * already happened on each free. */
+	if (obj == NULL && v8m_config_get(V8M_OPT_DEFERRED_COALESCE) != 0) {
+		bool any_merge = false;
+		for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
+			struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
+			if (!slot->in_use || slot->drained) {
+				continue;
+			}
+			if (v8m_buddy_coalesce_all(&slot->buddy) > 0U) {
+				any_merge = true;
+			}
+		}
+		if (any_merge) {
+			obj = try_existing_arenas(pool, size);
+		}
+	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
 	return obj;
@@ -158,7 +181,11 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 		return false;
 	}
 
-	v8m_buddy_free(&slot->buddy, ptr, size);
+	if (v8m_config_get(V8M_OPT_DEFERRED_COALESCE) != 0) {
+		v8m_buddy_free_no_coalesce(&slot->buddy, ptr, size);
+	} else {
+		v8m_buddy_free(&slot->buddy, ptr, size);
+	}
 
 	if (v8m_buddy_is_empty(&slot->buddy)) {
 		/* Defer the munmap: keep the VMA + buddy bookkeeping

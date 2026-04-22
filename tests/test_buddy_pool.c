@@ -18,6 +18,7 @@
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
 #include "v8m_page_heap.h"
+#include "v8malloc/v8malloc.h" /* v8m_set_option for the deferred-mode test */
 
 static int fail(const char *msg)
 {
@@ -397,6 +398,93 @@ static int check_sweep_threshold(void)
 	return 0;
 }
 
+/*
+ * Deferred-coalesce mode (V8M_OPT_DEFERRED_COALESCE). When on,
+ * v8m_buddy_pool_free skips the immediate buddy-merge — freed
+ * blocks land on free_lists at the level they were allocated at,
+ * never propagating upward until a subsequent alloc that would
+ * otherwise miss triggers the on-demand coalesce sweep.
+ *
+ * Two checks: (a) the no-coalesce free path actually skips the
+ * merge (verified by direct buddy state inspection), (b) an
+ * alloc that needs a higher-level block triggers coalesce + retry
+ * + succeeds.
+ */
+static int check_deferred_coalesce(void)
+{
+	if (v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 1) != 0) {
+		return fail("could not turn deferred coalesce on");
+	}
+
+	struct v8m_buddy_pool pool;
+	if (v8m_buddy_pool_init(&pool) != 0) {
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("init returned non-zero");
+	}
+
+	/* `anchor` keeps the arena out of the drained state so the
+	 * test can introspect free_lists. b0 + b1 are the buddy pair
+	 * we want to coalesce-check — the buddy pool packs 4 KiB
+	 * blocks at level 0 starting at the lowest indices, so the
+	 * second-and-third 4 KiB allocs land on the same parent
+	 * level-1 cell as buddies. */
+	void *anchor = v8m_buddy_pool_alloc(&pool, V8M_BUDDY_MIN_BLOCK);
+	void *blk0 = v8m_buddy_pool_alloc(&pool, V8M_BUDDY_MIN_BLOCK);
+	void *blk1 = v8m_buddy_pool_alloc(&pool, V8M_BUDDY_MIN_BLOCK);
+	if (anchor == NULL || blk0 == NULL || blk1 == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("could not get the three anchor + buddy blocks");
+	}
+
+	/* Free b0 + b1 — under deferred mode they should NOT merge
+	 * (free_lists[0] retains both, free_lists[1] stays empty). */
+	(void)v8m_buddy_pool_free(&pool, blk0);
+	(void)v8m_buddy_pool_free(&pool, blk1);
+
+	const struct v8m_buddy_pool_arena *arena = NULL;
+	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
+		if (pool.arenas[i].in_use && !pool.arenas[i].drained) {
+			arena = &pool.arenas[i];
+			break;
+		}
+	}
+	if (arena == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("no in-use non-drained arena after frees");
+	}
+	if (arena->buddy.free_lists[0] == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("level 0 free list is empty after deferred frees");
+	}
+	if (arena->buddy.free_lists[1] != NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("deferred mode unexpectedly populated level 1");
+	}
+
+	/* Now allocate 8 KiB. The level-1 free list is empty AND
+	 * the higher-level free lists may already have content
+	 * (the rest of the arena is unsplit), so the alloc could
+	 * either split a higher-level block or trigger
+	 * coalesce-and-retry. Either way the alloc must succeed
+	 * for the deferred mode to be safe. */
+	void *blk_8k = v8m_buddy_pool_alloc(&pool, (size_t)8 * 1024);
+	if (blk_8k == NULL) {
+		v8m_buddy_pool_destroy(&pool);
+		(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+		return fail("8 KiB alloc failed under deferred mode");
+	}
+
+	(void)v8m_buddy_pool_free(&pool, blk_8k);
+	(void)v8m_buddy_pool_free(&pool, anchor);
+	v8m_buddy_pool_destroy(&pool);
+	(void)v8m_set_option(V8M_OPT_DEFERRED_COALESCE, 0);
+	return 0;
+}
+
 int main(void)
 {
 	int status = check_init_destroy();
@@ -424,6 +512,10 @@ int main(void)
 		return status;
 	}
 	status = check_sweep_threshold();
+	if (status != 0) {
+		return status;
+	}
+	status = check_deferred_coalesce();
 	if (status != 0) {
 		return status;
 	}

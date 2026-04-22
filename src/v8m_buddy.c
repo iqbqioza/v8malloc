@@ -148,25 +148,24 @@ void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size)
 	return node;
 }
 
-void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
+/*
+ * Coalesce a freshly-freed block at (start_block, start_level)
+ * with its buddy and propagate upward as long as buddies are free
+ * and unsplit. The block is assumed to be ALREADY off every free
+ * list (the caller is mid-free and has not yet pushed it). On
+ * return the merged block is on the appropriate free list at the
+ * highest level reached. Returns the level the block landed at —
+ * useful for the on-demand coalesce sweep that wants to know if
+ * any merge occurred.
+ */
+static uint32_t coalesce_upward(struct v8m_buddy *buddy,
+				struct v8m_buddy_node *start_block,
+				uint32_t start_level)
 {
-	if (ptr == NULL) {
-		return;
-	}
-	uint32_t level = size_to_level(size);
-	if (level >= V8M_BUDDY_LEVELS) {
-		return;
-	}
+	struct v8m_buddy_node *current = start_block;
+	uint32_t level = start_level;
+	uint32_t idx = addr_to_index(buddy, current, level);
 
-	uint32_t idx = addr_to_index(buddy, ptr, level);
-	buddy->alloc_bitmap[level] &= ~((uint64_t)1U << idx);
-
-	struct v8m_buddy_node *current = ptr;
-
-	/* Coalesce while the buddy (idx ^ 1) is free and not split.
-	 * The top level is skipped because its buddy is off the end
-	 * of the arena — V8M_BUDDY_LEVELS - 1 blocks exist only as
-	 * one whole-arena cell. */
 	while (level < V8M_BUDDY_LEVELS - 1U) {
 		uint32_t buddy_idx = idx ^ 1U;
 		uint64_t buddy_bit = (uint64_t)1U << buddy_idx;
@@ -189,8 +188,73 @@ void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
 		idx >>= 1;
 		buddy->split_bitmap[level] &= ~((uint64_t)1U << idx);
 	}
-
 	list_push(&buddy->free_lists[level], current);
+	return level;
+}
+
+void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
+{
+	if (ptr == NULL) {
+		return;
+	}
+	uint32_t level = size_to_level(size);
+	if (level >= V8M_BUDDY_LEVELS) {
+		return;
+	}
+
+	uint32_t idx = addr_to_index(buddy, ptr, level);
+	buddy->alloc_bitmap[level] &= ~((uint64_t)1U << idx);
+
+	(void)coalesce_upward(buddy, ptr, level);
+}
+
+void v8m_buddy_free_no_coalesce(struct v8m_buddy *buddy, void *ptr, size_t size)
+{
+	if (ptr == NULL) {
+		return;
+	}
+	uint32_t level = size_to_level(size);
+	if (level >= V8M_BUDDY_LEVELS) {
+		return;
+	}
+	uint32_t idx = addr_to_index(buddy, ptr, level);
+	buddy->alloc_bitmap[level] &= ~((uint64_t)1U << idx);
+	list_push(&buddy->free_lists[level], ptr);
+}
+
+size_t v8m_buddy_coalesce_all(struct v8m_buddy *buddy)
+{
+	size_t merges = 0;
+	/* Walk levels from low to high — every merge promotes a
+	 * block to a higher level, so a single bottom-up pass
+	 * fully drains all coalescable pairs. */
+	for (uint32_t level = 0; level < V8M_BUDDY_LEVELS - 1U; level++) {
+		struct v8m_buddy_node *node = buddy->free_lists[level];
+		while (node != NULL) {
+			struct v8m_buddy_node *next = node->next;
+			uint32_t idx = addr_to_index(buddy, node, level);
+			uint32_t buddy_idx = idx ^ 1U;
+			uint64_t buddy_bit = (uint64_t)1U << buddy_idx;
+
+			if ((buddy->alloc_bitmap[level] & buddy_bit) == 0U &&
+			    (buddy->split_bitmap[level] & buddy_bit) == 0U) {
+				/* Buddy is free + not split — merge.
+				 * Pull `node` off this level (it'll be
+				 * re-pushed as part of the merged block
+				 * at a higher level by coalesce_upward). */
+				list_remove(&buddy->free_lists[level], node);
+				(void)coalesce_upward(buddy, node, level);
+				merges++;
+				/* `next` may have been the sibling we
+				 * just merged away — restart the walk
+				 * at the (possibly new) head. */
+				node = buddy->free_lists[level];
+			} else {
+				node = next;
+			}
+		}
+	}
+	return merges;
 }
 
 size_t v8m_buddy_block_size(const struct v8m_buddy *buddy, const void *ptr)
