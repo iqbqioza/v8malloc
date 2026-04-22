@@ -28,6 +28,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h" /* V8M_CACHELINE_ALIGNED for false-sharing isolation */
 #include "v8m_remote_free.h" /* v8m_mpsc_queue */
 #include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
 
@@ -78,12 +79,16 @@
 struct v8m_slab_pool;
 
 /*
- * Per-thread allocator state. Foundation-cycle layout: only the
- * fields the destructor + remote-free queue need today. Future
- * cycles grow this struct with bin_heads[] / bin_count[] /
- * bin_capacity[] / gc counters; consumers should treat the layout
- * as internal and only access via the helpers below.
+ * Per-thread allocator state. The cross-thread MPSC `remote` head
+ * lives at offset 0 and is producer-written; the V8M_CACHELINE_ALIGNED
+ * marker on `initialized` forces every consumer-only field onto a
+ * fresh cache line so producer writes do not invalidate the
+ * consumer thread's hot reads. The layout is treated as internal —
+ * consumers go through the helpers below — and the
+ * intentional padding is the false-sharing isolation the audit
+ * (TODO P1 row 137) calls for.
  */
+/* NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding) */
 struct v8m_thread_cache {
 	/*
 	 * Cross-thread free queue (thread-cache.md §2.3). Peers push
@@ -102,8 +107,18 @@ struct v8m_thread_cache {
 	/*
 	 * 1 once the cache has been wired up (allocated, registered
 	 * with the pthread_key, and the TLS slot stored).
+	 *
+	 * V8M_CACHELINE_ALIGNED here forces every field that follows
+	 * to live on a fresh cache line, isolated from the
+	 * `remote` MPSC head above. Producers writing to
+	 * `remote.head` (cross-thread free routing — dormant in v0,
+	 * lights up with the thread-owned-slab refactor) would
+	 * otherwise false-share with the owner thread's hot reads
+	 * of bin_heads / bin_count on every alloc / free. The
+	 * isolation is preemptive; today's v0 sees no MPSC traffic
+	 * so the cost is just struct-size padding.
 	 */
-	uint32_t initialized;
+	V8M_CACHELINE_ALIGNED uint32_t initialized;
 	/*
 	 * Per-slab-class free-list head. Each entry points at the head
 	 * of an intrusive singly-linked list whose nodes are the

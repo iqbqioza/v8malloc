@@ -23,6 +23,7 @@
 #include <sys/syscall.h> /* SYS_move_pages */
 #include <unistd.h> /* syscall */
 
+#include "v8m_arch.h" /* V8M_CACHE_LINE_SIZE for aligned_alloc */
 #include "v8m_config.h" /* v8m_config_get for the migration opt-in */
 #include "v8m_internal.h" /* V8M_PAGE_MASK */
 #include "v8m_numa.h" /* v8m_numa_current_node */
@@ -154,7 +155,18 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 		return NULL;
 	}
 	t_in_create = true;
-	cache = malloc(sizeof(*cache));
+	/* aligned_alloc requires size to be a multiple of alignment.
+	 * The cache struct itself is V8M_CACHELINE_ALIGNED on its
+	 * `initialized` field, but the C standard does not promise
+	 * `sizeof(*cache)` is a multiple of V8M_CACHE_LINE_SIZE on
+	 * every compiler — round up explicitly. The cache-line
+	 * alignment of the struct base ensures the
+	 * V8M_CACHELINE_ALIGNED field on `initialized` actually
+	 * lands on a fresh cache line in memory (not just at the
+	 * struct-relative offset). */
+	size_t aligned_size = (sizeof(*cache) + V8M_CACHE_LINE_SIZE - 1U) &
+			      ~((size_t)V8M_CACHE_LINE_SIZE - 1U);
+	cache = aligned_alloc(V8M_CACHE_LINE_SIZE, aligned_size);
 	t_in_create = false;
 	if (cache == NULL) {
 		return NULL;

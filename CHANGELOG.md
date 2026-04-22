@@ -7,6 +7,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Performance
+- False-sharing audit extended to the L1 thread cache and L2
+  core cache (`src/v8m_thread_cache.{h,c}`,
+  `src/v8m_core_cache.c`, TODO P1 row 137). The L1 cache's
+  `remote` MPSC queue head (producer-written when
+  cross-thread frees route here) is now followed by a
+  V8M_CACHELINE_ALIGNED `initialized` field, which forces
+  every consumer-only field onto a fresh cache line — a
+  future producer writing `remote.head` cannot invalidate
+  the line containing the owner thread's hot
+  `bin_heads[0]` read. The cache struct's allocation
+  switched from `malloc` to `aligned_alloc(V8M_CACHE_LINE_SIZE,
+  rounded_size)` so the struct base is cache-line aligned
+  in memory (without that, the field-level alignment
+  attribute is honoured at the struct-relative offset only).
+  The L2 core cache gains a `static_assert` that its
+  `sizeof` is a multiple of `V8M_CACHE_LINE_SIZE`, which
+  pins the existing V8M_CACHELINE_ALIGNED guarantee on
+  neighbouring entries in `g_caches[V8M_NUMA_MAX_CPUS]` —
+  a future field add that bumps the struct past the next
+  cache-line boundary fails the build until the layout is
+  re-padded. The intentional padding shows up as ~96 B of
+  fill in `struct v8m_thread_cache`; documented and
+  suppressed against
+  `clang-analyzer-optin.performance.Padding` since
+  reordering would defeat the isolation. Today the MPSC
+  queue is dormant (slab pages are pool-owned in v0, no
+  cross-thread frees route through it) so the immediate
+  perf delta is zero; the audit lands now so the layout is
+  ready when the thread-owned-slab refactor wires
+  cross-thread free routing.
+
 - TLC↔L2 plumbing with single-CAS batch push
   (`src/v8m_core_cache.{h,c}`, `src/v8m_thread_cache.{h,c}`,
   `src/v8m_dispatch.{h,c}`, `src/v8m_api.c`,

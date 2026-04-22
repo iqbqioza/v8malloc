@@ -6,13 +6,32 @@
 
 #include "v8m_core_cache.h"
 
+#include <assert.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
+#include "v8m_arch.h" /* V8M_CACHE_LINE_SIZE for the static_assert */
 #include "v8m_numa.h" /* V8M_NUMA_MAX_CPUS, v8m_numa_current_cpu */
 #include "v8m_size_class.h" /* V8M_NUM_SIZE_CLASSES */
+
+/*
+ * False-sharing audit (TODO P1 row 137). The core-cache struct
+ * carries V8M_CACHELINE_ALIGNED, but that only aligns the struct
+ * BASE — the C standard does not promise the struct's `sizeof`
+ * is a multiple of the alignment. Without that guarantee,
+ * neighbouring entries in `g_caches[V8M_NUMA_MAX_CPUS]` could
+ * share a cache line at the boundary, which would let a
+ * cross-CPU push/pop on cache N+1 invalidate a line cache N
+ * just touched. The static_assert below makes the constraint
+ * a build-time invariant: a future field add that bumps the
+ * struct past the next cache-line boundary fails the build
+ * until the layout is re-padded.
+ */
+static_assert(sizeof(struct v8m_core_cache) % V8M_CACHE_LINE_SIZE == 0U,
+	      "v8m_core_cache must be cache-line-multiple-sized so "
+	      "neighbouring entries in g_caches do not share a line");
 
 /*
  * Static BSS table. Lazy physical backing: every entry is zero
