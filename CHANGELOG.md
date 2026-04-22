@@ -6,6 +6,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- NUMA local-node pin via `mbind(MPOL_BIND)` on every
+  freshly-mapped page-heap region (`src/v8m_page_heap.c`). Both
+  the MAP_HUGETLB primary path and the regular over-allocate-
+  and-trim path now issue a direct `SYS_mbind` syscall
+  immediately after a successful mmap — before any page fault
+  has materialised a physical frame, so the kernel's
+  page-allocator places subsequent fault-ins on the calling
+  thread's current NUMA node without needing MPOL_MF_MOVE.
+  Skipped when `V8M_OPT_NUMA_AWARE == 0`, the host reports a
+  single NUMA node (no benefit), or the resolved current node
+  is out of range. Best-effort: failures (typical in
+  seccomp-restricted runtimes and kernels without
+  CONFIG_NUMA — every WSL2 / dev container) increment a
+  failure counter and the allocator continues unchanged with
+  the kernel's default policy. Two new fields on
+  `struct v8m_page_heap_stats` — `mbind_calls` and
+  `mbind_failures` — let a maintainer verify the path is firing
+  on production hardware. Resolves the P0 mbind item on
+  TODO.md; the future per-NUMA pool sharding builds on top of
+  this.
+
 ### Changed
 - Cache-line pad the slab + buddy pool locks
   (`src/v8m_slab_pool.h`, `src/v8m_buddy_pool.h`). Both pools'

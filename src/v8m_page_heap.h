@@ -72,6 +72,18 @@ struct v8m_page_heap_stats {
 	 * that case, so a non-zero failure count is informational,
 	 * not an error. */
 	uint64_t hugetlb_alloc_failures;
+	/* Number of mbind(MPOL_BIND) calls the page heap has made
+	 * to pin freshly-mapped regions to the calling thread's
+	 * current NUMA node. Skipped (not counted) when NUMA is
+	 * disabled by env var or the host has only one node. */
+	uint64_t mbind_calls;
+	/* Subset of mbind_calls that returned a non-zero status —
+	 * typically ENOSYS / EPERM in seccomp-restricted runtimes
+	 * or kernels without CONFIG_NUMA. The allocator carries on;
+	 * a non-zero failure count just means subsequent fault-ins
+	 * follow the kernel's default policy instead of the
+	 * intended local-bind. */
+	uint64_t mbind_failures;
 };
 
 /*

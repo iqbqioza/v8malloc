@@ -12,12 +12,23 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "v8m_config.h"
 #include "v8m_internal.h"
+#include "v8m_numa.h" /* v8m_numa_current_node, v8m_numa_node_count */
 #include "v8m_page_heap.h"
 #include "v8malloc/v8malloc.h"
+
+/* MPOL_BIND lives in <linux/mempolicy.h> which pulls in conflicting
+ * kernel typedefs on glibc. Define just the constants we need here
+ * so the syscall wrapper compiles cleanly. */
+#ifndef V8M_MPOL_BIND
+#define V8M_MPOL_BIND 2
+#endif
 
 static _Atomic uint64_t v8m_mmap_calls = 0;
 static _Atomic uint64_t v8m_munmap_calls = 0;
@@ -27,6 +38,8 @@ static _Atomic uint64_t v8m_bytes_unmapped = 0;
 static _Atomic uint64_t v8m_hugepage_advise_calls = 0;
 static _Atomic uint64_t v8m_hugetlb_alloc_calls = 0;
 static _Atomic uint64_t v8m_hugetlb_alloc_failures = 0;
+static _Atomic uint64_t v8m_mbind_calls = 0;
+static _Atomic uint64_t v8m_mbind_failures = 0;
 
 /*
  * Allocations at or above this size are candidates for the
@@ -141,6 +154,58 @@ static void record_munmap(size_t bytes)
 				  memory_order_relaxed);
 }
 
+/*
+ * Pin a freshly-mapped region to the calling thread's current
+ * NUMA node via mbind(MPOL_BIND). Best-effort: failures are
+ * counted but do not change the allocator's behaviour — the
+ * region remains usable, just with the kernel's default
+ * (typically MPOL_DEFAULT first-touch) policy. Skipped when
+ * NUMA is disabled by env var, the host is single-node (no
+ * benefit), or the kernel filters / does not support the
+ * syscall (every WSL2 / no-NUMA / seccomp-restricted runtime).
+ *
+ * The bind is applied immediately after mmap, before any page
+ * fault has materialised a physical frame, so the policy
+ * controls the *new* faults (no MPOL_MF_MOVE needed). Subsequent
+ * fault-ins land on the local node, which is the entire point
+ * of the pin.
+ */
+static void bind_to_local_node(void *addr, size_t bytes)
+{
+	if (v8m_config_get(V8M_OPT_NUMA_AWARE) == 0) {
+		return;
+	}
+	uint32_t node_count = v8m_numa_node_count();
+	if (node_count <= 1U) {
+		return;
+	}
+	uint32_t node = v8m_numa_current_node();
+	if (node >= node_count) {
+		return;
+	}
+
+	/* Build a unsigned-long bitmap with just our node's bit set.
+	 * The kernel reads `maxnode + 1` bits of the mask; setting
+	 * `maxnode = node + 1` keeps the bitmap a single word for
+	 * any reasonable NUMA topology (current cap is 64 nodes). */
+	enum { BITS_PER_LONG = 64 };
+	unsigned long mask[2] = {0, 0};
+	if (node >= BITS_PER_LONG) {
+		mask[1] = 1UL << (node - BITS_PER_LONG);
+	} else {
+		mask[0] = 1UL << node;
+	}
+	unsigned long maxnode = (unsigned long)node + 1UL;
+
+	atomic_fetch_add_explicit(&v8m_mbind_calls, 1U, memory_order_relaxed);
+	long ret = syscall(SYS_mbind, addr, (unsigned long)bytes,
+			   (long)V8M_MPOL_BIND, mask, maxnode, 0U);
+	if (ret != 0) {
+		atomic_fetch_add_explicit(&v8m_mbind_failures, 1U,
+					  memory_order_relaxed);
+	}
+}
+
 void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 {
 	if (bytes == 0 || alignment < V8M_PAGE_SIZE ||
@@ -172,6 +237,7 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 				record_munmap(bytes);
 				return NULL;
 			}
+			bind_to_local_node(huge, bytes);
 			return huge;
 		}
 		atomic_fetch_add_explicit(&v8m_hugetlb_alloc_failures, 1U,
@@ -234,6 +300,7 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		atomic_fetch_add_explicit(&v8m_hugepage_advise_calls, 1U,
 					  memory_order_relaxed);
 	}
+	bind_to_local_node(result, bytes);
 	return result;
 }
 
@@ -277,4 +344,8 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    &v8m_hugetlb_alloc_calls, memory_order_relaxed);
 	out->hugetlb_alloc_failures = atomic_load_explicit(
 	    &v8m_hugetlb_alloc_failures, memory_order_relaxed);
+	out->mbind_calls =
+	    atomic_load_explicit(&v8m_mbind_calls, memory_order_relaxed);
+	out->mbind_failures =
+	    atomic_load_explicit(&v8m_mbind_failures, memory_order_relaxed);
 }
