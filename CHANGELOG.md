@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Adaptive bin-capacity controller for the TLC
+  (`src/v8m_thread_cache.{h,c}`, thread-cache.md §5.2 / TODO
+  P1 "Adaptive bin capacity" row). The cache now tracks
+  per-class `alloc_count_per_class` / `free_count_per_class`
+  on every bin pop/push and runs `v8m_thread_cache_gc_tick`
+  every `V8M_TLC_GC_INTERVAL` (1024) operations. Each tick
+  computes per-class demand (`max(allocs - frees, 0)`),
+  folds it into an exponentially-weighted moving average
+  (`ema = (3 × ema_old + demand) / 4`, α = 0.25), and
+  recomputes `bin_capacity = clamp(ema × 2,
+  V8M_BIN_CAPACITY_MIN, V8M_BIN_CAPACITY_MAX)`. Hot classes
+  grow to V8M_BIN_CAPACITY_MAX (256) for higher cache hit
+  rates; idle classes decay to V8M_BIN_CAPACITY_MIN (16) so
+  the cache does not retain capacity for traffic that has
+  stopped. Excess slots above the new (smaller) capacity are
+  not eagerly flushed — the next free that crosses the new
+  threshold pays the existing half-bin batch flush, keeping
+  the GC tick cheap. Trigger uses a `gc_countdown` field
+  that decrements on each alloc/free; the count-then-branch
+  pattern is one decrement plus one well-predicted branch on
+  the hot path. New `gc_generation` counter for diagnostics
+  and tests. `v8m_thread_cache_gc_tick` is exported so tests
+  can drive the controller deterministically without issuing
+  a full interval's worth of operations. Coverage in
+  `tests/test_thread_cache.c::check_adaptive_capacity_grows_with_demand`
+  (verifies EMA growth, capacity = EMA×2, and decay back to
+  MIN under sustained idle ticks) and `check_gc_countdown_fires`
+  (verifies the countdown wire actually fires the tick from
+  the alloc/free fast paths).
+
 - TLC slow-path remote-free drain
   (`src/v8m_thread_cache.{h,c}`, `src/v8m_dispatch.c`,
   thread-cache.md §2.3 / TODO P0 "Slow path chain" + "Drain

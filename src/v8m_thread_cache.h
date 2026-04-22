@@ -32,16 +32,25 @@
 #include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
 
 /*
- * Per-class bin-capacity bounds (thread-cache.md §5.2). Adaptive
- * tuning of the per-class capacity is a separate cycle; today every
- * class starts at V8M_BIN_CAPACITY_DEFAULT and stays there. The
- * MIN / MAX bounds are the clamp the future EMA controller will
- * enforce — defining them now pins the contract so the controller
- * cycle does not have to plumb them through after the fact.
+ * Per-class bin-capacity bounds (thread-cache.md §5.2). The cache
+ * starts every class at V8M_BIN_CAPACITY_DEFAULT; the per-class
+ * EMA controller (`v8m_thread_cache_gc_tick`) recomputes capacity
+ * from observed demand each GC interval and clamps the result into
+ * the [MIN, MAX] band.
  */
 #define V8M_BIN_CAPACITY_MIN 16U
 #define V8M_BIN_CAPACITY_DEFAULT 64U
 #define V8M_BIN_CAPACITY_MAX 256U
+
+/*
+ * GC interval, in TLC operations (allocs + frees combined). The
+ * controller recomputes per-class capacities every time the
+ * counter crosses this threshold. Power of two so the trigger
+ * check collapses to a single decrement + branch on the alloc
+ * fast path. Spec calls for ~1000; 1024 is the closest power of
+ * two.
+ */
+#define V8M_TLC_GC_INTERVAL 1024U
 
 /*
  * Forward decl — the slab-class fast path needs to flush back to
@@ -96,12 +105,42 @@ struct v8m_thread_cache {
 	uint16_t bin_count[V8M_MEDIUM_FIRST_CLASS];
 	/*
 	 * Cap per bin. Frees beyond the cap trigger a batch flush
-	 * (half the bin) back to the slab pool. v0 ships every class
-	 * at V8M_BIN_CAPACITY_DEFAULT; the future adaptive controller
-	 * (thread-cache.md §5.2) tunes per-class values within the
-	 * [V8M_BIN_CAPACITY_MIN, V8M_BIN_CAPACITY_MAX] band.
+	 * (half the bin) back to the slab pool. Every class starts
+	 * at V8M_BIN_CAPACITY_DEFAULT; the adaptive controller
+	 * (`v8m_thread_cache_gc_tick`, thread-cache.md §5.2) tunes
+	 * per-class values within the [V8M_BIN_CAPACITY_MIN,
+	 * V8M_BIN_CAPACITY_MAX] band each GC interval.
 	 */
 	uint16_t bin_capacity[V8M_MEDIUM_FIRST_CLASS];
+	/*
+	 * Per-class allocation / free counters since the last GC
+	 * tick. The controller computes demand = allocs - frees
+	 * (clamped to ≥ 0) for each class and folds it into the
+	 * EMA. Reset to zero each GC tick.
+	 */
+	uint16_t alloc_count_per_class[V8M_MEDIUM_FIRST_CLASS];
+	uint16_t free_count_per_class[V8M_MEDIUM_FIRST_CLASS];
+	/*
+	 * Per-class EMA of demand (smoothed across GC ticks with
+	 * α = 0.25 — i.e. ema_new = (3 × ema_old + demand) / 4).
+	 * The controller derives bin_capacity from this each tick.
+	 */
+	uint16_t ema_demand[V8M_MEDIUM_FIRST_CLASS];
+	/*
+	 * Down-counter that triggers the GC tick on alloc / free
+	 * fast paths. Initialized to V8M_TLC_GC_INTERVAL on cache
+	 * create; each alloc / free decrements; a hit at zero
+	 * fires `v8m_thread_cache_gc_tick` and resets the counter.
+	 * A countdown is cheaper on the hot path than the alternative
+	 * "modulo of running total" formulation.
+	 */
+	uint32_t gc_countdown;
+	/*
+	 * Number of GC ticks the controller has run on this cache.
+	 * Diagnostic; tests use it to confirm a tick fired without
+	 * having to inspect the per-class EMA directly.
+	 */
+	uint32_t gc_generation;
 };
 
 /*
@@ -221,6 +260,26 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
  * thread-owned-slab refactor wires owner-thread routing.
  */
 size_t v8m_thread_cache_drain_remote(struct v8m_thread_cache *cache);
+
+/*
+ * Adaptive bin-capacity GC tick. Walks every Tiny/Small class,
+ * folds the per-class allocation / free demand into the EMA
+ * (α = 0.25), and recomputes bin_capacity = EMA × 2 clamped to
+ * [V8M_BIN_CAPACITY_MIN, V8M_BIN_CAPACITY_MAX]. Resets the
+ * per-class counters and increments `gc_generation`.
+ *
+ * Normally invoked from the alloc / free fast paths once
+ * `gc_countdown` hits zero (every V8M_TLC_GC_INTERVAL operations).
+ * Exposed publicly so tests can drive the controller deterministically
+ * without having to issue the full interval's worth of operations.
+ *
+ * Excess slots — when the new (smaller) capacity is below the
+ * current `bin_count` — are NOT eagerly flushed here; the next
+ * free that crosses the new threshold will batch-flush via the
+ * existing overflow path. Keeps the GC tick cheap and avoids
+ * pulling the slab-pool pointer through this header.
+ */
+void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache);
 
 /*
  * Hook invoked by the pthread_key destructor to drain a cache's

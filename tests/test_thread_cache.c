@@ -21,6 +21,7 @@
 #include <stdlib.h>
 
 #include "v8m_remote_free.h" /* v8m_mpsc_push for the drain test */
+#include "v8m_size_class.h" /* V8M_MEDIUM_FIRST_CLASS */
 #include "v8m_thread_cache.h"
 #include "v8malloc/v8malloc.h" /* v8m_purge */
 
@@ -317,6 +318,122 @@ static int check_drain_remote_routes_to_bin(void)
 	return 0;
 }
 
+/*
+ * Adaptive bin-capacity coverage. The gc_tick controller derives
+ * capacity = EMA(demand) × 2, clamped to [MIN, MAX]. Driving the
+ * inputs directly (via the per-class counter fields) keeps the
+ * test fast and deterministic — exercising the natural wire
+ * (V8M_TLC_GC_INTERVAL alloc/free pairs) would be slow and
+ * sensitive to whatever else the suite has done to the cache.
+ */
+static int check_adaptive_capacity_grows_with_demand(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	const uint32_t hot = 0; /* hammer this class */
+	const uint32_t cold = 1; /* leave alone — should decay */
+
+	/* Reset everything the prior tests in this file accumulated
+	 * so the EMA starts from a known zero and we can predict the
+	 * post-tick capacity. */
+	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS; cls++) {
+		cache->alloc_count_per_class[cls] = 0;
+		cache->free_count_per_class[cls] = 0;
+		cache->ema_demand[cls] = 0;
+		cache->bin_capacity[cls] = V8M_BIN_CAPACITY_DEFAULT;
+	}
+
+	/* Stage hot demand of 200 (allocs) - 0 (frees). EMA after one
+	 * tick = (3*0 + 200)/4 = 50. Capacity = 50*2 = 100, in band. */
+	cache->alloc_count_per_class[hot] = 200;
+	cache->free_count_per_class[hot] = 0;
+
+	uint32_t pre_gen = cache->gc_generation;
+	v8m_thread_cache_gc_tick(cache);
+	if (cache->gc_generation != pre_gen + 1U) {
+		return fail("gc_tick did not advance gc_generation");
+	}
+	if (cache->ema_demand[hot] != 50U) {
+		return fail("hot-class EMA did not advance to 50");
+	}
+	if (cache->bin_capacity[hot] != 100U) {
+		return fail("hot-class capacity did not become EMA*2 = 100");
+	}
+	if (cache->bin_capacity[cold] != V8M_BIN_CAPACITY_MIN) {
+		return fail("cold class did not decay to MIN");
+	}
+	if (cache->alloc_count_per_class[hot] != 0U) {
+		return fail("gc_tick did not reset alloc counter");
+	}
+
+	/* Stage another 200-alloc tick and verify capacity continues
+	 * to grow (EMA(0.25, 200) over two ticks ≈ 87, capacity ≈ 174). */
+	cache->alloc_count_per_class[hot] = 200;
+	v8m_thread_cache_gc_tick(cache);
+	if (cache->ema_demand[hot] <= 50U) {
+		return fail("EMA did not grow on second hot tick");
+	}
+	if (cache->bin_capacity[hot] !=
+	    (uint16_t)(cache->ema_demand[hot] * 2U)) {
+		return fail("capacity != EMA * 2 after second tick");
+	}
+
+	/* Sustained idle ticks should decay capacity back toward MIN. */
+	for (int i = 0; i < 64; i++) {
+		v8m_thread_cache_gc_tick(cache);
+	}
+	if (cache->bin_capacity[hot] != V8M_BIN_CAPACITY_MIN) {
+		return fail(
+		    "capacity did not decay to MIN under sustained idle");
+	}
+	return 0;
+}
+
+/*
+ * The countdown trigger fires gc_tick after exactly
+ * V8M_TLC_GC_INTERVAL alloc / free operations on the cache.
+ * Verifies the wire — without this the controller never runs in
+ * production.
+ */
+static int check_gc_countdown_fires(void)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		return fail("get_or_create returned NULL");
+	}
+
+	uint32_t pre_gen = cache->gc_generation;
+	uint32_t pre_countdown = cache->gc_countdown;
+	if (pre_countdown == 0U || pre_countdown > V8M_TLC_GC_INTERVAL) {
+		return fail("gc_countdown out of range");
+	}
+
+	/* Push then pop a single slot enough times to consume the
+	 * countdown. Each free + alloc decrements by 2, so we drive
+	 * the countdown to zero by issuing pre_countdown/2 pairs
+	 * (rounded up). The class doesn't matter for the trigger
+	 * itself; pick class 0 (Tiny 8 B) so each push/pop affects
+	 * the same bin. */
+	const uint32_t cls = 0;
+	uint64_t slot[2] = {0};
+	uint32_t pairs = (pre_countdown + 1U) / 2U;
+	for (uint32_t i = 0; i < pairs; i++) {
+		(void)v8m_thread_cache_free(cache, cls, slot);
+		(void)v8m_thread_cache_alloc(cache, cls);
+	}
+	if (cache->gc_generation == pre_gen) {
+		return fail("gc_tick did not fire after pre_countdown ops");
+	}
+	if (cache->gc_countdown == 0U ||
+	    cache->gc_countdown > V8M_TLC_GC_INTERVAL) {
+		return fail("gc_countdown not reset after fire");
+	}
+	return 0;
+}
+
 int main(void)
 {
 	int result = 0;
@@ -326,6 +443,8 @@ int main(void)
 	result |= check_alloc_free_round_trip();
 	result |= check_overflow_signal();
 	result |= check_drain_remote_routes_to_bin();
+	result |= check_adaptive_capacity_grows_with_demand();
+	result |= check_gc_countdown_fires();
 	if (result == 0) {
 		(void)printf("test_thread_cache: OK\n");
 	}

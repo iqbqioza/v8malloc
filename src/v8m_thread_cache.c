@@ -158,6 +158,7 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
 		cache->bin_capacity[i] = V8M_BIN_CAPACITY_DEFAULT;
 	}
+	cache->gc_countdown = V8M_TLC_GC_INTERVAL;
 
 	t_cache = cache;
 	if (atomic_load_explicit(&g_key_initialized, memory_order_acquire)) {
@@ -168,6 +169,20 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
 		(void)pthread_setspecific(g_destructor_key, cache);
 	}
 	return cache;
+}
+
+/*
+ * Tick the adaptive-controller down-counter and fire the GC tick
+ * when it hits zero. Inlined into both alloc and free so the
+ * fast-path cost is one decrement + one branch per call. Lives in
+ * the same TU as gc_tick itself so the compiler can fold the call
+ * site when the counter is non-zero (the common case).
+ */
+static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
+{
+	if (--cache->gc_countdown == 0U) {
+		v8m_thread_cache_gc_tick(cache);
+	}
 }
 
 void *v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
@@ -189,6 +204,8 @@ void *v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 	(void)memcpy((void *)&next, head, sizeof(next));
 	cache->bin_heads[cls] = next;
 	cache->bin_count[cls]--;
+	cache->alloc_count_per_class[cls]++;
+	tlc_tick_gc(cache);
 	return head;
 }
 
@@ -202,7 +219,47 @@ bool v8m_thread_cache_free(struct v8m_thread_cache *cache, uint32_t cls,
 	(void)memcpy(obj, (const void *)&prev_head, sizeof(prev_head));
 	cache->bin_heads[cls] = obj;
 	cache->bin_count[cls]++;
+	cache->free_count_per_class[cls]++;
+	tlc_tick_gc(cache);
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
+}
+
+void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)
+{
+	if (cache == NULL) {
+		return;
+	}
+	for (uint32_t cls = 0; cls < V8M_MEDIUM_FIRST_CLASS; cls++) {
+		uint16_t allocs = cache->alloc_count_per_class[cls];
+		uint16_t frees = cache->free_count_per_class[cls];
+		uint16_t demand =
+		    (allocs > frees) ? (uint16_t)(allocs - frees) : 0U;
+		/* EMA update: ema_new = (3 * ema_old + demand) / 4
+		 * (α = 0.25). Promoted to uint32_t to avoid the
+		 * intermediate overflow when ema_old approaches the
+		 * MAX-capacity bound. */
+		uint32_t ema = ((uint32_t)cache->ema_demand[cls] * 3U +
+				(uint32_t)demand) >>
+			       2U;
+		if (ema > UINT16_MAX) {
+			ema = UINT16_MAX;
+		}
+		cache->ema_demand[cls] = (uint16_t)ema;
+
+		uint32_t new_cap = ema * 2U;
+		if (new_cap < V8M_BIN_CAPACITY_MIN) {
+			new_cap = V8M_BIN_CAPACITY_MIN;
+		}
+		if (new_cap > V8M_BIN_CAPACITY_MAX) {
+			new_cap = V8M_BIN_CAPACITY_MAX;
+		}
+		cache->bin_capacity[cls] = (uint16_t)new_cap;
+
+		cache->alloc_count_per_class[cls] = 0;
+		cache->free_count_per_class[cls] = 0;
+	}
+	cache->gc_generation++;
+	cache->gc_countdown = V8M_TLC_GC_INTERVAL;
 }
 
 size_t v8m_thread_cache_flush_half(struct v8m_thread_cache *cache,
