@@ -200,6 +200,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_slab_pool.c
 	src/v8m_slab_small.c
 	src/v8m_slab_tiny.c
+	src/v8m_thread_cache.c
 	src/v8m_version.c
 )
 

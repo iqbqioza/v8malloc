@@ -40,6 +40,7 @@
 #include "v8m_signal_safe.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_pool.h"
+#include "v8m_thread_cache.h"
 #include "v8malloc/v8malloc.h"
 
 /* Init lifecycle (architecture.md §3.2 — three-state init machine,
@@ -209,6 +210,17 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 	atomic_store_explicit(&g_init_state, V8M_INIT_READY,
 			      memory_order_release);
 
+	/* TLC plumbing — wires the pthread_key whose destructor
+	 * reclaims a thread's cache on thread exit. Failure here
+	 * leaks per-thread caches at thread exit; the allocator stays
+	 * usable, so we log and continue rather than aborting. */
+	if (v8m_thread_cache_module_init() != 0) {
+		(void)write(
+		    STDERR_FILENO,
+		    "v8malloc: thread-cache module init failed\n",
+		    sizeof("v8malloc: thread-cache module init failed\n") - 1U);
+	}
+
 	/* Install the per-tick callback before the bg thread starts so
 	 * the very first scan pass already exercises it. The hook is a
 	 * thin wrapper around v8m_dispatch_bg_tick; defining it here
@@ -296,6 +308,7 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 	 * the destructor cannot enter the dispatch after teardown. */
 	v8m_bg_purge_set_tick_hook(NULL);
 	v8m_bg_purge_shutdown();
+	v8m_thread_cache_module_shutdown();
 	(void)atomic_exchange_explicit(&g_init_state, V8M_INIT_TORN_DOWN,
 				       memory_order_acquire);
 }

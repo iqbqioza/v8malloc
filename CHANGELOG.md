@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Thread-cache (L1) scaffolding (`src/v8m_thread_cache.{h,c}`,
+  architecture.md §2.1 + thread-cache.md §2.1 / TODO P0
+  `__thread t_cache` entry). New module owns the
+  `__thread struct v8m_thread_cache *t_cache` slot, the lazy
+  first-touch initializer (`v8m_thread_cache_get_or_create`),
+  and a `pthread_key_create` destructor that reclaims a
+  thread's cache when the thread exits. The cache struct is
+  intentionally minimal — just an MPSC remote-free queue head
+  and an `initialized` flag — so future cycles can grow it
+  with bin_heads / bin_count / bin_capacity arrays without
+  changing the surface seen by today's callers. The fast-path
+  routing (TLS load → bin pop, page mask → magic check → bin
+  push, bin overflow → batch flush) lands in subsequent
+  cycles; today the cache is allocated and torn down
+  correctly but is otherwise inert — `v8m_dispatch` still
+  serves every alloc/free directly from the slab / buddy /
+  Large backends. Module init / shutdown is wired into the
+  library constructor / destructor; init failure is non-fatal
+  (logs to stderr, allocator stays usable, per-thread caches
+  leak at thread exit). Coverage in
+  `tests/test_thread_cache.c` covers same-thread idempotency,
+  distinct-thread distinct-cache (using a pthread_barrier so
+  both worker threads stay alive simultaneously while the
+  parent inspects each cache pointer — without the barrier
+  the OS is free to run the workers serially, in which case
+  each worker's destructor frees its cache slot before the
+  next worker's malloc fires and the slot gets reused), and
+  destructor-fires-on-thread-exit (verified via a cumulative
+  `v8m_thread_cache_destructor_calls()` reclamation counter).
+
 - `V8M_OPT_DEBUG` red zones for Large/Huge allocations
   (`src/v8m_large.c`, api.md §6.2 / TODO P2 "red zones"
   sub-item). When DEBUG is on, the alloc path fills the
