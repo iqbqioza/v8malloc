@@ -27,7 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "v8m_buddy.h"	  /* V8M_BUDDY_MAX_BLOCK */
+#include "v8m_buddy.h" /* V8M_BUDDY_MAX_BLOCK */
 #include "v8m_internal.h" /* V8M_PAGE_SIZE */
 
 /* Dispatcher caps the alignment we can request:

@@ -9,3 +9,8 @@ AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 SpaceAfterCStyleCast: false
 Standard: c++11
+# AlignTrailingComments default differs across clang-format versions
+# (clang-format-18 takes a bool; clang-format-19 takes a struct with
+# Kind/OverEmptyLines). Pin to a value both versions render the same
+# way to avoid CI-vs-local format drift.
+AlignTrailingComments: false

@@ -32,18 +32,18 @@ enum { WORKER_THREADS = 8, OPS_PER_WORKER = 64, MIXED_ALLOCS = 32 };
  * the first multiplication operand keeps clang-tidy's
  * implicit-widening check happy. */
 static const size_t representative_sizes[] = {
-    1,			     /* Tiny class 0 (8 B) */
-    8,			     /* Tiny class 0 boundary */
-    64,			     /* Tiny class 7 */
-    80,			     /* Small class 8 */
-    512,		     /* Small mid */
-    4096,		     /* Small max (class 31) */
-    8192,		     /* Medium first (class 32, buddy) */
-    131072,		     /* Medium high (class 36, buddy) */
-    (size_t)256 * 1024,	     /* Medium max (class 37, buddy at 256 KiB) */
-    (size_t)300 * 1024,	     /* Large (class 38, direct mmap) */
+    1, /* Tiny class 0 (8 B) */
+    8, /* Tiny class 0 boundary */
+    64, /* Tiny class 7 */
+    80, /* Small class 8 */
+    512, /* Small mid */
+    4096, /* Small max (class 31) */
+    8192, /* Medium first (class 32, buddy) */
+    131072, /* Medium high (class 36, buddy) */
+    (size_t)256 * 1024, /* Medium max (class 37, buddy at 256 KiB) */
+    (size_t)300 * 1024, /* Large (class 38, direct mmap) */
     (size_t)2 * 1024 * 1024, /* Large class 40 */
-    (size_t)5 * 1024 * 1024  /* Huge (V8M_CLASS_HUGE) */
+    (size_t)5 * 1024 * 1024 /* Huge (V8M_CLASS_HUGE) */
 };
 
 static int round_trip(struct v8m_dispatch *dispatch, size_t size)

@@ -111,13 +111,13 @@ V8M_EXPORT void *v8m_pvalloc(size_t size);
  * across v0; new options may be appended within a major release.
  */
 enum v8m_option {
-	V8M_OPT_VERBOSE = 0,	   /* 0 / 1 — emit diagnostics to stderr */
-	V8M_OPT_PURGE_INTERVAL,	   /* seconds between background purges */
-	V8M_OPT_THREAD_CACHE_MAX,  /* max objects held per TLC bin */
-	V8M_OPT_HUGE_PAGES,	   /* 0 / 1 — try MAP_HUGETLB / MADV_HUGEPAGE */
-	V8M_OPT_NUMA_AWARE,	   /* 0 / 1 — bind allocations to local node */
-	V8M_OPT_DEBUG,		   /* 0 / 1 — guard pages, double-free checks */
-	V8M_OPT_PROFILE,	   /* 0 / 1 — emit allocation profile */
+	V8M_OPT_VERBOSE = 0, /* 0 / 1 — emit diagnostics to stderr */
+	V8M_OPT_PURGE_INTERVAL, /* seconds between background purges */
+	V8M_OPT_THREAD_CACHE_MAX, /* max objects held per TLC bin */
+	V8M_OPT_HUGE_PAGES, /* 0 / 1 — try MAP_HUGETLB / MADV_HUGEPAGE */
+	V8M_OPT_NUMA_AWARE, /* 0 / 1 — bind allocations to local node */
+	V8M_OPT_DEBUG, /* 0 / 1 — guard pages, double-free checks */
+	V8M_OPT_PROFILE, /* 0 / 1 — emit allocation profile */
 	V8M_OPT_COMPACT_THRESHOLD, /* page utilization % below which a
 				    * page becomes a compaction candidate */
 	V8M_OPT_COUNT
@@ -218,9 +218,9 @@ V8M_EXPORT void v8m_get_thread_stats(struct v8m_thread_stats *out);
  * walked counters.
  */
 struct v8m_frag_metrics {
-	uint64_t live_regions;	      /* mmap'd page-heap regions */
-	uint64_t live_bytes;	      /* bytes_mapped - bytes_unmapped */
-	uint64_t bytes_per_region;    /* live_bytes / live_regions, or 0 */
+	uint64_t live_regions; /* mmap'd page-heap regions */
+	uint64_t live_bytes; /* bytes_mapped - bytes_unmapped */
+	uint64_t bytes_per_region; /* live_bytes / live_regions, or 0 */
 	uint64_t region_map_capacity; /* hard cap (4096 in v0) */
 	uint64_t region_map_used_pct; /* live_regions / capacity * 100 */
 	uint64_t large_live_count;
@@ -327,10 +327,10 @@ V8M_EXPORT size_t v8m_get_soft_limit(void);
  */
 enum v8m_ptr_backend {
 	V8M_PTR_FOREIGN = 0, /* not v8malloc-issued (or NULL) */
-	V8M_PTR_BOOTSTRAP,   /* served from the pre-init bootstrap buffer */
-	V8M_PTR_SLAB,	     /* slab pool — Tiny + Small classes */
-	V8M_PTR_BUDDY,	     /* buddy pool — Medium classes */
-	V8M_PTR_LARGE	     /* direct mmap path — Large + Huge */
+	V8M_PTR_BOOTSTRAP, /* served from the pre-init bootstrap buffer */
+	V8M_PTR_SLAB, /* slab pool — Tiny + Small classes */
+	V8M_PTR_BUDDY, /* buddy pool — Medium classes */
+	V8M_PTR_LARGE /* direct mmap path — Large + Huge */
 };
 
 /*

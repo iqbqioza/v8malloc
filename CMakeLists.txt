@@ -89,6 +89,25 @@ if(V8MALLOC_SANITIZER_FLAGS)
 	add_compile_options(${V8MALLOC_SANITIZER_FLAGS})
 	add_link_options(${V8MALLOC_SANITIZER_FLAGS})
 endif()
+# When a sanitizer is on, libv8malloc.so legitimately carries
+# unresolved `__ubsan_handle_*` (or `__tsan_*`) references that
+# the executable's own sanitizer runtime resolves at load time.
+# Clang's driver refuses to link the static runtime into a
+# `-shared` build (the static archive's `.preinit_array` is
+# illegal in a DSO), and `-static-libsan` / `-shared-libsan` are
+# both no-ops on a -shared link line. The supported pattern is
+# therefore: leave the references unresolved in the SO and rely
+# on the loader to fill them when the LD_PRELOAD'd binary is
+# itself sanitizer-instrumented (which is the only case where
+# they actually fire). Test executables, which link the static
+# library, get the runtime via clang's normal -fsanitize handling
+# on their own non-`-shared` link line. The follow-on cycle that
+# ships an instrumented LD_PRELOAD-ready SO would link
+# libclang_rt.ubsan_standalone-<arch>.so via RPATH.
+set(V8MALLOC_SHARED_LIBRARY_STRICT_LINK ON)
+if(V8MALLOC_SANITIZER_FLAGS)
+	set(V8MALLOC_SHARED_LIBRARY_STRICT_LINK OFF)
+endif()
 
 if(V8MALLOC_BUILD_COVERAGE)
 	if(V8MALLOC_BUILD_UBSAN OR V8MALLOC_BUILD_TSAN)
@@ -201,10 +220,17 @@ if(V8MALLOC_BUILD_SHARED)
 	)
 	target_link_options(v8malloc_shared PRIVATE
 		"LINKER:--version-script=${V8MALLOC_VERSION_SCRIPT}"
-		"LINKER:--no-undefined"
 		"LINKER:-z,now"
 		"LINKER:-z,relro"
 	)
+	if(V8MALLOC_SHARED_LIBRARY_STRICT_LINK)
+		# Sanitizer builds carry unresolved __ubsan_handle_* /
+		# __tsan_* references the host executable resolves at
+		# LD_PRELOAD time; --no-undefined would reject them at
+		# link time. Off in those builds.
+		target_link_options(v8malloc_shared PRIVATE
+			"LINKER:--no-undefined")
+	endif()
 	set_target_properties(v8malloc_shared PROPERTIES
 		LINK_DEPENDS "${V8MALLOC_VERSION_SCRIPT}"
 	)

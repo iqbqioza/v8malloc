@@ -34,7 +34,7 @@ enum {
 	    256 * 1024, /* class 38 - 256 KiB (just above Small max) */
 	SIZE_LARGE_MID = 1 * 1024 * 1024, /* class 39 - 1 MiB */
 	SIZE_LARGE_MAX = 2 * 1024 * 1024, /* class 40 - 2 MiB */
-	SIZE_HUGE = 4 * 1024 * 1024,	  /* > 2 MiB - Huge path */
+	SIZE_HUGE = 4 * 1024 * 1024, /* > 2 MiB - Huge path */
 	MANY_REGIONS = 8
 };
 

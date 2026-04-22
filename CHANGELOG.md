@@ -151,6 +151,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   segfaults this bench within seconds of the timed loop.
 
 ### Fixed
+- CI UBSan build broke on the shared library link
+  (`CMakeLists.txt`). Clang's driver does not link the
+  sanitizer runtime into a `-shared` target — `-static-libsan`
+  and `-shared-libsan` are both no-ops on a `-shared` link
+  line, and the static archive carries a `.preinit_array`
+  section that ld refuses to put in a DSO. The shared library
+  therefore legitimately carries unresolved
+  `__ubsan_handle_*_abort` references the host executable's
+  sanitizer runtime resolves at LD_PRELOAD time. The previous
+  `--no-undefined` linker flag rejected those references at
+  link time. Drop `--no-undefined` from the SO link line
+  whenever any sanitizer is on; keep it for the standard
+  build (it stays the default API-completeness gate). Test
+  executables, which link the static library, get the runtime
+  through clang's normal `-fsanitize=undefined` handling on
+  their own non-`-shared` link line and continue to work
+  unchanged. Verified: `cmake -DV8MALLOC_BUILD_UBSAN=ON …`
+  builds clean and 29/29 ctests pass under UBSan.
+
+- CI format-check drifted from local because clang-format-18
+  (Ubuntu-latest's default `clang-format` package) and
+  clang-format-19 (the dev container's installed version) ship
+  different defaults for `AlignTrailingComments` (bool vs
+  struct). Pinned `AlignTrailingComments: false` in
+  `.clang-format` so both versions render the same output.
+  Re-formatted touched files; the git diff is one-or-two
+  trailing-space tweaks per affected source.
+
 - CI build error on older Clang (`src/v8m_bootstrap.c`). The
   bootstrap buffer was declared as
   `static alignas(V8M_PAGE_SIZE) unsigned char …[]`, which

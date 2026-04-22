@@ -31,8 +31,8 @@ static int fail(const char *msg)
 #define OWNER_THREAD UINT64_C(0xABCD1234)
 
 enum {
-	CLASS_TINY = 0,		/* 8 B */
-	CLASS_SMALL_MID = 19,	/* 512 B */
+	CLASS_TINY = 0, /* 8 B */
+	CLASS_SMALL_MID = 19, /* 512 B */
 	CLASS_SMALL_LARGE = 31, /* 4 KiB - 15 per page */
 	WORKER_THREADS = 8,
 	OPS_PER_WORKER = 256,

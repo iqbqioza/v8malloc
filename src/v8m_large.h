@@ -41,10 +41,10 @@ struct v8m_large_page_meta {
 	uint64_t magic;
 	uint16_t size_class;
 	uint16_t object_size; /* unused for Large/Huge; always 0 */
-	uint32_t capacity;    /* always 1 */
+	uint32_t capacity; /* always 1 */
 	atomic_uint used_count;
 	uint64_t owner_thread;
-	void *free_list_head;	    /* unused; kept NULL for layout parity */
+	void *free_list_head; /* unused; kept NULL for layout parity */
 	struct v8m_page_meta *next; /* unused; kept NULL */
 	/* Large/Huge-specific. */
 	size_t mmap_size;
