@@ -347,6 +347,29 @@ void v8m_thread_cache_set_drain_hook(v8m_thread_cache_drain_hook hook)
 			      memory_order_release);
 }
 
+void v8m_thread_cache_release_local(void)
+{
+	struct v8m_thread_cache *cache = t_cache;
+	if (cache == NULL) {
+		return;
+	}
+	/* Mirrors `destroy_cache` minus the t_in_destructor latch —
+	 * the user explicitly wants the slot reusable, so future
+	 * allocations should lazy-create a fresh cache. The drain
+	 * hook + registry-unregister path is the same. */
+	uintptr_t hook_raw =
+	    atomic_load_explicit(&g_drain_hook, memory_order_acquire);
+	if (hook_raw != 0) {
+		v8m_thread_cache_drain_hook hook;
+		/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
+		hook = (v8m_thread_cache_drain_hook)hook_raw;
+		hook(cache);
+	}
+	registry_unregister_and_fold(cache);
+	t_cache = NULL;
+	free(cache);
+}
+
 struct v8m_thread_cache *v8m_thread_cache_peek(void)
 {
 	return t_cache;

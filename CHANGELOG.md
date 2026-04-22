@@ -7,6 +7,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Public `v8m_init_thread()` / `v8m_release_thread()` API for
+  explicit per-thread allocator state lifecycle. `v8m_init_thread`
+  pre-warms the calling thread's TLC so latency-sensitive worker
+  pools can fold the one-time first-alloc spike into a
+  non-critical startup phase; idempotent. `v8m_release_thread`
+  drains the TLC bins back to the slab pool, drops the calling
+  thread's L2 contribution, and resets the TLS slot so the next
+  allocation re-creates a fresh cache — useful for long-lived
+  workers that go idle for an extended period (returns slots to
+  the pool and lets the bg purge tick reclaim drained pages).
+  Both return -1 with `errno = EAGAIN` when the dispatcher is
+  not READY (pre-constructor); `v8m_init_thread` additionally
+  returns -1 with `errno = ENOMEM` on cache alloc failure. New
+  internal `v8m_thread_cache_release_local()` is the worker —
+  mirrors the pthread_key destructor minus the sticky
+  `t_in_destructor` latch so future allocations create a fresh
+  cache. Both exported under V8MALLOC_1.0; coverage in
+  `tests/test_api.c::check_init_release_thread_api` (idempotent
+  init, alloc/free across release, re-init after release).
+
+### Added
 - Public `v8m_get_arch_info(out)` API — programmatic counterpart
   to the `v8malloc isa: …` line the constructor writes to stderr
   under `V8M_VERBOSE`. Fills `struct v8m_arch_info` with

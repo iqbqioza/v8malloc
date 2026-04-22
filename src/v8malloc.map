@@ -38,6 +38,8 @@ V8MALLOC_1.0 {
 		v8m_get_size_class_histogram;
 		v8m_get_slab_class_breakdown;
 		v8m_get_arch_info;
+		v8m_init_thread;
+		v8m_release_thread;
 		v8m_install_size_class_table;
 		v8m_size_class_to_bytes;
 		v8m_get_lifetime_stats;

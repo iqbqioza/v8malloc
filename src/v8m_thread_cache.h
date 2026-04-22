@@ -401,6 +401,16 @@ size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 				  struct v8m_slab_pool *pool);
 
 /*
+ * Drop the calling thread's TLS slot so the next allocation creates
+ * a fresh cache. Caller is responsible for draining the cache via
+ * `v8m_thread_cache_drain_all` first if it wants the slots back to
+ * the pool — this helper purely resets the TLS pointer and frees
+ * the cache struct. Backs the public `v8m_release_thread`. No-op
+ * if the calling thread has no cache.
+ */
+void v8m_thread_cache_release_local(void);
+
+/*
  * Drain the cross-thread MPSC remote-free queue and push each
  * drained slot onto the matching local bin (recovering the size
  * class from the page meta of each node). Returns the number of

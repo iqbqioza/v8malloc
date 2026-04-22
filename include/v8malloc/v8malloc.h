@@ -360,6 +360,41 @@ struct v8m_arch_info {
 V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out);
 
 /*
+ * Pre-warm the calling thread's allocator state. The thread-local
+ * cache is normally created lazily on the thread's first
+ * allocation, which adds a one-time ~µs spike; latency-sensitive
+ * threads (real-time worker pools, low-tail-latency request
+ * handlers) can call `v8m_init_thread()` from their startup hook
+ * to fold that work into a non-critical phase. Idempotent — a
+ * thread that has already touched a v8malloc allocation calls
+ * this as a no-op.
+ *
+ * Returns 0 on success, -1 on failure (errno set: `ENOMEM` if the
+ * cache allocation failed, `EAGAIN` if the dispatcher is not
+ * READY yet — typically pre-constructor; the caller can retry
+ * after main() starts). On failure the thread's allocations still
+ * succeed via the slow path; the helper is purely a
+ * pre-warm / latency-shaping hint.
+ */
+V8M_EXPORT int v8m_init_thread(void);
+
+/*
+ * Explicitly release the calling thread's allocator state without
+ * waiting for thread exit. Drains the per-thread cache's bins
+ * back to the slab pool, drops the calling thread's current-CPU
+ * L2 cache contribution, and clears the TLS slot so the next
+ * allocation re-creates a fresh cache. Useful for long-lived
+ * worker threads that go idle for an extended period — releasing
+ * the per-thread cache returns its slots to the pool and lets
+ * the OS reclaim drained-cache pages on the bg purge tick.
+ *
+ * Returns 0 on success, -1 if the dispatcher is not READY
+ * (errno = EAGAIN). Idempotent — a thread that never touched a
+ * v8malloc allocation calls this as a no-op.
+ */
+V8M_EXPORT int v8m_release_thread(void);
+
+/*
  * Hot-reload the active size-class size table. Atomically swaps
  * the pointer the slab-init paths read on every fresh-page
  * formatting. Already-allocated pages keep the size baked into

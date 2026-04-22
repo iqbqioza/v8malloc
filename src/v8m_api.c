@@ -988,6 +988,42 @@ static const char *api_arch_name(void)
 #endif
 }
 
+V8M_EXPORT int v8m_init_thread(void)
+{
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
+	const struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
+	if (cache == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	return 0;
+}
+
+V8M_EXPORT int v8m_release_thread(void)
+{
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
+	/* Drain TLC bins + the calling thread's L2 contribution
+	 * before releasing the TLS slot. Without the drain, the
+	 * subsequent free of the cache struct would lose the cached
+	 * slots (the slab pages would still consider them allocated
+	 * until the surrounding pages drained empty by other means).
+	 * Same drain shape `v8m_purge_thread` runs, but here we go
+	 * one step further and reset the TLS slot too. */
+	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		(void)v8m_thread_cache_drain_all(cache, &g_dispatch.slab);
+	}
+	(void)v8m_dispatch_drain_local_l2(&g_dispatch);
+	v8m_thread_cache_release_local();
+	return 0;
+}
+
 V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out)
 {
 	if (out == NULL) {

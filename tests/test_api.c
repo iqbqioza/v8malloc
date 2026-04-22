@@ -968,6 +968,51 @@ static int check_huge_and_frag_stats(void)
 	return 0;
 }
 
+static int check_init_release_thread_api(void)
+{
+	/* init_thread is idempotent: a second call from the same
+	 * thread returns 0 without re-allocating. */
+	if (v8m_init_thread() != 0) {
+		return fail("v8m_init_thread first call returned non-zero");
+	}
+	if (v8m_init_thread() != 0) {
+		return fail(
+		    "v8m_init_thread idempotent call returned non-zero");
+	}
+
+	/* Allocate something to populate the TLC, then release. The
+	 * allocation surviving the release proves the slot was
+	 * freed cleanly (not leaked) and that subsequent allocs work
+	 * via a fresh cache. */
+	void *probe = malloc(128);
+	if (probe == NULL) {
+		return fail("probe alloc failed before release_thread");
+	}
+	free(probe);
+
+	if (v8m_release_thread() != 0) {
+		return fail("v8m_release_thread returned non-zero");
+	}
+
+	/* Idempotent on a thread with no cache. */
+	if (v8m_release_thread() != 0) {
+		return fail(
+		    "v8m_release_thread idempotent call returned non-zero");
+	}
+
+	/* Re-init after release works. */
+	if (v8m_init_thread() != 0) {
+		return fail("v8m_init_thread after release returned non-zero");
+	}
+
+	void *post = malloc(64);
+	if (post == NULL) {
+		return fail("post alloc failed after re-init");
+	}
+	free(post);
+	return 0;
+}
+
 static int check_arch_info_api(void)
 {
 	v8m_get_arch_info(NULL); /* tolerates NULL */
@@ -1119,6 +1164,10 @@ int main(void)
 		return status;
 	}
 	status = check_arch_info_api();
+	if (status != 0) {
+		return status;
+	}
+	status = check_init_release_thread_api();
 	if (status != 0) {
 		return status;
 	}
