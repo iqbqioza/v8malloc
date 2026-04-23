@@ -46,6 +46,23 @@ function(v8malloc_add_test name)
 		-fno-builtin-strdup
 		-fno-builtin-strndup
 	)
+	# Disable glibc's _FORTIFY_SOURCE for the test binaries.
+	# Background: GCC 12+ implicitly defines _FORTIFY_SOURCE=3 at
+	# -O2, which uses `__builtin_dynamic_object_size` to track
+	# allocator bounds via the `__attribute__((alloc_size))` on
+	# malloc/calloc. Tests exercise the "extra usable bytes"
+	# contract — `memset(p, x, malloc_usable_size(p))` after
+	# `malloc(N)` writes more bytes than the formally requested N,
+	# which is legal against our allocator's interface but trips
+	# FORTIFY's `*** buffer overflow detected ***` runtime check.
+	# Disabling here keeps the production library hardened (the
+	# library never sees these flags); only the test executables
+	# get the leeway. The `-U` first form ensures we win against a
+	# distro that defines _FORTIFY_SOURCE in its default cflags.
+	target_compile_options(${name} PRIVATE
+		-U_FORTIFY_SOURCE
+		-D_FORTIFY_SOURCE=0
+	)
 	add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
