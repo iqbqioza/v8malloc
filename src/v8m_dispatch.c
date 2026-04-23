@@ -144,11 +144,6 @@ static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 			return cached;
 		}
 	}
-	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
-	if (l2_cache == NULL) {
-		(void)dispatch;
-		return NULL;
-	}
 	void *batch_head = NULL;
 	void *batch_tail = NULL;
 	/* Adaptive batch via the EMA refill controller. Each refill
@@ -157,10 +152,26 @@ static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 	 * underflows shrink it. */
 	uint32_t batch_size =
 	    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
-	size_t got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
-					      &batch_head, &batch_tail);
+
+	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
+	size_t got = 0;
+	if (l2_cache != NULL) {
+		got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
+					       &batch_head, &batch_tail);
+	}
 	if (got == 0U) {
-		return NULL;
+		/* L2 empty (cold start or no overflow has published yet)
+		 * — batch-refill from the slab pool under one lock.
+		 * Without this, every TLC miss would do its own per-slot
+		 * lock/unlock against the slab pool, adding ~300 ns per
+		 * alloc on cold workloads. The batch amortizes the lock
+		 * acquisition over the full chain. */
+		got = v8m_slab_pool_alloc_batch(&dispatch->slab, cls, 0,
+						V8M_ARENA_DEFAULT, batch_size,
+						&batch_head, &batch_tail);
+		if (got == 0U) {
+			return NULL;
+		}
 	}
 	v8m_thread_cache_install_chain(cache, cls, batch_head, batch_tail, got);
 	return v8m_thread_cache_alloc(cache, cls);

@@ -27,7 +27,7 @@
 #include <unistd.h>
 
 #include "v8m_api_internal.h"
-#include "v8m_arch.h" /* v8m_arch_rdtsc for the lifetime tracker */
+#include "v8m_arch.h" /* v8m_arch_format_isa_summary in the verbose dump */
 #include "v8m_bg_purge.h"
 #include "v8m_bootstrap.h"
 #include "v8m_buddy_pool.h"
@@ -576,9 +576,10 @@ static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
 	}
 	/* Lifetime tracker (fragmentation.md §5.2). The helper exits
 	 * early when V8M_OPT_LIFETIME_TRACKING is off, so the cost is
-	 * one config load + one branch in the common path. */
-	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
-					       v8m_arch_rdtsc());
+	 * one config load + one branch in the common path. The TSC
+	 * read happens inside the helper, gated behind the option
+	 * check — the default hot path pays nothing. */
+	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc);
 }
 
 /* Shared malloc body parameterized on the user's caller PC. Every
@@ -761,10 +762,9 @@ V8M_EXPORT void v8m_free(void *ptr)
 		debug_check_double_free(ptr);
 	}
 	/* Lifetime tracker — same opt-in early-exit pattern as
-	 * record_alloc. The TSC read on this branch is cheap (single
-	 * rdtsc on x86_64, clock_gettime fallback elsewhere) but only
-	 * runs when the option is on, which the helper checks itself. */
-	v8m_thread_cache_lifetime_record_free(ptr, v8m_arch_rdtsc());
+	 * record_alloc. TSC read is inside the helper, gated behind the
+	 * option check. */
+	v8m_thread_cache_lifetime_record_free(ptr);
 	v8m_dispatch_free(&g_dispatch, ptr);
 }
 

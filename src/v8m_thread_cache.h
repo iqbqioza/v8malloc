@@ -567,13 +567,15 @@ void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out);
  *
  * `caller_pc` should be the value `__builtin_return_address(0)`
  * captured by the callsite; the tracker hashes it down to a small
- * bucket index. `tsc` should be `v8m_arch_rdtsc()` from the same
- * callsite — both helpers tolerate a tsc of 0 by treating the
- * sample as "lifetime unknown" and skipping the EMA update.
+ * bucket index. The TSC read happens INSIDE the helpers, gated
+ * behind the option + sample-rate / cache-presence check, so the
+ * default-mode hot path (LIFETIME_TRACKING off) pays nothing — not
+ * even an `rdtsc` instruction. The previous interface required the
+ * caller to compute tsc up front, which silently put rdtsc on every
+ * malloc / free.
  */
-void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
-					    uint64_t tsc);
-void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc);
+void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc);
+void v8m_thread_cache_lifetime_record_free(const void *ptr);
 
 /*
  * Snapshot the lifetime-tracker stats across every live cache plus

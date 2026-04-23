@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h> /* fprintf for v8m_slab_pool_validate */
+#include <string.h> /* memcpy for the batch-alloc chain link */
 
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node */
@@ -368,6 +369,65 @@ void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
 
 	(void)pthread_mutex_unlock(&pool->lock);
 	return obj;
+}
+
+/* NOLINTBEGIN(bugprone-easily-swappable-parameters) */
+size_t v8m_slab_pool_alloc_batch(struct v8m_slab_pool *pool,
+				 uint32_t size_class, uint64_t owner_thread,
+				 uint8_t arena_id, size_t max, void **out_head,
+				 void **out_tail)
+/* NOLINTEND(bugprone-easily-swappable-parameters) */
+{
+	if (out_head != NULL) {
+		*out_head = NULL;
+	}
+	if (out_tail != NULL) {
+		*out_tail = NULL;
+	}
+	if (pool == NULL || size_class >= V8M_MEDIUM_FIRST_CLASS || max == 0U ||
+	    out_head == NULL || out_tail == NULL) {
+		return 0;
+	}
+
+	(void)pthread_mutex_lock(&pool->lock);
+	struct v8m_slab_pool_class *cls = &pool->classes[size_class];
+	void *head = NULL;
+	void *tail = NULL;
+	size_t count = 0;
+
+	while (count < max) {
+		void *obj = try_current(cls);
+		if (obj == NULL) {
+			obj = try_partials(cls);
+		}
+		if (obj == NULL) {
+			obj = acquire_fresh_page(pool, cls, size_class,
+						 owner_thread, arena_id);
+		}
+		if (obj == NULL) {
+			break;
+		}
+		/* Link this slot into the chain: write next-pointer slot
+		 * into the object's first sizeof(void *) bytes, matching
+		 * the TLC bin convention. */
+		(void)memcpy(obj, (const void *)&head, sizeof(head));
+		head = obj;
+		if (tail == NULL) {
+			tail = obj;
+		}
+		count++;
+	}
+
+	(void)pthread_mutex_unlock(&pool->lock);
+
+	/* Tail's next slot must point to NULL so the consumer can walk
+	 * the chain and stop. The first iteration set tail = first obj
+	 * with its `next` field pointing at the prior `head` (NULL at
+	 * that moment), so this is already correct — but be explicit
+	 * for the count == 0 case where head and tail are both NULL. */
+	*out_head = head;
+	*out_tail = tail;
+	return count;
 }
 
 void *v8m_slab_pool_alloc(struct v8m_slab_pool *pool, uint32_t size_class,

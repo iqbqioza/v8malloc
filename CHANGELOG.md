@@ -73,6 +73,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   definition); the public ABI is unchanged — every export still
   appears under V8MALLOC_1.0.
 
+### Performance
+- Hot-path `rdtsc` removed from `v8m_malloc` / `v8m_free` when
+  `V8M_OPT_LIFETIME_TRACKING` is off (the default). The lifetime-
+  tracker helpers used to take `tsc` as a parameter and the
+  callers computed it via `v8m_arch_rdtsc()` unconditionally before
+  the helper's own option check decided to drop the sample. Moved
+  the TSC read inside the helpers, after the option + cache-presence
+  gate, so the default hot path pays nothing — not even an `rdtsc`
+  instruction.
+
+- Slab-pool batch refill on TLC miss when the L2 core cache is
+  empty. The cold-start path through `try_tlc_fast_paths` would
+  return NULL on L2 underflow, which let the dispatcher fall
+  through to `v8m_slab_pool_alloc` for one slot at a time. With
+  this change, the slow path now batch-allocates `batch_size`
+  slots from the slab pool under one lock acquisition (new
+  `v8m_slab_pool_alloc_batch`) and installs them into the TLC bin,
+  amortising the lock cost across the chain. Helps batch-alloc
+  workloads where the free side never publishes into the L2.
+
 ### Fixed
 - Buddy pool's deferred-coalesce fallback no longer skips
   drained arenas. With `V8M_OPT_DEFERRED_COALESCE=1`, an arena

@@ -126,6 +126,26 @@ void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
 				uint64_t owner_thread, uint8_t arena_id);
 
 /*
+ * Batch-alloc up to `max` slots under a single lock acquisition.
+ * Returns the count actually allocated and writes the head and tail
+ * of the linked chain into *out_head / *out_tail. Each slot's first
+ * sizeof(void *) bytes hold the next pointer (matching the TLC bin
+ * convention), with NULL after the tail. Returns 0 on no-slots-
+ * allocated (out_head and out_tail set to NULL).
+ *
+ * Bypasses the dispatcher's per-slot lock cost — the previous
+ * cold-start path through the TLC's slow miss did one lock /
+ * unlock per slot, dominating the per-alloc cost when the L2 was
+ * empty (the common case until the workload's free side started
+ * publishing batches into the L2). Used by the dispatcher's
+ * try_tlc_fast_paths after a 0-size L2 batch pop.
+ */
+size_t v8m_slab_pool_alloc_batch(struct v8m_slab_pool *pool,
+				 uint32_t size_class, uint64_t owner_thread,
+				 uint8_t arena_id, size_t max, void **out_head,
+				 void **out_tail);
+
+/*
  * Return one object to the pool. `meta` must be the result of
  * v8m_ptr_to_meta(obj) and must have already passed
  * v8m_page_meta_valid. Returns true iff the page became empty

@@ -919,10 +919,9 @@ void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out)
 }
 
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
-void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
-					    uint64_t tsc)
+void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc)
 {
-	if (ptr == NULL || tsc == 0U) {
+	if (ptr == NULL) {
 		return;
 	}
 	if (v8m_config_get(V8M_OPT_LIFETIME_TRACKING) == 0) {
@@ -941,6 +940,12 @@ void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
 	    0U) {
 		return;
 	}
+	/* TSC read is gated behind the option + sample-rate check so the
+	 * default-mode hot path (LIFETIME_TRACKING off) pays nothing. */
+	uint64_t tsc = v8m_arch_rdtsc();
+	if (tsc == 0U) {
+		return;
+	}
 	uint32_t pos = cache->lifetime_ring_pos;
 	struct v8m_lifetime_ring_entry *entry = &cache->lifetime_ring[pos];
 	if (entry->ptr != NULL) {
@@ -953,7 +958,7 @@ void v8m_thread_cache_lifetime_record_alloc(void *ptr, const void *caller_pc,
 	cache->lifetime_samples_recorded++;
 }
 
-void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc)
+void v8m_thread_cache_lifetime_record_free(const void *ptr)
 {
 	if (ptr == NULL) {
 		return;
@@ -965,6 +970,9 @@ void v8m_thread_cache_lifetime_record_free(const void *ptr, uint64_t tsc)
 	if (cache == NULL || cache->initialized == 0U) {
 		return;
 	}
+	/* TSC read is gated behind the option + cache check so the
+	 * default-mode hot path (LIFETIME_TRACKING off) pays nothing. */
+	uint64_t tsc = v8m_arch_rdtsc();
 	for (uint32_t i = 0; i < V8M_LIFETIME_RING_SIZE; i++) {
 		struct v8m_lifetime_ring_entry *entry =
 		    &cache->lifetime_ring[i];
