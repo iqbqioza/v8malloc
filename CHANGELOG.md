@@ -6,6 +6,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-23
+
 ### Performance
 - **Recycle cache for Large/Huge regions — closes the 2 MiB
   throughput gap.** Adds a small bounded cache
