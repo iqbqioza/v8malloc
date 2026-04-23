@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Public `v8m_option_name(option_id)` API + companion config dump
+  on `V8M_VERBOSE`. The accessor returns the stable short name
+  for each `V8M_OPT_*` (e.g. "verbose", "huge_pages",
+  "purge_interval"); combined with `v8m_get_option(out, id)`,
+  callers can iterate `0..V8M_OPT_COUNT` to build a pretty-printed
+  config dump without compiling against the internal name table.
+  The constructor uses the same name format to emit a
+  `v8malloc opts: verbose=1 purge_interval=10 …` line right after
+  the `v8malloc isa:` line under `V8M_VERBOSE`. snprintf-into-stack
+  emit so the diagnostic stays malloc-free. Multi-arch CI matrix
+  lanes can grep both stable prefixes. Coverage in
+  `tests/test_api.c::check_option_name_api` (out-of-range NULL,
+  every in-range id resolves to non-empty, well-known stability
+  spot-check).
+
+### Added
 - Public `v8m_init_thread()` / `v8m_release_thread()` API for
   explicit per-thread allocator state lifecycle. `v8m_init_thread`
   pre-warms the calling thread's TLC so latency-sensitive worker

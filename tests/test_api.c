@@ -968,6 +968,42 @@ static int check_huge_and_frag_stats(void)
 	return 0;
 }
 
+static int check_option_name_api(void)
+{
+	/* Out-of-range ids return NULL. */
+	if (v8m_option_name(-1) != NULL) {
+		return fail("v8m_option_name(-1) should return NULL");
+	}
+	if (v8m_option_name(V8M_OPT_COUNT) != NULL) {
+		return fail("v8m_option_name(COUNT) should return NULL");
+	}
+
+	/* Every in-range id resolves to a non-empty lowercase name.
+	 * Spot-check a couple of well-known ids for stability. */
+	for (int i = 0; i < V8M_OPT_COUNT; i++) {
+		const char *name = v8m_option_name(i);
+		if (name == NULL) {
+			(void)fprintf(
+			    stderr,
+			    "test_api: v8m_option_name(%d) returned NULL\n", i);
+			return 1;
+		}
+		if (name[0] == '\0') {
+			(void)fprintf(
+			    stderr, "test_api: v8m_option_name(%d) is empty\n",
+			    i);
+			return 1;
+		}
+	}
+	if (strcmp(v8m_option_name(V8M_OPT_VERBOSE), "verbose") != 0) {
+		return fail("v8m_option_name(VERBOSE) != \"verbose\"");
+	}
+	if (strcmp(v8m_option_name(V8M_OPT_HUGE_PAGES), "huge_pages") != 0) {
+		return fail("v8m_option_name(HUGE_PAGES) != \"huge_pages\"");
+	}
+	return 0;
+}
+
 static int check_init_release_thread_api(void)
 {
 	/* init_thread is idempotent: a second call from the same
@@ -1168,6 +1204,10 @@ int main(void)
 		return status;
 	}
 	status = check_init_release_thread_api();
+	if (status != 0) {
+		return status;
+	}
+	status = check_option_name_api();
 	if (status != 0) {
 		return status;
 	}

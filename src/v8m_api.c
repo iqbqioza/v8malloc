@@ -253,6 +253,34 @@ __attribute__((constructor(101))) static void v8m_constructor(void)
 			(void)write(STDERR_FILENO, isa_line, len);
 			(void)write(STDERR_FILENO, "\n", 1);
 		}
+		/* Companion opts dump: same `v8malloc opts:` prefix
+		 * convention as the ISA line so a CI matrix lane can
+		 * grep both. snprintf into a stack buffer to keep the
+		 * write malloc-free. The line stays under 1 KiB even
+		 * when every option carries a 6-digit value. */
+		char opts_line[1024];
+		int written =
+		    snprintf(opts_line, sizeof(opts_line), "v8malloc opts:");
+		for (int i = 0; i < V8M_OPT_COUNT && written > 0 &&
+				(size_t)written < sizeof(opts_line);
+		     i++) {
+			const char *name = v8m_option_name(i);
+			if (name == NULL) {
+				continue;
+			}
+			int64_t value = v8m_config_get((enum v8m_option)i);
+			int more = snprintf(opts_line + written,
+					    sizeof(opts_line) - (size_t)written,
+					    " %s=%lld", name, (long long)value);
+			if (more <= 0) {
+				break;
+			}
+			written += more;
+		}
+		if (written > 0 && (size_t)written < sizeof(opts_line)) {
+			(void)write(STDERR_FILENO, opts_line, (size_t)written);
+			(void)write(STDERR_FILENO, "\n", 1);
+		}
 	}
 
 	/* TLC plumbing — wires the pthread_key whose destructor
@@ -986,6 +1014,34 @@ static const char *api_arch_name(void)
 #else
 	return "unknown";
 #endif
+}
+
+/* Stable short names for V8M_OPT_* — caller-visible via the
+ * `v8m_option_name(id)` accessor. Indexed by the option id; the
+ * static_assert keeps the table length in lock-step with the enum
+ * so a future option that lands without an entry fails the
+ * build instead of silently returning NULL. */
+static const char *const g_option_names[V8M_OPT_COUNT] = {
+    [V8M_OPT_VERBOSE] = "verbose",
+    [V8M_OPT_PURGE_INTERVAL] = "purge_interval",
+    [V8M_OPT_THREAD_CACHE_MAX] = "thread_cache_max",
+    [V8M_OPT_HUGE_PAGES] = "huge_pages",
+    [V8M_OPT_NUMA_AWARE] = "numa_aware",
+    [V8M_OPT_DEBUG] = "debug",
+    [V8M_OPT_PROFILE] = "profile",
+    [V8M_OPT_COMPACT_THRESHOLD] = "compact_threshold",
+    [V8M_OPT_VMA_WARN_THRESHOLD] = "vma_warn_threshold",
+    [V8M_OPT_NUMA_AGGRESSIVE_MIGRATION] = "numa_aggressive_migration",
+    [V8M_OPT_DEFERRED_COALESCE] = "deferred_coalesce",
+    [V8M_OPT_LIFETIME_TRACKING] = "lifetime_tracking",
+};
+
+V8M_EXPORT const char *v8m_option_name(int option_id)
+{
+	if (option_id < 0 || option_id >= V8M_OPT_COUNT) {
+		return NULL;
+	}
+	return g_option_names[option_id];
 }
 
 V8M_EXPORT int v8m_init_thread(void)

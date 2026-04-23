@@ -395,6 +395,20 @@ V8M_EXPORT int v8m_init_thread(void);
 V8M_EXPORT int v8m_release_thread(void);
 
 /*
+ * Stable short name for the option id (e.g. "VERBOSE",
+ * "HUGE_PAGES", "NUMA_AWARE"). Returns NULL when `option_id` is
+ * out of range. Combined with `v8m_get_option(out, id)`, callers
+ * can iterate `0..V8M_OPT_COUNT` to build a pretty-printed config
+ * dump without compiling against the internal name table.
+ *
+ * The returned string is statically allocated; caller does not
+ * own it. Same name format the constructor uses for the
+ * `v8malloc opts:` line under V8M_VERBOSE — lowercase except for
+ * intra-word boundaries (e.g. "purge_interval", "vma_warn_threshold").
+ */
+V8M_EXPORT const char *v8m_option_name(int option_id);
+
+/*
  * Hot-reload the active size-class size table. Atomically swaps
  * the pointer the slab-init paths read on every fresh-page
  * formatting. Already-allocated pages keep the size baked into
