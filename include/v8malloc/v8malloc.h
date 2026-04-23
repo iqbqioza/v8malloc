@@ -356,8 +356,10 @@ struct v8m_arch_info {
 	uint32_t cache_line_bytes;
 	uint32_t build_cache_line_bytes;
 	uint32_t tsc_mhz;
-	uint8_t has_lse;
-	uint8_t reserved[3];
+	uint8_t has_lse; /* aarch64 LSE atomics (HWCAP_ATOMICS) */
+	uint8_t has_zbb; /* riscv64 Zbb basic bit-manip extension */
+	uint8_t has_zacas; /* riscv64 Zacas AMOCAS extension */
+	uint8_t reserved;
 };
 
 V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out);

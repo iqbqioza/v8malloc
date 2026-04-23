@@ -1097,6 +1097,8 @@ V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out)
 	out->build_cache_line_bytes = (uint32_t)V8M_CACHE_LINE_SIZE;
 	out->tsc_mhz = v8m_arch_tsc_frequency_mhz();
 	out->has_lse = v8m_arch_has_lse() ? 1U : 0U;
+	out->has_zbb = v8m_arch_has_zbb() ? 1U : 0U;
+	out->has_zacas = v8m_arch_has_zacas() ? 1U : 0U;
 }
 
 /* Map a public lifetime class to the dispatcher's slab pool.

@@ -127,6 +127,27 @@
 bool v8m_arch_has_lse(void);
 
 /*
+ * RISC-V Zbb extension availability — the basic bit-manipulation
+ * subset (CLZ, CTZ, CPOP, ANDN, ORN, XNOR, etc.). When true, the
+ * compiler-emitted `__builtin_clzll` / `ctzll` / `popcountll`
+ * intrinsics on this process's CPU lower to single-cycle CLZ.D /
+ * CTZ.D / CPOP.D instructions instead of a software emulation
+ * loop. Probed via the `riscv_hwprobe()` syscall (Linux 6.4+);
+ * always false on non-riscv64 builds.
+ */
+bool v8m_arch_has_zbb(void);
+
+/*
+ * RISC-V Zacas extension availability — the "atomic compare-and-
+ * swap" subset that adds AMOCAS.W / AMOCAS.D / AMOCAS.Q. When
+ * true, the compiler-emitted `_Atomic` CAS lowers to single
+ * AMOCAS instructions instead of LR.D + SC.D retry loops.
+ * Probed via `riscv_hwprobe()`; always false on non-riscv64
+ * builds.
+ */
+bool v8m_arch_has_zacas(void);
+
+/*
  * Runtime L1 dcache line size in bytes. On aarch64 reads CTR_EL0
  * (DminLine field) via mrs; on every other arch returns the
  * compile-time `V8M_CACHE_LINE_SIZE`. The value matters when a

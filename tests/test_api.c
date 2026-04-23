@@ -1136,10 +1136,14 @@ static int check_arch_info_api(void)
 	if (info.has_lse > 1U) {
 		return fail("v8m_get_arch_info: has_lse out of bounds");
 	}
-	for (size_t i = 0; i < sizeof(info.reserved); i++) {
-		if (info.reserved[i] != 0U) {
-			return fail("v8m_get_arch_info: reserved not zeroed");
-		}
+	if (info.has_zbb > 1U) {
+		return fail("v8m_get_arch_info: has_zbb out of bounds");
+	}
+	if (info.has_zacas > 1U) {
+		return fail("v8m_get_arch_info: has_zacas out of bounds");
+	}
+	if (info.reserved != 0U) {
+		return fail("v8m_get_arch_info: reserved not zeroed");
 	}
 	return 0;
 }

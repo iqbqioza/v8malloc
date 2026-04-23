@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- riscv64 `riscv_hwprobe()` ISA query for Zbb / Zacas detection
+  (resolution of the riscv64 follow-on note in TODO.md §Phase 3).
+  New `v8m_arch_has_zbb()` + `v8m_arch_has_zacas()` probe via the
+  Linux 6.4+ `riscv_hwprobe` syscall, querying the
+  `RISCV_HWPROBE_KEY_IMA_EXT_0` bitmask. Result cached in an
+  atomic on first call so subsequent reads are lock-free; probe
+  failure (older kernel, sandbox restriction) caches a sentinel
+  so we don't retry the syscall on every call. Always false on
+  non-riscv64 builds. The constants and struct layout are
+  defined locally to avoid pulling `<asm/hwprobe.h>` (not in
+  every distro's UAPI yet). The `v8malloc isa:` line under
+  `V8M_VERBOSE` now includes `zbb=yes/no zacas=yes/no` fields;
+  `struct v8m_arch_info` exposes the same as `has_zbb` /
+  `has_zacas` byte flags (consuming two of the prior three
+  reserved bytes). On non-riscv64 hosts both fields read 0.
+
+### Added
 - Public `v8m_get_slab_class_breakdown_lifetime(lifetime, out)` API.
   Same shape as `v8m_get_slab_class_breakdown` but reads from one
   of the four dispatcher arenas (default + EPHEMERAL/SHORT/LONG

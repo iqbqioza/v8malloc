@@ -30,6 +30,31 @@
 #include <x86intrin.h> /* __rdtsc */
 #endif
 
+#if defined(V8M_ARCH_RISCV64)
+#include <stdatomic.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+/*
+ * `riscv_hwprobe(struct riscv_hwprobe *pairs, size_t pair_count,
+ *  size_t cpu_set_size, unsigned long *cpus, unsigned int flags)`
+ * landed in Linux 6.4. Define the constants locally so the build
+ * stays green on toolchains that ship an older `<asm/hwprobe.h>`
+ * (or none at all). Layout matches the kernel UAPI verbatim.
+ */
+#ifndef __NR_riscv_hwprobe
+#define __NR_riscv_hwprobe 258
+#endif
+struct v8m_riscv_hwprobe {
+	int64_t key;
+	uint64_t value;
+};
+#define V8M_RISCV_HWPROBE_KEY_IMA_EXT_0 4
+#define V8M_RISCV_HWPROBE_EXT_ZBA (1ULL << 3)
+#define V8M_RISCV_HWPROBE_EXT_ZBB (1ULL << 4)
+#define V8M_RISCV_HWPROBE_EXT_ZBS (1ULL << 5)
+#define V8M_RISCV_HWPROBE_EXT_ZACAS (1ULL << 34)
+#endif
+
 bool v8m_arch_has_lse(void)
 {
 #if defined(V8M_ARCH_AARCH64)
@@ -41,6 +66,65 @@ bool v8m_arch_has_lse(void)
 #define HWCAP_ATOMICS (1UL << 8)
 #endif
 	return (getauxval(AT_HWCAP) & HWCAP_ATOMICS) != 0UL;
+#else
+	return false;
+#endif
+}
+
+#if defined(V8M_ARCH_RISCV64)
+/*
+ * Lazy-cached IMA_EXT_0 bitmask from `riscv_hwprobe`. The syscall
+ * is bounded (single-pair query, no cpu set) but cheap enough we
+ * could call it on every invocation; caching keeps the noise off
+ * the diagnostic emit path. Cache 0 = unprobed, all-ones =
+ * "probe failed" (treat every extension as absent), anything
+ * else = the kernel's bitmask.
+ */
+static uint64_t riscv_ima_ext_0(void)
+{
+	static _Atomic uint64_t cached = 0;
+	uint64_t value = atomic_load_explicit(&cached, memory_order_relaxed);
+	if (value != 0U) {
+		return value == UINT64_MAX ? 0U : value;
+	}
+	struct v8m_riscv_hwprobe pair = {
+	    .key = V8M_RISCV_HWPROBE_KEY_IMA_EXT_0,
+	    .value = 0,
+	};
+	long rc = syscall(__NR_riscv_hwprobe, &pair, (size_t)1, (size_t)0,
+			  (unsigned long *)NULL, (unsigned int)0);
+	if (rc != 0) {
+		atomic_store_explicit(&cached, UINT64_MAX,
+				      memory_order_relaxed);
+		return 0U;
+	}
+	uint64_t result = pair.value;
+	if (result == 0U) {
+		/* Distinguish "probed and got zero" from "unprobed" by
+		 * caching the sentinel (all-ones); the public accessors
+		 * map back to zero. */
+		atomic_store_explicit(&cached, UINT64_MAX,
+				      memory_order_relaxed);
+	} else {
+		atomic_store_explicit(&cached, result, memory_order_relaxed);
+	}
+	return result;
+}
+#endif
+
+bool v8m_arch_has_zbb(void)
+{
+#if defined(V8M_ARCH_RISCV64)
+	return (riscv_ima_ext_0() & V8M_RISCV_HWPROBE_EXT_ZBB) != 0ULL;
+#else
+	return false;
+#endif
+}
+
+bool v8m_arch_has_zacas(void)
+{
+#if defined(V8M_ARCH_RISCV64)
+	return (riscv_ima_ext_0() & V8M_RISCV_HWPROBE_EXT_ZACAS) != 0ULL;
 #else
 	return false;
 #endif
@@ -159,19 +243,26 @@ size_t v8m_arch_format_isa_summary(char *buf, size_t cap)
 		return 0;
 	}
 	bool lse = v8m_arch_has_lse();
+	bool zbb = v8m_arch_has_zbb();
+	bool zacas = v8m_arch_has_zacas();
 	size_t cline = v8m_arch_runtime_cache_line_size();
 	uint32_t mhz = v8m_arch_tsc_frequency_mhz();
-	/* `lse` is statically false on every non-aarch64 build; cppcheck
-	 * folds the predicate and warns. The intent here is to surface
-	 * the runtime-probed value when it's meaningful, so keep the
-	 * call and silence the no-op-on-this-arch warning. */
+	/* These bools are statically false on the wrong-arch builds;
+	 * cppcheck folds and warns. The intent here is to surface the
+	 * runtime-probed value when it's meaningful, so keep the calls
+	 * and silence the no-op-on-this-arch warning. */
 	/* cppcheck-suppress knownConditionTrueFalse */
 	const char *lse_str = lse ? "yes" : "no";
+	/* cppcheck-suppress knownConditionTrueFalse */
+	const char *zbb_str = zbb ? "yes" : "no";
+	/* cppcheck-suppress knownConditionTrueFalse */
+	const char *zacas_str = zacas ? "yes" : "no";
 	int written = snprintf(
 	    buf, cap,
-	    "v8malloc isa: arch=%s cache_line=%zu lse=%s tsc_mhz=%u "
-	    "build_cache_line=%zu",
-	    arch_name(), cline, lse_str, mhz, (size_t)V8M_CACHE_LINE_SIZE);
+	    "v8malloc isa: arch=%s cache_line=%zu lse=%s zbb=%s zacas=%s "
+	    "tsc_mhz=%u build_cache_line=%zu",
+	    arch_name(), cline, lse_str, zbb_str, zacas_str, mhz,
+	    (size_t)V8M_CACHE_LINE_SIZE);
 	if (written < 0) {
 		buf[0] = '\0';
 		return 0;
