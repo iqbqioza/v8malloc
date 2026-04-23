@@ -71,4 +71,17 @@ void v8m_bg_purge_run_once(void);
 typedef void (*v8m_bg_purge_tick_hook)(void);
 void v8m_bg_purge_set_tick_hook(v8m_bg_purge_tick_hook hook);
 
+/*
+ * pthread_atfork plumbing for the bg-purge mutex. The bg-purge
+ * thread holds `g_lock` briefly each tick (around the condvar
+ * wait setup); a fork in that window leaves the child with the
+ * lock inherited in held state. The bg-purge thread does not
+ * exist in the child, but a child that calls `v8m_bg_purge_*` —
+ * including the destructor's shutdown — would deadlock on the
+ * lock acquire. Called by the api's atfork chain.
+ */
+void v8m_bg_purge_prefork(void);
+void v8m_bg_purge_postfork_parent(void);
+void v8m_bg_purge_postfork_child(void);
+
 #endif

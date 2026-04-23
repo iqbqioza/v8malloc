@@ -183,3 +183,24 @@ void v8m_bg_purge_set_tick_hook(v8m_bg_purge_tick_hook hook)
 	atomic_store_explicit(&g_tick_hook, (uintptr_t)hook,
 			      memory_order_release);
 }
+
+void v8m_bg_purge_prefork(void)
+{
+	(void)pthread_mutex_lock(&g_lock);
+}
+
+void v8m_bg_purge_postfork_parent(void)
+{
+	(void)pthread_mutex_unlock(&g_lock);
+}
+
+void v8m_bg_purge_postfork_child(void)
+{
+	/* The bg-purge thread does NOT exist in the child — the
+	 * fork() inherits the parent's process image but only the
+	 * forking thread continues. Reset the running flag so a child
+	 * that calls v8m_bg_purge_shutdown does not try to join a
+	 * thread that was never spawned in this process. */
+	(void)pthread_mutex_unlock(&g_lock);
+	atomic_store_explicit(&g_running, false, memory_order_release);
+}

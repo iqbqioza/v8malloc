@@ -359,6 +359,18 @@ void v8m_thread_cache_module_shutdown(void);
 uint64_t v8m_thread_cache_destructor_calls(void);
 
 /*
+ * pthread_atfork plumbing for the cache registry mutex. A worker
+ * mid-create or mid-destroy holds `g_registry_lock`; without these
+ * hooks, a fork in that window leaves the child with the lock
+ * inherited in held-by-dead-thread state and the child deadlocks
+ * on the first allocation that lazy-creates a TLC. Called by the
+ * api's atfork chain.
+ */
+void v8m_thread_cache_prefork(void);
+void v8m_thread_cache_postfork_parent(void);
+void v8m_thread_cache_postfork_child(void);
+
+/*
  * Pop one cached object of size class `cls` from this cache.
  * Returns NULL if the bin is empty (caller falls through to the
  * slow path / slab pool). `cls` must be < V8M_MEDIUM_FIRST_CLASS;

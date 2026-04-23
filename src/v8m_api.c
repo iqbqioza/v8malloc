@@ -149,26 +149,55 @@ bool v8m_api_dispatch_ready(void)
  * the (unusual) case where another library forks during a
  * constructor chain that runs before ours. */
 
+/* Forward declaration: defined later with the rest of the
+ * double-free ring helpers. pthread.h is already included at the
+ * top of the file; the IWYU rule prefers the deeper
+ * bits/pthreadtypes.h (an internal glibc header). */
+/* NOLINTNEXTLINE(misc-include-cleaner) */
+static pthread_mutex_t g_double_free_ring_lock;
+
+/* atfork chain. Order matters: every module-level mutex that the
+ * malloc/free path can hold must be locked here in a consistent
+ * order, then unlocked in the reverse order in postfork. Without
+ * this coverage, a worker thread holding any of these locks at
+ * fork() time leaves the child with a held-by-dead-thread mutex,
+ * and the child deadlocks on the first call that takes the lock.
+ *
+ * Acquire order (top to bottom):
+ *   1. dispatch (slab + lifetime arenas + buddy + page-heap + anchor)
+ *   2. thread-cache registry
+ *   3. bg-purge tick mutex
+ *   4. double-free-ring mutex (api.c-owned)
+ * Release order in postfork is the exact reverse. */
 static void v8m_atfork_prepare(void)
 {
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
 		v8m_dispatch_prefork(&g_dispatch);
+		v8m_thread_cache_prefork();
+		v8m_bg_purge_prefork();
 	}
+	(void)pthread_mutex_lock(&g_double_free_ring_lock);
 }
 
 static void v8m_atfork_parent(void)
 {
+	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
+		v8m_bg_purge_postfork_parent();
+		v8m_thread_cache_postfork_parent();
 		v8m_dispatch_postfork_parent(&g_dispatch);
 	}
 }
 
 static void v8m_atfork_child(void)
 {
+	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
+		v8m_bg_purge_postfork_child();
+		v8m_thread_cache_postfork_child();
 		v8m_dispatch_postfork_child(&g_dispatch);
 	}
 }
@@ -721,7 +750,14 @@ V8M_EXPORT void v8m_free(void *ptr)
 	if (!dispatch_ready()) {
 		return;
 	}
-	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
+	/* DEBUG-mode double-free detector. Gate on page-heap ownership
+	 * so a foreign pointer (libc-owned, the dispatcher will route
+	 * it to v8m_libc_free) is never recorded — without this gate,
+	 * libc's own address-reuse pattern across distinct libc allocs
+	 * trips a false positive when v8malloc's free is invoked on a
+	 * libc pointer whose address happens to match an earlier
+	 * v8malloc-freed pointer in the ring. */
+	if (v8m_config_get(V8M_OPT_DEBUG) != 0 && v8m_page_heap_owns(ptr)) {
 		debug_check_double_free(ptr);
 	}
 	/* Lifetime tracker — same opt-in early-exit pattern as

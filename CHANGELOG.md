@@ -74,6 +74,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- Fork-safety hole closed across all module-level mutexes.
+  Previous cycles covered the dispatcher-owned pool locks and
+  the page-heap region / anchor mutexes; three more were still
+  uncovered and caused deadlocks in the child: the thread-cache
+  registry mutex (`g_registry_lock`), the bg-purge tick mutex
+  (`g_lock`), and the DEBUG-mode double-free ring mutex
+  (`g_double_free_ring_lock`). With `V8M_OPT_DEBUG=1`,
+  `test_fork_stress` deadlocked on the ring lock inherited in
+  held-by-dead-thread state; without DEBUG, the same deadlock was
+  latent on the registry lock whenever a worker happened to be
+  inside a TLC create / destroy when another thread forked. Fix:
+  added `v8m_thread_cache_prefork` / `_postfork_parent` /
+  `_postfork_child`, `v8m_bg_purge_prefork` / `_postfork_parent` /
+  `_postfork_child`, and wired the double-free ring lock directly
+  into the api's `v8m_atfork_*` handlers. `bg_purge_postfork_child`
+  also resets `g_running = false` so a child that calls
+  `v8m_bg_purge_shutdown` does not try to join a thread that was
+  never spawned in the child process.
+
+- DEBUG-mode double-free detector no longer false-positives on
+  libc-owned pointers. `v8m_free` on a foreign pointer (one that
+  libc owns, the dispatcher routes via `v8m_libc_free`) was
+  recording the pointer in the ring just like any v8malloc-owned
+  free. libc's own address-reuse pattern across distinct libc
+  allocs then tripped the detector as soon as a libc alloc
+  returned an address v8malloc had previously handed back. Fix:
+  gate the debug check on `v8m_page_heap_owns(ptr)` so foreign
+  pointers skip both the check and the ring insertion.
+
 - DEBUG-mode double-free detector no longer false-positives on
   the legitimate alloc/free reuse pattern. The 4096-entry ring
   recorded every freed pointer but never cleared an entry when

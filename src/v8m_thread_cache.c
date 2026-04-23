@@ -827,6 +827,21 @@ uint64_t v8m_thread_cache_destructor_calls(void)
 	return atomic_load_explicit(&g_destructor_calls, memory_order_relaxed);
 }
 
+void v8m_thread_cache_prefork(void)
+{
+	(void)pthread_mutex_lock(&g_registry_lock);
+}
+
+void v8m_thread_cache_postfork_parent(void)
+{
+	(void)pthread_mutex_unlock(&g_registry_lock);
+}
+
+void v8m_thread_cache_postfork_child(void)
+{
+	(void)pthread_mutex_unlock(&g_registry_lock);
+}
+
 void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
 {
 	struct v8m_thread_cache *cache = t_cache;
