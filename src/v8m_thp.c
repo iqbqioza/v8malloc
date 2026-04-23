@@ -19,6 +19,12 @@ static _Atomic uint64_t g_thp_promote_calls;
 static _Atomic uint64_t g_thp_demote_calls;
 static _Atomic uint64_t g_thp_age_demote_calls;
 
+uint64_t v8m_thp_cold_threshold_ticks_snapshot(void)
+{
+	return atomic_load_explicit(&g_thp_cold_threshold_ticks,
+				    memory_order_relaxed);
+}
+
 uint64_t v8m_thp_cold_threshold_ticks(void)
 {
 	uint64_t cached = atomic_load_explicit(&g_thp_cold_threshold_ticks,

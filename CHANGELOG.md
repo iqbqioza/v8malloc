@@ -47,6 +47,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- THP stats snapshot no longer triggers lazy-init of the cold
+  threshold as a side effect. The previous refactor routed the
+  `thp_cold_threshold_ticks` field of `v8m_page_heap_stats`
+  through `v8m_thp_cold_threshold_ticks()`, which would lazy-
+  init the threshold (mhz × 1e6) on first call — meaning a stats
+  reader could silently materialise a value that no THP decision
+  had actually consumed. Restored the original "0 means no
+  decision made yet" semantics by adding a non-init
+  `v8m_thp_cold_threshold_ticks_snapshot()` accessor and routing
+  the page-heap stats snapshot through it.
+
 - Bootstrap and signal-safe emergency allocators now reject
   near-`SIZE_MAX` requests up front instead of letting
   `(size + ALIGN-1) & ~(ALIGN-1)` wrap to a small `aligned`

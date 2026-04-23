@@ -870,7 +870,10 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	out->thp_promote_calls = v8m_thp_promote_calls();
 	out->thp_demote_calls = v8m_thp_demote_calls();
 	out->thp_ema_ticks = v8m_thp_ema_ticks();
-	out->thp_cold_threshold_ticks = v8m_thp_cold_threshold_ticks();
+	/* Use the snapshot variant so a stats read does NOT silently
+	 * lazy-init the threshold — preserves the original behaviour
+	 * where 0 means "no THP decision has been made yet". */
+	out->thp_cold_threshold_ticks = v8m_thp_cold_threshold_ticks_snapshot();
 	out->anchor_carve_calls =
 	    atomic_load_explicit(&v8m_anchor_carve_calls, memory_order_relaxed);
 	out->anchor_carve_failures = atomic_load_explicit(

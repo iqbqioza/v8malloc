@@ -33,8 +33,15 @@ enum v8m_thp_advice {
  * `v8m_arch_tsc_frequency_mhz()` to ≈ 1 second of ticks; the test
  * injection knob can override the value. Subsequent calls return the
  * cached threshold.
+ *
+ * For diagnostic snapshots that must NOT trigger lazy init (so a
+ * stats reporter does not silently materialise a value that no
+ * decision has actually consumed yet), use the `_snapshot` variant
+ * which returns the cached value (0 when the lazy init has not
+ * fired yet).
  */
 uint64_t v8m_thp_cold_threshold_ticks(void);
+uint64_t v8m_thp_cold_threshold_ticks_snapshot(void);
 
 /*
  * Decide PROMOTE vs DEMOTE for the next THP-eligible allocation and
