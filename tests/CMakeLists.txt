@@ -30,6 +30,21 @@ function(v8malloc_add_test name)
 		-Wall -Wextra -Wpedantic -Wshadow
 		-Wstrict-prototypes -Wmissing-prototypes
 		-Wold-style-definition
+		# Tests probe edge cases the libc-allocator builtin
+		# folder elides (calloc overflow, realloc(p,0), free
+		# elision). Without these flags, Clang at -O2 replaces
+		# `calloc(SIZE_MAX, SIZE_MAX)` with `calloc(1, 1)` and
+		# the test asserting bad==NULL fails. Same flag set as
+		# the library; mirrored here so the tests don't have to
+		# inherit it via the link target.
+		-fno-builtin-malloc
+		-fno-builtin-calloc
+		-fno-builtin-realloc
+		-fno-builtin-free
+		-fno-builtin-aligned_alloc
+		-fno-builtin-posix_memalign
+		-fno-builtin-strdup
+		-fno-builtin-strndup
 	)
 	add_test(NAME ${name} COMMAND ${name})
 endfunction()

@@ -1,6 +1,6 @@
 ![v8malloc logo](./docs/v8malloc.png)
 
-[![CI](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml) [![multi-arch](https://github.com/iqbqioza/v8malloc/actions/workflows/multi-arch.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/multi-arch.yml)
+[![CI](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/ci.yml) [![multi-arch](https://github.com/iqbqioza/v8malloc/actions/workflows/multi-arch.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/multi-arch.yml) [![coverage](https://github.com/iqbqioza/v8malloc/actions/workflows/coverage.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/coverage.yml) [![fuzz](https://github.com/iqbqioza/v8malloc/actions/workflows/fuzz.yml/badge.svg)](https://github.com/iqbqioza/v8malloc/actions/workflows/fuzz.yml)
 
 # v8malloc
 

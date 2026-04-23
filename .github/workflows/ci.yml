@@ -34,10 +34,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install toolchain
+        # Clang Release uses thin LTO + llvm-ar / llvm-ranlib / lld
+        # (see the toolchain wiring in the top-level CMakeLists).
+        # Install the extra LLVM utilities on those configs only; the
+        # GCC and Clang Debug lanes skip them to keep the apt step
+        # fast.
         run: |
           sudo apt-get update -qq
+          EXTRA=""
+          if [ "${{ matrix.compiler }}" = "clang" ] && \
+             [ "${{ matrix.build_type }}" = "Release" ]; then
+            EXTRA="llvm lld"
+          fi
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ${{ matrix.compiler }}
+            build-essential cmake ${{ matrix.compiler }} $EXTRA
       - name: Configure
         run: |
           cmake -S . -B build/ci \
@@ -63,7 +73,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake clang
+            build-essential cmake clang llvm lld
       - name: Build (Release)
         run: |
           cmake -S . -B build/preload \

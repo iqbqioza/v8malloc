@@ -590,7 +590,16 @@ static int check_v8m_stats_api(void)
  * inside v8m_malloc succeeds. Static state because the handler
  * signature has no user-data slot.
  */
-static int g_oom_invocations;
+/* `volatile` so gcc -O2 can't assume the handler — invoked through a
+ * function pointer the library holds — doesn't modify this counter
+ * between the `= 0` write and the post-malloc read. Without the
+ * qualifier the Release-build compiler observes the sequence
+ * "assign zero; call opaque function; read back" and still proves
+ * the variable unchanged because the handler is static in this TU
+ * and not obviously reachable through `malloc`; the read collapses
+ * to the constant 0 and the "handler was invoked" assertion trips.
+ * Caught by the Release+gcc CI gate. */
+static volatile int g_oom_invocations;
 static void *g_oom_release_target;
 
 static int oom_release_then_retry(size_t requested)
@@ -672,6 +681,16 @@ static int check_oom_handler_retry(void)
 		v8m_set_oom_handler(prev);
 		return fail("OOM handler was non-NULL before install");
 	}
+
+	/* Drain every deferred-release cache (Large/Huge recycle,
+	 * buddy drained arenas, slab drained pages) so the soft limit
+	 * below is pinned against a stable live_bytes. Without this
+	 * the first over_soft_limit call's purge-on-miss step releases
+	 * cached regions from earlier test phases, enough headroom
+	 * opens up that the would-be-blocked malloc succeeds without
+	 * firing the OOM handler at all, and the test's
+	 * "handler was invoked" assertion trips. */
+	(void)v8m_purge();
 
 	void *anchor = malloc((size_t)256 * 1024);
 	if (anchor == NULL) {

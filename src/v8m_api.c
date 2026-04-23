@@ -842,11 +842,21 @@ static void v8m_free_slow(void *ptr)
 
 V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 {
-	if (size != 0U && nmemb > SIZE_MAX / size) {
+	/* Detect nmemb*size overflow with the compiler builtin rather
+	 * than `nmemb > SIZE_MAX / size`. The division check is correct
+	 * for arbitrary inputs but defeats easily under LTO + Clang's
+	 * mul-overflow recognizer: at -O2 with thin LTO the compiler
+	 * folds `calloc(SIZE_MAX, SIZE_MAX)` to a single 1-byte alloc
+	 * (the wrapped-mod-2^64 product is 1) and skips the overflow
+	 * branch entirely, which the test_api `calloc(SIZE_MAX,
+	 * SIZE_MAX) returned non-NULL` regression caught. The builtin
+	 * forces the overflow signal into a separate flag the optimizer
+	 * cannot eliminate. */
+	size_t total;
+	if (__builtin_mul_overflow(nmemb, size, &total)) {
 		errno = ENOMEM;
 		return NULL;
 	}
-	size_t total = nmemb * size;
 	/* Pass calloc's own caller PC into do_malloc_pc so the predict
 	 * table and lifetime tracker see the user's call site, not the
 	 * v8m_calloc body. */
@@ -916,11 +926,14 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
  * — the function is part of the public ABI exported by v8malloc.map. */
 V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
 {
-	if (size != 0U && nmemb > SIZE_MAX / size) {
+	/* Same builtin-overflow choice as v8m_calloc — the division
+	 * check folds away under LTO. */
+	size_t total;
+	if (__builtin_mul_overflow(nmemb, size, &total)) {
 		errno = ENOMEM;
 		return NULL;
 	}
-	return v8m_realloc(ptr, nmemb * size);
+	return v8m_realloc(ptr, total);
 }
 
 /*

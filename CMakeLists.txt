@@ -25,6 +25,33 @@ elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
 		message(FATAL_ERROR
 			"Clang >= 16 required (got ${CMAKE_C_COMPILER_VERSION})")
 	endif()
+	# Clang Release builds use thin LTO (see the per-target
+	# `-flto=thin` further down). When LTO is on, the static-library
+	# member objects are LLVM bitcode rather than ELF, so the default
+	# binutils `ar` / `ranlib` index them with no usable symbol table
+	# and downstream `ld` invocations fail with "file format not
+	# recognized". Switching to `llvm-ar` / `llvm-ranlib` produces an
+	# index the bitcode-aware linker (`lld`, or recent `ld.bfd` /
+	# `ld.gold` with the LLVMgold plugin) can consume. Detected
+	# at-most-once with `find_program`; we leave the toolchain
+	# unchanged on hosts where the LLVM utilities are absent so a
+	# Debug build (which does not need them) still works.
+	find_program(V8M_LLVM_AR NAMES llvm-ar)
+	find_program(V8M_LLVM_RANLIB NAMES llvm-ranlib)
+	find_program(V8M_LLD NAMES ld.lld lld)
+	if(V8M_LLD)
+		set(V8M_HAVE_LLD ON CACHE BOOL "lld linker found" FORCE)
+	endif()
+	if(V8M_LLVM_AR AND V8M_LLVM_RANLIB)
+		set(CMAKE_AR "${V8M_LLVM_AR}" CACHE FILEPATH "" FORCE)
+		set(CMAKE_RANLIB "${V8M_LLVM_RANLIB}" CACHE FILEPATH "" FORCE)
+		# C_COMPILER_AR / _RANLIB are what CMake actually uses for C
+		# static-library builds; without these it falls back to the
+		# generic CMAKE_AR for the .o → .a step but still calls the
+		# binutils ranlib for indexing, defeating the override.
+		set(CMAKE_C_COMPILER_AR "${V8M_LLVM_AR}" CACHE FILEPATH "" FORCE)
+		set(CMAKE_C_COMPILER_RANLIB "${V8M_LLVM_RANLIB}" CACHE FILEPATH "" FORCE)
+	endif()
 else()
 	message(FATAL_ERROR
 		"Unsupported compiler ${CMAKE_C_COMPILER_ID}; use GCC or Clang")
@@ -269,6 +296,29 @@ function(v8malloc_configure_target tgt)
 		# `v8m_malloc` and similar wrappers down to a tail call (or
 		# full inline of the fast path).
 		-fno-semantic-interposition
+		# Disable compiler intrinsics for the libc allocator family.
+		# Without these, Clang (and to a lesser extent GCC) applies
+		# its built-in knowledge of calloc/malloc/realloc/free
+		# semantics — e.g. constant-folding `calloc(SIZE_MAX,
+		# SIZE_MAX)` to `calloc(1, 1)` because the wrapped product
+		# is 1, or replacing `realloc(p, 0)` with `free(p)` directly,
+		# or eliding free+malloc pairs when the result isn't read.
+		# The optimisations are sound against the C standard's
+		# semantics but NOT against an allocator that wants to
+		# observe the original arguments (overflow detection, OOM
+		# handler, soft-limit gate, lifetime tracker, ...). Caught
+		# by the Release-build CI gate via test_api / test_calloc /
+		# test_realloc — all six previously-passing tests fail
+		# without this flag because the optimiser elides the call
+		# the test was meant to exercise.
+		-fno-builtin-malloc
+		-fno-builtin-calloc
+		-fno-builtin-realloc
+		-fno-builtin-free
+		-fno-builtin-aligned_alloc
+		-fno-builtin-posix_memalign
+		-fno-builtin-strdup
+		-fno-builtin-strndup
 		# LTO collapses cross-TU function calls on the malloc
 		# fast path: v8m_malloc → do_malloc_pc → v8m_dispatch_alloc
 		# → try_tlc_fast_paths → v8m_thread_cache_alloc lives across
@@ -276,12 +326,25 @@ function(v8malloc_configure_target tgt)
 		# call. With LTO the compiler can inline the whole chain
 		# into v8m_malloc, collapsing the bin-pop fast path to ~5
 		# instructions. Only kicks in for Release builds (Debug
-		# wants line-by-line debuggability).
-		$<$<CONFIG:Release>:-flto=thin>
+		# wants line-by-line debuggability) AND for clang — `gcc`
+		# does not accept `-flto=thin` (only `-flto=auto` /
+		# `-flto=N`), and the toolchain wiring below (llvm-ar /
+		# llvm-ranlib / lld) is clang-specific. GCC Release builds
+		# fall back to the v0 baseline of no LTO; the cross-TU
+		# inlining win is clang-only today.
+		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>>:-flto=thin>
 		${V8MALLOC_ARCH_FLAGS}
 	)
 	target_link_options(${tgt} PRIVATE
-		$<$<CONFIG:Release>:-flto=thin>
+		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>>:-flto=thin>
+		# Pair clang's thin LTO with lld: the static-library member
+		# objects are LLVM bitcode, and the binutils `ld` can't
+		# read bitcode (fails with "file format not recognized").
+		# `-fuse-ld=lld` redirects the link step to the LLVM linker
+		# which is bitcode-aware. Conditional on lld actually being
+		# present so a clang install without lld still builds (it
+		# just won't link the static-library tests).
+		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>,$<BOOL:${V8M_HAVE_LLD}>>:-fuse-ld=lld>
 	)
 	target_compile_definitions(${tgt} PRIVATE
 		_GNU_SOURCE
@@ -332,6 +395,20 @@ if(V8MALLOC_BUILD_STATIC)
 	set_target_properties(v8malloc_static PROPERTIES
 		OUTPUT_NAME v8malloc
 	)
+	# When the static archive holds LLVM bitcode (clang Release +
+	# thin LTO), every consumer that links against it must use a
+	# bitcode-aware linker. Propagating `-fuse-ld=lld` as INTERFACE
+	# means the in-tree tests + every downstream `find_package`
+	# consumer pick it up automatically — without this, the static
+	# library builds fine but every test_*.c executable fails the
+	# link step with "file format not recognized" from the default
+	# binutils `ld`. Gated on the same Clang+Release+lld-present
+	# trio that drove the choice to use bitcode in the first place.
+	if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND V8M_HAVE_LLD)
+		target_link_options(v8malloc_static INTERFACE
+			$<$<CONFIG:Release>:-fuse-ld=lld>
+		)
+	endif()
 	list(APPEND V8MALLOC_INSTALL_TARGETS v8malloc_static)
 endif()
 
