@@ -11,6 +11,42 @@ jemalloc, mimalloc, and tcmalloc on multithreaded and NUMA workloads.
 > surface, and project layout are in place; most allocator internals are
 > being implemented now.
 
+## What is it best for?
+
+**Long-running Linux services that allocate a mix of small and large
+objects, run for days or weeks, and need to keep RSS down without
+losing observability.**
+
+Concretely, where v8malloc currently leads the field in its own
+benchmark suite:
+
+- **Memory frugality.** 60 % of tcmalloc's RSS on the fragmentation
+  bench; ties mimalloc and glibc for the lowest steady-state
+  footprint. Matters when you pay per GiB or fit more replicas per
+  host.
+- **Large / Huge allocation latency.** Best in class at 16 MiB and
+  64 MiB thanks to the recycle cache; matches the leaders at every
+  other Large / Huge size. Matters for buffer pools, scratch arenas,
+  model weights, `mmap`-shaped data.
+- **Operator visibility.** pprof heap dumps, lifetime classification
+  (ephemeral / short / long), per-class histograms, NUMA balance,
+  OOM handler with soft limits, `v8m_purge()`. The other allocators
+  hand you a number; v8malloc hands you a story.
+- **NUMA-aware out of the box.** `mbind`-pinned pages, distance-
+  ordered fallback, periodic rebalance. Matters on 2+ socket boxes.
+- **Drop-in.** `LD_PRELOAD=libv8malloc.so` — no code changes.
+
+Examples that hit all five: API gateways, message brokers, embedding
+servers, model-serving runtimes, ETL workers, search indexers,
+time-series databases.
+
+Not the right pick if you need non-Linux portability, absolute lowest
+latency on sub-64 B allocations, or peak throughput on symmetric 8+
+thread alloc-only workloads — glibc and tcmalloc currently edge
+v8malloc there by a few percent. See
+[Cross-allocator comparison](#cross-allocator-comparison) below for
+the full benchmark breakdown.
+
 ## Design highlights
 
 - 4-tier hierarchical allocation path: thread-local cache → core-local
