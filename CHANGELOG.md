@@ -74,6 +74,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- Buddy pool's deferred-coalesce fallback no longer skips
+  drained arenas. With `V8M_OPT_DEFERRED_COALESCE=1`, an arena
+  could become "drained" (alloc_bitmap fully clear, MADV_DONTNEED
+  applied) while still holding scattered low-level free blocks
+  in its bookkeeping; the fallback's `slot->drained` skip then
+  prevented the only path that could merge those blocks back
+  into a top-level block satisfying a subsequent max-size
+  request. Fix: include drained slots in the coalesce sweep.
+
+- `tests/test_page_heap.c::check_hugepage_advice` and
+  `check_hugetlb_attempt` and `check_thp_adaptive_decision` now
+  force `V8M_OPT_HUGE_PAGES=1` for the duration of their
+  assertions and restore the saved value at every exit. Without
+  this, the env-driven `V8M_HUGE_PAGES=0` case (operator runs
+  the suite with huge pages off) silently flipped the test's
+  expectation and assertions like "hugepage_advise_calls did not
+  advance" spuriously failed. Mirrors the same pattern
+  test_buddy_pool already used for V8M_OPT_DEBUG.
+
 - Fork-safety hole closed across all module-level mutexes.
   Previous cycles covered the dispatcher-owned pool locks and
   the page-heap region / anchor mutexes; three more were still

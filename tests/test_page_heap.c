@@ -224,10 +224,15 @@ static int check_owns_predicate(void)
 
 static int check_hugepage_advice(void)
 {
-	/* Make sure config_init has run (the constructor does this; the
-	 * test still depends on V8M_OPT_HUGE_PAGES being its default of
-	 * 1, which the loader guarantees in absence of an env var). */
+	/* Make sure config_init has run (the constructor does this).
+	 * Force V8M_OPT_HUGE_PAGES=1 for the duration of the test so
+	 * the at-threshold assertion holds regardless of the env-driven
+	 * value (V8M_HUGE_PAGES=0 in the test runner's environment
+	 * would otherwise flip the option and the assertion would
+	 * spuriously fail). Restored at every exit. */
 	v8m_config_init();
+	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 1);
 
 	struct v8m_page_heap_stats before = {0};
 	struct v8m_page_heap_stats after = {0};
@@ -236,11 +241,13 @@ static int check_hugepage_advice(void)
 	v8m_page_heap_get_stats(&before);
 	void *small = v8m_page_heap_alloc(V8M_PAGE_SIZE, V8M_PAGE_SIZE);
 	if (small == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("sub-threshold alloc returned NULL");
 	}
 	v8m_page_heap_get_stats(&after);
 	if (after.hugepage_advise_calls != before.hugepage_advise_calls) {
 		v8m_page_heap_free(small, V8M_PAGE_SIZE);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("sub-threshold alloc emitted MADV_HUGEPAGE hint");
 	}
 	v8m_page_heap_free(small, V8M_PAGE_SIZE);
@@ -249,19 +256,20 @@ static int check_hugepage_advice(void)
 	v8m_page_heap_get_stats(&before);
 	void *huge = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	if (huge == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("at-threshold alloc returned NULL");
 	}
 	v8m_page_heap_get_stats(&after);
 	if (after.hugepage_advise_calls <= before.hugepage_advise_calls) {
 		v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail(
 		    "hugepage_advise_calls did not advance at threshold");
 	}
 	v8m_page_heap_free(huge, HUGEPAGE_BYTES);
 
 	/* Disabling V8M_OPT_HUGE_PAGES suppresses the hint even at
-	 * threshold. Restore the default before returning. */
-	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	 * threshold. */
 	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 0);
 	v8m_page_heap_get_stats(&before);
 	void *huge_off = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
@@ -282,7 +290,13 @@ static int check_hugepage_advice(void)
 
 static int check_hugetlb_attempt(void)
 {
+	/* Force HUGE_PAGES=1 for the same reason as check_hugepage_advice
+	 * — the env-driven case (V8M_HUGE_PAGES=0) would otherwise
+	 * suppress the at-threshold attempt and the assertion would
+	 * spuriously fail. Restored at every exit. */
 	v8m_config_init();
+	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 1);
 
 	/* A 2 MiB-multiple allocation aligned to 2 MiB triggers the
 	 * MAP_HUGETLB primary attempt. We're agnostic to whether the
@@ -303,11 +317,13 @@ static int check_hugetlb_attempt(void)
 	v8m_page_heap_get_stats(&before);
 	void *small = v8m_page_heap_alloc((size_t)1024 * 1024, V8M_PAGE_SIZE);
 	if (small == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("sub-threshold alloc returned NULL");
 	}
 	v8m_page_heap_get_stats(&after);
 	if (after.hugetlb_alloc_calls != before.hugetlb_alloc_calls) {
 		v8m_page_heap_free(small, (size_t)1024 * 1024);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("sub-threshold alloc made a hugetlb attempt");
 	}
 	v8m_page_heap_free(small, (size_t)1024 * 1024);
@@ -316,17 +332,18 @@ static int check_hugetlb_attempt(void)
 	v8m_page_heap_get_stats(&before);
 	void *huge = v8m_page_heap_alloc(HUGEPAGE_BYTES, HUGEPAGE_BYTES);
 	if (huge == NULL) {
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("at-threshold alloc returned NULL");
 	}
 	v8m_page_heap_get_stats(&after);
 	if (after.hugetlb_alloc_calls <= before.hugetlb_alloc_calls) {
 		v8m_page_heap_free(huge, HUGEPAGE_BYTES);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved);
 		return fail("hugetlb_alloc_calls did not advance");
 	}
 	v8m_page_heap_free(huge, HUGEPAGE_BYTES);
 
 	/* HUGE_PAGES=0 suppresses the attempt even at threshold. */
-	int64_t saved = v8m_config_get(V8M_OPT_HUGE_PAGES);
 	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 0);
 	v8m_page_heap_get_stats(&before);
 	void *suppressed_alloc =
@@ -358,6 +375,13 @@ static int check_hugetlb_attempt(void)
 static int check_thp_adaptive_decision(void)
 {
 	v8m_config_init();
+	/* The THP decision only fires when V8M_OPT_HUGE_PAGES is on
+	 * (the page-heap path that calls `v8m_thp_decide_and_record`
+	 * is gated on it). Force it on for the test so the env-driven
+	 * V8M_HUGE_PAGES=0 case does not silently skip every alloc's
+	 * decision and the demote/promote counters never advance. */
+	int64_t saved_huge_pages = v8m_config_get(V8M_OPT_HUGE_PAGES);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, 1);
 
 	/* Save the live state so we can restore it; subsequent tests
 	 * (and the rest of the suite) must observe the lazy-init
@@ -379,12 +403,14 @@ static int check_thp_adaptive_decision(void)
 	void *first = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	if (first == NULL) {
 		v8m_thp_test_inject(saved_threshold, saved_ema);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved_huge_pages);
 		return fail("first THP-eligible alloc returned NULL");
 	}
 	void *second = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	if (second == NULL) {
 		v8m_page_heap_free(first, HUGEPAGE_BYTES);
 		v8m_thp_test_inject(saved_threshold, saved_ema);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved_huge_pages);
 		return fail("second THP-eligible alloc returned NULL");
 	}
 	struct v8m_page_heap_stats after = {0};
@@ -395,6 +421,7 @@ static int check_thp_adaptive_decision(void)
 	v8m_page_heap_free(second, HUGEPAGE_BYTES);
 	if (demote_delta == 0U) {
 		v8m_thp_test_inject(saved_threshold, saved_ema);
+		(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved_huge_pages);
 		return fail("DEMOTE branch did not fire under tiny threshold");
 	}
 
@@ -416,6 +443,7 @@ static int check_thp_adaptive_decision(void)
 		v8m_page_heap_free(fourth, HUGEPAGE_BYTES);
 	}
 	v8m_thp_test_inject(saved_threshold, saved_ema);
+	(void)v8m_config_set(V8M_OPT_HUGE_PAGES, saved_huge_pages);
 	if (promote_delta == 0U) {
 		return fail("PROMOTE branch did not fire under huge threshold");
 	}

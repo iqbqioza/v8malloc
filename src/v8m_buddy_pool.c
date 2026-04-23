@@ -146,7 +146,14 @@ void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size)
 		bool any_merge = false;
 		for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
 			struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
-			if (!slot->in_use || slot->drained) {
+			/* Include drained slots — those are the arenas
+			 * where every block was freed under deferred
+			 * coalesce and the bookkeeping still has scattered
+			 * low-level blocks that won't satisfy a higher-
+			 * level request until merged. Skipping them
+			 * (the previous behaviour) silently failed
+			 * legitimate max-block requests. */
+			if (!slot->in_use) {
 				continue;
 			}
 			if (v8m_buddy_coalesce_all(&slot->buddy) > 0U) {
