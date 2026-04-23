@@ -432,8 +432,11 @@ The script verifies HEAD is on a `vMAJOR.MINOR.PATCH` tag, that
 `V8M_VERSION_STRING` in the public header matches the tag, runs a
 release-mode build + the full ctest suite, then produces a
 `git archive` source tarball with sha256 (and a detached GPG
-signature when a key is available). With `--gh-release` it pulls
-the matching CHANGELOG section and opens a draft GitHub release.
+signature when a key is available). For end-to-end automated
+releases, see the `release` GitHub Actions workflow which builds
+multi-arch binaries and lets GitHub auto-generate the release
+notes from PR labels (`.github/release.yml` controls the
+categorization).
 
 ## Project layout
 

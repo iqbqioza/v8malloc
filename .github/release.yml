@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# GitHub auto-generated release notes config. Drives the
+# categorization that `gh release create --generate-notes` (and the
+# web UI's "Generate release notes" button) apply when grouping the
+# PR list between two tags.
+#
+# Each PR is matched against the categories below in order. A PR
+# without any matching label lands in the catch-all `Other changes`
+# bucket — keep that bucket so notes never silently drop a merged
+# PR.
+#
+# Reference:
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes#configuration-options
+
+changelog:
+  exclude:
+    # Keep version-bump and dependabot churn out of the public
+    # narrative. The release commit itself is the bump; bot PRs
+    # only matter on a security flag (which dependabot raises
+    # separately, outside the routine bump cadence).
+    labels:
+      - ignore-for-release
+      - dependencies
+    authors:
+      - dependabot
+      - dependabot[bot]
+      - github-actions[bot]
+  categories:
+    - title: 🔒 Security
+      labels:
+        - security
+    - title: ✨ Features
+      labels:
+        - feat
+        - feature
+        - enhancement
+    - title: 🐛 Fixes
+      labels:
+        - fix
+        - bug
+        - bugfix
+    - title: ⚡ Performance
+      labels:
+        - perf
+        - performance
+    - title: ♻️ Refactor
+      labels:
+        - refactor
+    - title: 📝 Documentation
+      labels:
+        - docs
+        - documentation
+    - title: 🧪 Tests
+      labels:
+        - test
+        - testing
+    - title: 🏗️ Build & CI
+      labels:
+        - build
+        - ci
+        - chore
+    - title: Other changes
+      labels:
+        - "*"

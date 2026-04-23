@@ -14,7 +14,10 @@ the doc in this PR.
 - [ ] `make test` passes
 - [ ] If performance-sensitive: benchmark numbers attached or
       explained why the existing harness doesn't yet cover this path
-- [ ] `CHANGELOG.md` updated under `## [Unreleased]`
+- [ ] PR title follows Conventional Commits and a category label
+      is set (`feat`, `fix`, `perf`, `docs`, `refactor`, `test`,
+      `build`, `ci`, `chore`, `security`) — release notes are
+      auto-generated from these
 - [ ] Public API additions appear in
       `include/v8malloc/v8malloc.h` **and** `src/v8malloc.map`
 - [ ] No new compiler warnings under `-Wall -Wextra -Wpedantic`

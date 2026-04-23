@@ -76,7 +76,10 @@ Subject line conventions:
 - For performance changes, attach `make test` output and at least one
   benchmark run from `bench/` (or describe why the existing harness
   doesn't yet cover the affected path).
-- Update `CHANGELOG.md` under `## [Unreleased]`.
+- Apply one of the category labels (`feat`, `fix`, `perf`, `docs`,
+  `refactor`, `test`, `build`, `ci`, `chore`, `security`) so the
+  PR lands in the right section of the auto-generated release
+  notes (`.github/release.yml` controls the categorization).
 
 ## Architecture support
 
