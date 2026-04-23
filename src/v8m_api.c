@@ -671,7 +671,14 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 __attribute__((hot)) V8M_EXPORT void *v8m_malloc(size_t size)
 {
 	struct v8m_thread_cache *cache = v8m_t_cache;
-	if (__builtin_expect(cache != NULL && size <= V8M_SMALL_MAX_SIZE, 1)) {
+	/* Combined fast-path-ok flag: single relaxed atomic load that
+	 * folds the DEBUG + LIFETIME_TRACKING checks into one branch.
+	 * Without it the slow path's predict-prefetch / lifetime-record
+	 * machinery would be silently bypassed when those options are
+	 * on, breaking their bookkeeping. */
+	if (__builtin_expect(cache != NULL && size <= V8M_SMALL_MAX_SIZE &&
+				 v8m_config_fast_path_ok(),
+			     1)) {
 		uint32_t cls = v8m_size_class(size);
 		void *cached = v8m_thread_cache_alloc_inline(cache, cls);
 		if (__builtin_expect(cached != NULL, 1)) {
@@ -765,15 +772,14 @@ __attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
 	if (__builtin_expect(ptr != NULL, 1)) {
 		struct v8m_thread_cache *cache = v8m_t_cache;
 		int owned = v8m_page_heap_owns_fast(ptr);
-		if (__builtin_expect(cache != NULL && owned == 1, 1)) {
+		if (__builtin_expect(cache != NULL && owned == 1 &&
+					 v8m_config_fast_path_ok(),
+				     1)) {
 			const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
 			if (__builtin_expect(
 				v8m_page_meta_valid(meta) &&
 				    meta->size_class < V8M_MEDIUM_FIRST_CLASS &&
-				    meta->arena_id == V8M_ARENA_DEFAULT &&
-				    v8m_config_get(V8M_OPT_DEBUG) == 0 &&
-				    v8m_config_get(V8M_OPT_LIFETIME_TRACKING) ==
-					0,
+				    meta->arena_id == V8M_ARENA_DEFAULT,
 				1)) {
 				/* Skip fast path when the push would
 				 * overflow — the slow path handles the

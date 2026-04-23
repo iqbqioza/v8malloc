@@ -52,6 +52,22 @@ static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
  * backing array. */
 _Atomic int64_t v8m_config_values[V8M_OPT_COUNT];
 
+/* Combined "fast path must be skipped" flag (see header). Recomputed
+ * after every set so the hot path collapses N atomic loads + branches
+ * into one. */
+_Atomic uint8_t v8m_config_fast_path_disabled;
+
+static void recompute_fast_path_flag(void)
+{
+	bool disabled =
+	    atomic_load_explicit(&v8m_config_values[V8M_OPT_DEBUG],
+				 memory_order_relaxed) != 0 ||
+	    atomic_load_explicit(&v8m_config_values[V8M_OPT_LIFETIME_TRACKING],
+				 memory_order_relaxed) != 0;
+	atomic_store_explicit(&v8m_config_fast_path_disabled,
+			      disabled ? 1U : 0U, memory_order_relaxed);
+}
+
 /*
  * Parse `text` as a base-10 signed integer. Returns true and writes
  * the value on success; false if the entire string did not parse, was
@@ -95,6 +111,7 @@ void v8m_config_init(void)
 		atomic_store_explicit(&v8m_config_values[i], value,
 				      memory_order_relaxed);
 	}
+	recompute_fast_path_flag();
 }
 
 int v8m_config_set(enum v8m_option opt, int64_t value)
@@ -104,6 +121,9 @@ int v8m_config_set(enum v8m_option opt, int64_t value)
 	}
 	atomic_store_explicit(&v8m_config_values[opt], value,
 			      memory_order_relaxed);
+	if (opt == V8M_OPT_DEBUG || opt == V8M_OPT_LIFETIME_TRACKING) {
+		recompute_fast_path_flag();
+	}
 	return 0;
 }
 

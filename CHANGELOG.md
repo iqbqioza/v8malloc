@@ -74,6 +74,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- **Combined fast-path-disabled flag.** New
+  `v8m_config_fast_path_disabled` collapses the malloc/free hot
+  path's two atomic loads (`V8M_OPT_DEBUG`,
+  `V8M_OPT_LIFETIME_TRACKING`) into a single relaxed load + branch
+  via `v8m_config_fast_path_ok()`. Recomputed on every
+  `v8m_config_set` of either option. Also closes a latent
+  bookkeeping gap in the malloc fast path: previously the inline
+  alloc skipped the predict-prefetch + lifetime-record helpers
+  unconditionally, so allocations done through the fast path
+  silently bypassed those when LIFETIME_TRACKING was on; now the
+  fast path early-exits to the slow body (which has the
+  bookkeeping wired) when either option is on.
+
 - **Per-thread cache for `v8m_page_heap_owns_fast`.** The malloc /
   free hot path tends to query the same slab page repeatedly
   (oscillating alloc/free workloads cycle slots through one page).

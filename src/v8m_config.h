@@ -62,4 +62,21 @@ static inline int64_t v8m_config_get(enum v8m_option opt)
 				    memory_order_relaxed);
 }
 
+/*
+ * Combined "any slow-path-mandating option is on" flag, recomputed
+ * by `v8m_config_set` whenever any option that the malloc / free
+ * fast paths consult flips. The hot path can collapse what would
+ * otherwise be N relaxed-atomic loads and branches into one. Today
+ * the flag is the OR of V8M_OPT_DEBUG and V8M_OPT_LIFETIME_TRACKING
+ * — both must route through the slow body to keep their
+ * bookkeeping correct.
+ */
+extern _Atomic uint8_t v8m_config_fast_path_disabled;
+
+static inline bool v8m_config_fast_path_ok(void)
+{
+	return atomic_load_explicit(&v8m_config_fast_path_disabled,
+				    memory_order_relaxed) == 0U;
+}
+
 #endif /* V8M_CONFIG_H */
