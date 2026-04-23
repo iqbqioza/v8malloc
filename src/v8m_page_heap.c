@@ -191,6 +191,17 @@ static size_t g_region_count;
 static pthread_mutex_t g_region_lock = /* NOLINT(misc-include-cleaner) */
     PTHREAD_MUTEX_INITIALIZER;
 
+/* Seqlock counter for lock-free reads of the region map. Writers
+ * (register / unregister) bump this twice per modification — once
+ * before (odd = "writing in progress") and once after (even =
+ * "stable"). Lock-free readers in `v8m_page_heap_owns_fast` do the
+ * standard seqlock dance: snapshot seq, read region table, snapshot
+ * seq again, retry if either snapshot was odd or they differ. The
+ * mutex is still held by writers as the serialiser; the seqlock
+ * just lets the malloc/free fast path skip the mutex on the
+ * common-case ownership check. */
+static _Atomic uint64_t g_region_seq;
+
 /*
  * Per-node live bytes (numa.md §6.1). Bumped when a region's bind
  * lands on node N; decremented when the region is freed. Atomic to
@@ -266,6 +277,9 @@ static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 		(void)pthread_mutex_unlock(&g_region_lock);
 		return -1;
 	}
+	/* Seqlock: bump to odd before mutating, even after. Lock-free
+	 * readers retry while seq is odd. */
+	atomic_fetch_add_explicit(&g_region_seq, 1U, memory_order_release);
 	uintptr_t start = (uintptr_t)ptr;
 	/* Insert sorted: find the position where the new entry's start
 	 * fits, shift the tail right by one, place the entry. The
@@ -283,6 +297,7 @@ static int region_register_with_flags(void *ptr, size_t bytes, bool is_anchor)
 	atomic_store_explicit(&g_regions[idx].promoted_at_tsc, 0U,
 			      memory_order_relaxed);
 	g_region_count++;
+	atomic_fetch_add_explicit(&g_region_seq, 1U, memory_order_release);
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return 0;
 }
@@ -343,6 +358,8 @@ static uint16_t region_unregister_with_flags(const void *ptr,
 	(void)pthread_mutex_lock(&g_region_lock);
 	size_t idx = region_find_by_start(start);
 	if (idx != SIZE_MAX) {
+		atomic_fetch_add_explicit(&g_region_seq, 1U,
+					  memory_order_release);
 		node = g_regions[idx].node;
 		*out_is_anchor = g_regions[idx].is_anchor;
 		/* Memmove-compact to preserve the sort. The cost is
@@ -355,9 +372,63 @@ static uint16_t region_unregister_with_flags(const void *ptr,
 				      tail * sizeof(g_regions[0]));
 		}
 		g_region_count--;
+		atomic_fetch_add_explicit(&g_region_seq, 1U,
+					  memory_order_release);
 	}
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return node;
+}
+
+/* Lock-free owns: seqlock-based read of the region map. Returns
+ * true / false on a stable snapshot, or `unknown` (-1) when the
+ * snapshot raced with a writer (caller should fall back to the
+ * mutex-protected slow path). The seqlock pattern (snapshot seq,
+ * read, snapshot seq again, retry-or-bail) keeps the malloc/free
+ * fast path off the region mutex on the typical case where reads
+ * vastly outnumber writes. */
+int v8m_page_heap_owns_fast(const void *ptr)
+{
+	if (ptr == NULL) {
+		return 0;
+	}
+	uintptr_t addr = (uintptr_t)ptr;
+	for (int retry = 0; retry < 4; retry++) {
+		/* seq1 acquire pairs with the writer's seq release on
+		 * its second bump (transition odd -> even). */
+		uint64_t seq1 =
+		    atomic_load_explicit(&g_region_seq, memory_order_acquire);
+		if ((seq1 & 1U) != 0U) {
+			continue; /* writer in progress */
+		}
+		/* The array reads below must happen between the two seq
+		 * snapshots. The acquire fence pairs with the writer's
+		 * release-store on the seq counter so the compiler /
+		 * CPU cannot reorder the array reads past either
+		 * snapshot. */
+		size_t count = g_region_count;
+		bool owned = false;
+		size_t low = 0;
+		size_t high = count;
+		while (low < high) {
+			size_t mid = low + ((high - low) >> 1U);
+			if (g_regions[mid].start <= addr) {
+				low = mid + 1;
+			} else {
+				high = mid;
+			}
+		}
+		if (low > 0 && low <= count) {
+			const struct region_entry *region = &g_regions[low - 1];
+			owned = addr >= region->start && addr < region->end;
+		}
+		atomic_thread_fence(memory_order_acquire);
+		uint64_t seq2 =
+		    atomic_load_explicit(&g_region_seq, memory_order_relaxed);
+		if (seq1 == seq2) {
+			return owned ? 1 : 0;
+		}
+	}
+	return -1; /* race-bound — caller falls back to slow owns */
 }
 
 bool v8m_page_heap_owns(const void *ptr)

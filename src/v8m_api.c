@@ -746,7 +746,57 @@ static void debug_clear_double_free_record(const void *ptr)
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 }
 
+/* Slow-path free body used when the inlined fast path can't take
+ * the shortcut (NULL, bootstrap/signal-safe pointer, dispatch
+ * not ready, DEBUG mode, foreign pointer, large class, bin
+ * overflow, or seqlock retry-bound). */
+static void v8m_free_slow(void *ptr);
+
 __attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
+{
+	/* Fast path: lock-free owns check via seqlock → page mask →
+	 * meta magic → bin push. Hits the typical "freshly allocated
+	 * slab object freed by the same thread, default config" case
+	 * in ~5 ns including the owns check. Falls through on any
+	 * miss so the slow body covers the safety-critical and
+	 * less-common paths (bootstrap/signal-safe pointers, libc
+	 * forwarding, DEBUG-mode double-free detector, lifetime
+	 * tracker, large/buddy free). */
+	if (__builtin_expect(ptr != NULL, 1)) {
+		struct v8m_thread_cache *cache = v8m_t_cache;
+		int owned = v8m_page_heap_owns_fast(ptr);
+		if (__builtin_expect(cache != NULL && owned == 1, 1)) {
+			const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
+			if (__builtin_expect(
+				v8m_page_meta_valid(meta) &&
+				    meta->size_class < V8M_MEDIUM_FIRST_CLASS &&
+				    meta->arena_id == V8M_ARENA_DEFAULT &&
+				    v8m_config_get(V8M_OPT_DEBUG) == 0 &&
+				    v8m_config_get(V8M_OPT_LIFETIME_TRACKING) ==
+					0,
+				1)) {
+				/* Skip fast path when the push would
+				 * overflow — the slow path handles the
+				 * batch flush back to the L2 / slab pool.
+				 * Pushing here AND then taking the slow
+				 * path would double-enqueue ptr and
+				 * corrupt the bin / L2 chain. */
+				uint32_t cls = meta->size_class;
+				if (__builtin_expect(
+					cache->bin_count[cls] + 1U <
+					    cache->bin_capacity[cls],
+					1)) {
+					(void)v8m_thread_cache_free_inline(
+					    cache, cls, ptr);
+					return;
+				}
+			}
+		}
+	}
+	v8m_free_slow(ptr);
+}
+
+static void v8m_free_slow(void *ptr)
 {
 	if (ptr == NULL) {
 		return;

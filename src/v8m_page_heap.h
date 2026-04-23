@@ -219,6 +219,17 @@ void v8m_page_heap_anchor_destroy_for_test(void);
 bool v8m_page_heap_owns(const void *ptr);
 
 /*
+ * Lock-free variant of v8m_page_heap_owns used by the malloc/free
+ * fast paths. Returns 1 (owned), 0 (foreign), or -1 (snapshot
+ * raced with a writer — caller must fall back to v8m_page_heap_owns).
+ * Implemented with a seqlock on the region map: writers bump a
+ * counter twice per modification, readers retry until they get a
+ * stable snapshot. Skips the region mutex entirely on the common
+ * case where reads vastly outnumber registers/unregisters.
+ */
+int v8m_page_heap_owns_fast(const void *ptr);
+
+/*
  * Number of regions currently in the region map. Useful to glibc-
  * compat reporters (mallinfo / mallinfo2) that need a "mmapped
  * regions" count — mmap_calls - munmap_calls cannot be used for

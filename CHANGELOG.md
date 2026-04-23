@@ -74,6 +74,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- **Inlined free fast path.** `v8m_free` now contains a TLC bin-
+  push fast path that skips the dispatcher mutex on the typical
+  "freshly allocated slab object freed by the same thread" case.
+  Safety hinges on the new lock-free
+  `v8m_page_heap_owns_fast()` ownership check (see below) so the
+  fast path can verify the pointer is v8malloc-owned without
+  taking the region-map mutex. Skips when the bin would overflow
+  (slow path handles the batch flush) or when `V8M_OPT_DEBUG` /
+  `V8M_OPT_LIFETIME_TRACKING` are on (those need the slow path's
+  bookkeeping).
+
+- **Lock-free `v8m_page_heap_owns_fast()`.** Seqlock pattern over
+  the region map: writers (register / unregister) bump
+  `g_region_seq` twice per modification (odd = mid-update, even =
+  stable); readers snapshot seq before + after the binary search
+  with an `atomic_thread_fence(memory_order_acquire)` between, and
+  retry until they get a stable snapshot. Returns 1 (owned), 0
+  (foreign), or -1 (snapshot raced — caller falls back to
+  mutex-protected `v8m_page_heap_owns`). Skips the region mutex
+  on the hot path where reads vastly outnumber registers.
+
 - **Inlined malloc fast path.** `v8m_malloc` now contains the
   TLC bin-pop fast path inline (via the new
   `v8m_thread_cache_alloc_inline` in `v8m_thread_cache.h` and the
