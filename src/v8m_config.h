@@ -20,6 +20,7 @@
 #ifndef V8M_CONFIG_H
 #define V8M_CONFIG_H
 
+#include <stdatomic.h>
 #include <stdint.h>
 
 /*
@@ -41,8 +42,24 @@ void v8m_config_init(void);
 /*
  * Set / get a tunable. Returns 0 on success, -1 if `opt` is
  * out-of-range. v8m_config_get on an out-of-range option returns 0.
+ *
+ * `v8m_config_get` is `static inline` so the malloc fast path's
+ * config checks (LIFETIME_TRACKING, DEBUG, etc.) collapse to a
+ * single relaxed-atomic load — no function call, no PLT trampoline,
+ * no v8m_config_get stack frame on the hot path. The backing array
+ * is a non-static extern so the inline can reach it from any TU.
  */
+extern _Atomic int64_t v8m_config_values[V8M_OPT_COUNT];
+
 int v8m_config_set(enum v8m_option opt, int64_t value);
-int64_t v8m_config_get(enum v8m_option opt);
+
+static inline int64_t v8m_config_get(enum v8m_option opt)
+{
+	if ((unsigned)opt >= (unsigned)V8M_OPT_COUNT) {
+		return 0;
+	}
+	return atomic_load_explicit(&v8m_config_values[opt],
+				    memory_order_relaxed);
+}
 
 #endif /* V8M_CONFIG_H */

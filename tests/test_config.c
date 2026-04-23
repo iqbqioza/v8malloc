@@ -174,9 +174,13 @@ static int check_out_of_range(void)
 	if (v8m_config_set((enum v8m_option) - 1, 1) != -1) {
 		return fail("set with negative opt did not return -1");
 	}
+	/* cppcheck-suppress knownConditionTrueFalse
+	 * — the inline `v8m_config_get` lets cppcheck constant-fold
+	 *   the bounds check; the test still verifies the contract. */
 	if (v8m_config_get((enum v8m_option)V8M_OPT_COUNT) != 0) {
 		return fail("get with out-of-range opt did not return 0");
 	}
+	/* cppcheck-suppress knownConditionTrueFalse */
 	if (v8m_config_get((enum v8m_option) - 1) != 0) {
 		return fail("get with negative opt did not return 0");
 	}

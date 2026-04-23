@@ -74,6 +74,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- `v8m_config_get` is now `static inline` in `src/v8m_config.h`
+  (with the backing atomic array exposed as a non-static extern).
+  The hot path's repeated `v8m_config_get(V8M_OPT_LIFETIME_TRACKING)`
+  / `_DEBUG` / etc. checks collapse to a single relaxed-atomic load
+  — no function call, no PLT trampoline. Saves ~3-5 ns per malloc
+  on the default-config path.
+
 - Build with `-ftls-model=initial-exec` so the per-thread cache
   (`__thread t_cache` etc.) reads land on the direct `%fs`-relative
   load (~3 cycles) instead of the general-dynamic

@@ -47,7 +47,10 @@ static const char *const v8m_config_env_names[V8M_OPT_COUNT] = {
     [V8M_OPT_LIFETIME_TRACKING] = "V8M_LIFETIME_TRACKING",
 };
 
-static _Atomic int64_t v8m_config_values[V8M_OPT_COUNT];
+/* Storage for the inline `v8m_config_get` in the header. Defined
+ * here once so multiple TUs that use the inline share the same
+ * backing array. */
+_Atomic int64_t v8m_config_values[V8M_OPT_COUNT];
 
 /*
  * Parse `text` as a base-10 signed integer. Returns true and writes
@@ -104,11 +107,5 @@ int v8m_config_set(enum v8m_option opt, int64_t value)
 	return 0;
 }
 
-int64_t v8m_config_get(enum v8m_option opt)
-{
-	if ((unsigned)opt >= (unsigned)V8M_OPT_COUNT) {
-		return 0;
-	}
-	return atomic_load_explicit(&v8m_config_values[opt],
-				    memory_order_relaxed);
-}
+/* `v8m_config_get` is defined inline in the header so the hot
+ * path collapses to a single relaxed-atomic load. */
