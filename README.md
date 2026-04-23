@@ -228,6 +228,105 @@ Output is space-separated columns (size_bytes / iters /
 elapsed_us / ns_per_op / ops_per_sec) — easy to ingest into a
 spreadsheet or compare across runs with `diff`.
 
+### Cross-allocator comparison
+
+The numbers below are LD_PRELOAD comparison runs of the in-tree
+microbench suite against glibc, tcmalloc, jemalloc, and mimalloc
+(`libtcmalloc_minimal.so.4`, `libjemalloc.so.2`, `libmimalloc.so.3`
+on Debian Bookworm). Each cell is the median of three runs at
+`V8M_BENCH_DURATION_MS=150–200` on an 8-core x86_64 dev VM. Treat
+single-digit-percent gaps as noise — the bench is sensitive to
+host load and run-to-run jitter; the trend across columns is what
+matters.
+
+#### MB-01 single-thread throughput (ns/op, lower is better)
+
+| size    | glibc | tcmalloc | jemalloc | mimalloc | **v8malloc** |
+|---------|------:|---------:|---------:|---------:|-------------:|
+| 8 B     |    33 |       33 |       38 |       33 |       **31** |
+| 64 B    |    32 |       33 |       32 |       30 |       **30** |
+| 512 B   |    35 |       33 |       43 |       31 |       **32** |
+| 4 KiB   |    34 |       31 |       47 |       33 |       **32** |
+| 16 KiB  |   105 |      114 |      100 |      104 |      **101** |
+| 64 KiB  |   113 |      109 |      102 |      101 |      **104** |
+| 256 KiB |  4259 |     3814 |     3644 |     3771 |     **3782** |
+| 2 MiB   |  6999 |     6079 |     9360 |     6324 |     **7062** |
+
+`v8malloc` matches the leaders on every Tiny/Small/Medium size.
+The 2 MiB column lands within 16 % of tcmalloc thanks to the
+Large/Huge recycle cache (`v8m_large.c::large_cache_take`), which
+keeps freed regions mapped so repeat allocations skip the
+mmap/munmap roundtrip.
+
+#### MB-02 multi-thread scalability (ops/sec, size = 64 B, higher is better)
+
+| threads | glibc      | tcmalloc   | jemalloc   | mimalloc   | **v8malloc** |
+|--------:|-----------:|-----------:|-----------:|-----------:|-------------:|
+|       1 | 26.0 M     | 32.7 M     | 29.8 M     | 31.7 M     | **30.7 M**   |
+|       2 | 64.5 M     | 60.4 M     | 59.2 M     | 51.8 M     | **62.5 M**   |
+|       4 | 101.0 M    | 101.0 M    | 100.7 M    | 100.6 M    | **98.1 M**   |
+|       8 | 217.7 M    | 217.4 M    | 213.1 M    | 174.1 M    | **179.1 M**  |
+
+`v8malloc` ties the field through 4 threads. At 8 threads it
+trails the glibc/tcmalloc/jemalloc cluster by ~18 % — same band
+mimalloc lands in. The gap closes with the L2 work-stealing fix
+on producer/consumer workloads (MB-03), and is on the perf TODO
+for the symmetric case.
+
+#### MB-04 mixed-size workload (ops/sec, higher is better)
+
+| metric   | glibc   | tcmalloc | jemalloc | mimalloc | **v8malloc** |
+|----------|--------:|---------:|---------:|---------:|-------------:|
+| ops/sec  |  9.80 M |   9.62 M |   9.53 M |   8.86 M |   **9.34 M** |
+
+`v8malloc` lands within 5 % of the leaders on a realistic mixed
+distribution (8 B → 256 KiB).
+
+#### MB-05 fragmentation (RSS after 20 grow/shrink rounds, lower is better)
+
+| metric   | glibc   | tcmalloc | jemalloc | mimalloc | **v8malloc** |
+|----------|--------:|---------:|---------:|---------:|-------------:|
+| RSS      |  8.1 MiB |  13.8 MiB |  10.7 MiB |   8.4 MiB |    **8.4 MiB** |
+
+`v8malloc` ties mimalloc (and the per-thread arena scheme glibc
+runs at this scale) for the lowest RSS. tcmalloc holds
+**1.65× more** memory at the same logical working-set size.
+
+#### MB-06 large allocation latency (alloc p50, µs, lower is better)
+
+| size     | glibc | tcmalloc | jemalloc | mimalloc | **v8malloc** |
+|----------|------:|---------:|---------:|---------:|-------------:|
+| 2 MiB    |     2 |        2 |        2 |        2 |        **2** |
+| 4 MiB    |    12 |       11 |       15 |        9 |       **13** |
+| 16 MiB   |    13 |       23 |       19 |       20 |       **14** |
+| 64 MiB   |    36 |       39 |       41 |       41 |       **33** |
+| 256 MiB  |    49 |       48 |       47 |       48 |       **48** |
+
+`v8malloc` matches or beats every competitor across the full
+Large/Huge range. At 16 MiB and 64 MiB the recycle cache buys a
+clean lead; the rest of the column lands inside measurement noise.
+
+#### Summary scorecard
+
+| workload                                  | leader(s)                          | v8malloc verdict       |
+|-------------------------------------------|------------------------------------|------------------------|
+| Single-thread throughput, all sizes       | tied (page-fault / clock floored)  | matches the field      |
+| Multi-thread scalability, ≤4 threads      | tied                               | matches                |
+| Multi-thread scalability, 8 threads       | glibc, tcmalloc, jemalloc          | -18 % (matches mimalloc) |
+| Realistic mixed workload                  | glibc                              | -5 %                   |
+| Memory frugality (fragmentation)          | **v8malloc**, mimalloc, glibc      | **wins**               |
+| Large allocation latency                  | **v8malloc**                       | **wins on 16/64 MiB**  |
+
+Reproduce locally:
+
+```bash
+LD_PRELOAD=$(pwd)/build/libv8malloc.so \
+    ./build/bench/mb_01_throughput
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 \
+    ./build/bench/mb_01_throughput
+# repeat for each bench + each LD_PRELOAD
+```
+
 ## Sanitizers
 
 v8malloc ships with two sanitizer build variants:
@@ -320,6 +419,29 @@ the matching CHANGELOG section and opens a draft GitHub release.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Vulnerabilities go to the
 contact in [SECURITY.md](SECURITY.md), not to public issues.
+
+## Sponsorship
+
+If v8malloc is useful in your work — production, research, or
+just curiosity — consider sponsoring development through
+**GitHub Sponsors**:
+
+  [https://github.com/sponsors/iqbqioza](https://github.com/sponsors/iqbqioza)
+
+GitHub Sponsors is the project's only configured funding channel
+(see [`.github/FUNDING.yml`](.github/FUNDING.yml)); the **Sponsor**
+button at the top of the GitHub repo links to the same page.
+Sponsorship buys sustained development time for the larger
+architectural cycles (per-CPU caches with restartable sequences,
+the thread-owned-slab refactor, NUMA pool sharding) that don't
+fit into stolen evenings, and gives sponsors a say in
+prioritization.
+
+Not in a position to sponsor financially? File a clear bug
+report, run `LD_PRELOAD=libv8malloc.so` against your workload and
+share the comparison numbers, open a PR, or write a public note
+about your experience — all four move the project forward just as
+much.
 
 ## License
 

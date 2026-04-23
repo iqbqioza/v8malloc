@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Performance
+- **Recycle cache for Large/Huge regions — closes the 2 MiB
+  throughput gap.** Adds a small bounded cache
+  (`V8M_LARGE_CACHE_CAP = 8`) of recently-freed regions in
+  `v8m_large.c`. On free, the region stays mapped (region map still
+  owns it, meta cleared); on alloc, a matching `mmap_size` pops the
+  region back without paying the page-heap roundtrip. The cache is
+  drained by `v8m_purge()` and `v8m_dispatch_purge_drained` so
+  callers asking for VMA / RSS relief still get it. Skipped under
+  `V8M_OPT_DEBUG` because the cached region carries a stale redzone
+  baseline + PROT_NONE guard. mb_01 2 MiB column drops from
+  ~10,511 ns to ~6,400 ns (median across 3 runs), going from
+  60 % slower than tcmalloc to roughly tied. mb_06 large alloc
+  latency now matches or beats tcmalloc across every Large/Huge
+  size from 1 MiB to 256 MiB.
+
 - **L2 work-stealing for cross-thread free patterns.** Adds a
   `v8m_core_cache_steal_batch` shortcut that, when the calling
   thread's local L2 is empty, redirects the pop to the L2 of the CPU

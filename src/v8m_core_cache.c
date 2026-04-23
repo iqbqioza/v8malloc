@@ -157,20 +157,39 @@ bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
 			&cache->stacks[cls], &old_head, new_head,
 			memory_order_release, memory_order_acquire)) {
 			/* Publish this CPU as the donor hint for future
-			 * cross-CPU steals. The producer/consumer pattern
-			 * leaves consumer CPUs hoarding slots in their L2
-			 * while producer CPUs starve to the slab pool's
-			 * mutex; the hint lets the producer's underflow
-			 * path find the consumer's stack in O(1) instead of
-			 * scanning. Relaxed-atomic is sufficient — a stale
-			 * read just means the steal targets the wrong CPU
-			 * (likely-empty stack, fall-through to slab pool,
-			 * same outcome as no steal). */
-			uint32_t cpu = v8m_numa_current_cpu();
-			if (cpu < V8M_NUMA_MAX_CPUS) {
-				atomic_store_explicit(&g_last_push_cpu[cls],
-						      cpu,
-						      memory_order_relaxed);
+			 * cross-CPU steals. Two contention concerns the
+			 * gating here addresses:
+			 *
+			 *   1. Symmetric multi-thread workloads (every
+			 *      thread allocs+frees, like mb_02) have N
+			 *      CPUs all push_batch'ing for the same class.
+			 *      A blind store on every push would ping-pong
+			 *      the hint cache line between all N — measured
+			 *      18 % throughput regression at 8 threads
+			 *      before the gate landed.
+			 *
+			 *   2. The producer/consumer workloads the steal
+			 *      targets (mb_03) have one consumer pushing
+			 *      repeatedly for a class — once the hint is
+			 *      set, every subsequent push observes the
+			 *      same value and the store is wasted.
+			 *
+			 * Sample 1 in 64 pushes via a per-thread counter:
+			 * cuts the cross-CPU invalidation rate by 64×
+			 * while still letting the hint catch up to a new
+			 * producer within ~64 pushes. Relaxed-atomic is
+			 * sufficient — a stale read just means the steal
+			 * targets the wrong CPU (likely-empty stack,
+			 * fall-through to slab pool, same outcome as no
+			 * steal). */
+			static __thread uint32_t t_push_sample_count;
+			if ((t_push_sample_count++ & 63U) == 0U) {
+				uint32_t cpu = v8m_numa_current_cpu();
+				if (cpu < V8M_NUMA_MAX_CPUS) {
+					atomic_store_explicit(
+					    &g_last_push_cpu[cls], cpu,
+					    memory_order_relaxed);
+				}
 			}
 			return true;
 		}

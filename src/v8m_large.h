@@ -135,4 +135,15 @@ struct v8m_large_stats {
  */
 void v8m_large_get_stats(struct v8m_large_stats *out);
 
+/*
+ * Drain every cached Large/Huge region back to the page heap. Each
+ * cache entry holds a region the most recent free decided to keep
+ * mapped (skipping the munmap so a follow-on alloc of matching
+ * size can reuse it without an mmap roundtrip). The drain releases
+ * those regions for callers asking for VMA / RSS relief — wired
+ * into v8m_purge() and v8m_dispatch_purge_drained(). Returns the
+ * number of regions released.
+ */
+size_t v8m_large_cache_drain(void);
+
 #endif /* V8M_LARGE_H */

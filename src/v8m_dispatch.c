@@ -568,6 +568,7 @@ size_t v8m_dispatch_purge_drained(struct v8m_dispatch *dispatch)
 		released +=
 		    v8m_slab_pool_purge_drained(&dispatch->slab_lifetime[i]);
 	}
+	released += v8m_large_cache_drain();
 	return released;
 }
 

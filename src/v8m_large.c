@@ -7,6 +7,7 @@
  */
 
 #include <assert.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -187,6 +188,127 @@ static void large_check_redzone(const unsigned char *user_ptr,
 #define V8M_LARGE_GIGANTIC_ALIGN ((size_t)1024 * 1024 * 1024)
 
 /*
+ * Huge/Large recycle cache. Recently-freed regions stay mapped
+ * (region map still owns them, meta cleared) so a follow-on
+ * allocation of the matching mmap_size can pop from here instead
+ * of paying mmap + munmap + page-fault on every iteration. This is
+ * the v0 deferred-decommit cousin of tcmalloc's huge-page pool.
+ *
+ * Why it matters: mb_01's 2 MiB column was 60 % slower than
+ * tcmalloc because every iteration was a fresh mmap (with
+ * MAP_HUGETLB attempt) plus a fresh munmap (with TLB shootdown).
+ * tcmalloc keeps the region around. The cache below keeps it the
+ * same way — each cached entry holds the original mmap_size + the
+ * region pointer; the region map still considers the region owned
+ * (we never call v8m_page_heap_free on cached entries), so
+ * v8m_page_heap_owns continues to return true.
+ *
+ * Capacity bounds the worst-case retained virtual address space at
+ * V8M_LARGE_CACHE_CAP × max_cached_mmap_size. With the cap below
+ * (8 entries) and a typical 2 MiB Huge alloc that's 16 MiB; a
+ * pathological caller that frees a single 256 MiB Huge fills one
+ * slot and bounds at 256 MiB. Eviction is FIFO: the oldest entry
+ * is munmap'd when a free wants to push into a full cache.
+ *
+ * Concurrency: single mutex serialises both alloc-pop and free-push.
+ * The cache is the cold path's penultimate step (alloc) / first
+ * step (free), so the lock cost is amortised against the syscall
+ * cost it replaces.
+ */
+#define V8M_LARGE_CACHE_CAP 8
+
+struct large_cache_entry {
+	void *region;
+	size_t mmap_size;
+};
+
+static struct large_cache_entry g_large_cache[V8M_LARGE_CACHE_CAP];
+static size_t g_large_cache_count;
+/* NOLINTNEXTLINE(misc-include-cleaner) — pthread.h is included above */
+static pthread_mutex_t g_large_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Pop a cached region matching `mmap_size`. Returns NULL on miss
+ * (no entry of that size in the cache) so the caller falls through
+ * to v8m_page_heap_alloc. Linear scan over the bounded array is
+ * O(CAP). */
+static void *large_cache_take(size_t mmap_size)
+{
+	void *result = NULL;
+	(void)pthread_mutex_lock(&g_large_cache_lock);
+	for (size_t i = 0; i < g_large_cache_count; i++) {
+		if (g_large_cache[i].mmap_size == mmap_size) {
+			result = g_large_cache[i].region;
+			/* Compact: replace this slot with the last
+			 * entry, drop the count by one. Order doesn't
+			 * matter for FIFO-with-LIFO-by-size semantics
+			 * — the eviction policy only fires when full,
+			 * and the test is "any matching size", so the
+			 * compaction is a safe O(1) drop. */
+			g_large_cache_count--;
+			if (i < g_large_cache_count) {
+				g_large_cache[i] =
+				    g_large_cache[g_large_cache_count];
+			}
+			break;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_large_cache_lock);
+	return result;
+}
+
+/* Drain every cached region back to the page heap. Called from
+ * v8m_purge so callers asking for VMA / RSS relief actually get it
+ * (the cache otherwise hoards regions across an indefinite tail).
+ * Returns the number of regions released. */
+size_t v8m_large_cache_drain(void)
+{
+	struct large_cache_entry snapshot[V8M_LARGE_CACHE_CAP];
+	size_t snapshot_count = 0;
+	(void)pthread_mutex_lock(&g_large_cache_lock);
+	for (size_t i = 0; i < g_large_cache_count; i++) {
+		snapshot[i] = g_large_cache[i];
+	}
+	snapshot_count = g_large_cache_count;
+	g_large_cache_count = 0;
+	(void)pthread_mutex_unlock(&g_large_cache_lock);
+	for (size_t i = 0; i < snapshot_count; i++) {
+		v8m_page_heap_free(snapshot[i].region, snapshot[i].mmap_size);
+	}
+	return snapshot_count;
+}
+
+/* Push a region into the cache. Returns NULL on success (caller
+ * must NOT munmap the region), or the original region pointer
+ * (with `out_evicted_size` set to the matching mmap_size) when the
+ * cache was full and the oldest entry was evicted to make room —
+ * the caller then munmaps the evicted entry to release VMAs.
+ *
+ * The "evicted entry returned via out parameters" pattern keeps
+ * the syscall outside the lock. */
+static void *large_cache_put(void *region, size_t mmap_size,
+			     size_t *out_evicted_size)
+{
+	void *evicted = NULL;
+	*out_evicted_size = 0;
+	(void)pthread_mutex_lock(&g_large_cache_lock);
+	if (g_large_cache_count == V8M_LARGE_CACHE_CAP) {
+		/* Evict the oldest (slot 0). Shift the rest down by one.
+		 * O(CAP) is fine — CAP is 8. */
+		evicted = g_large_cache[0].region;
+		*out_evicted_size = g_large_cache[0].mmap_size;
+		for (size_t i = 1; i < g_large_cache_count; i++) {
+			g_large_cache[i - 1] = g_large_cache[i];
+		}
+		g_large_cache_count--;
+	}
+	g_large_cache[g_large_cache_count].region = region;
+	g_large_cache[g_large_cache_count].mmap_size = mmap_size;
+	g_large_cache_count++;
+	(void)pthread_mutex_unlock(&g_large_cache_lock);
+	return evicted;
+}
+
+/*
  * Shared backend used by v8m_large_alloc / v8m_large_alloc_aligned.
  * `header_offset` places the user pointer; `pheap_alignment` is
  * the alignment requested from the page heap (always >=
@@ -233,9 +355,22 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 		mmap_size += guard_bytes;
 	}
 
-	void *region = v8m_page_heap_alloc(mmap_size, pheap_alignment);
+	/* Recycle a cached region of matching mmap_size before paying
+	 * for a fresh page-heap mmap. Skipped under DEBUG: a cached
+	 * region's PROT_NONE guard page would still be in place from
+	 * the prior allocation, which is benign — but the redzone
+	 * canary check at free time was based on the prior alloc's
+	 * `requested_size`, so reusing under DEBUG would mis-bound the
+	 * window. Easier to just skip the cache when DEBUG is on. */
+	void *region = NULL;
+	if (!guard_on) {
+		region = large_cache_take(mmap_size);
+	}
 	if (region == NULL) {
-		return NULL;
+		region = v8m_page_heap_alloc(mmap_size, pheap_alignment);
+		if (region == NULL) {
+			return NULL;
+		}
 	}
 
 	if (guard_on) {
@@ -385,6 +520,22 @@ void v8m_large_free(const void *obj)
 					  memory_order_relaxed);
 	}
 
+	/* Stash the region in the recycle cache so a follow-on alloc of
+	 * the same mmap_size can skip the page-heap roundtrip. Skipped
+	 * under DEBUG (the cached region carries a PROT_NONE guard +
+	 * stale redzone-baseline that would mismatch the next alloc's
+	 * `requested_size`). On cache-full, the oldest entry is evicted
+	 * here and we munmap that one instead — keeps the steady-state
+	 * VMA count bounded. */
+	if (meta->guard_bytes == 0U) {
+		size_t evicted_size = 0;
+		void *evicted =
+		    large_cache_put(common, mmap_size, &evicted_size);
+		if (evicted != NULL) {
+			v8m_page_heap_free(evicted, evicted_size);
+		}
+		return;
+	}
 	v8m_page_heap_free(common, mmap_size);
 }
 

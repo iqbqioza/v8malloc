@@ -177,6 +177,13 @@ int main(void)
 	for (int i = WORKING_SET_COUNT / 2; i < WORKING_SET_COUNT; i++) {
 		free(working_set[i]);
 	}
+	/* Drain the Large/Huge recycle cache so the residual check
+	 * below sees a true post-free baseline. The cache (see
+	 * v8m_large.c::large_cache_take) keeps freed Large regions
+	 * mapped for follow-on alloc reuse — that's a deliberate
+	 * speed/RSS trade-off for production, but for this leak-check
+	 * test we want the bytes truly returned. */
+	(void)v8m_purge();
 
 	struct v8m_stats end = {0};
 	v8m_get_stats(&end);

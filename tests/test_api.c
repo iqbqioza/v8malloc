@@ -547,6 +547,14 @@ static int check_v8m_option_api(void)
 
 static int check_v8m_stats_api(void)
 {
+	/* Drain any cached Large/Huge regions from earlier test phases
+	 * so the live_regions delta below reflects this phase's malloc
+	 * rather than a cached reuse. The Large/Huge recycle cache (see
+	 * v8m_large.c::large_cache_take) keeps freed regions mapped so a
+	 * matching-size follow-on alloc skips the page-heap roundtrip;
+	 * for this stats-API check we want a fresh mmap. */
+	(void)v8m_purge();
+
 	struct v8m_stats before = {0};
 	v8m_get_stats(&before);
 
@@ -610,6 +618,16 @@ static int check_soft_limit_blocks_alloc(void)
 	if (v8m_get_soft_limit() != 0U) {
 		return fail("soft limit nonzero before any setter");
 	}
+
+	/* Drain the Large/Huge recycle cache so the limit-vs-live-bytes
+	 * arithmetic below isn't pre-loaded with cached regions a
+	 * concurrent purge could free under our feet. The cache (see
+	 * v8m_large.c::large_cache_take) keeps freed Large/Huge regions
+	 * mapped — they count against live_bytes until purge drains
+	 * them — so without this drain the gate's purge-and-retry path
+	 * could free enough to admit the alloc the test expects to be
+	 * blocked. */
+	(void)v8m_purge();
 
 	/* Consume some real bytes first so live_bytes is well above
 	 * zero, then plant a limit that the next allocation must
