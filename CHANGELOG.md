@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Refactor: split self-contained diagnostic surface into
+  `src/v8m_api_diag.c`.** The five exported diagnostics that
+  don't touch the dispatcher singleton —
+  `v8m_install_size_class_table`, `v8m_size_class_to_bytes`,
+  `v8m_get_arch_info`, `v8m_option_name`,
+  `v8m_estimate_lifetime`, `v8m_count_vmas` (and the static
+  `api_arch_name` + `g_option_names` table) — move to a new TU.
+  v8m_api.c shrinks 1462 → 1364 lines; the new TU is 160 lines.
+  `g_dispatch`-coupled diagnostics (`v8m_get_stats`,
+  `v8m_get_huge_stats`, `v8m_get_thread_stats`, the slab
+  breakdown, lifetime stats, NUMA balance, frag metrics,
+  ptr_info, validate_internal_state) stay in v8m_api.c — moving
+  them would require exposing the dispatcher singleton via an
+  accessor, more churn than payoff. Public ABI preserved; every
+  symbol verified via `nm -D libv8malloc.so`.
+
 - **Refactor: extract `pre_alloc_soft_limit_gate` +
   `post_alloc_record` helpers from `do_malloc_pc` +
   `do_aligned_alloc_pc`.** The previous cycle's bug fix
