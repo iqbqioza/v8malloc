@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h> /* fprintf for v8m_slab_pool_validate */
 
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node */
@@ -560,4 +561,33 @@ uint32_t v8m_slab_pool_drained_count(struct v8m_slab_pool *pool)
 	uint32_t count = pool->drained_count;
 	(void)pthread_mutex_unlock(&pool->lock);
 	return count;
+}
+
+int v8m_slab_pool_validate(struct v8m_slab_pool *pool)
+{
+	if (pool == NULL) {
+		return 0;
+	}
+	int issues = 0;
+	(void)pthread_mutex_lock(&pool->lock);
+	if (pool->drained_count > V8M_SLAB_DRAINED_CAP) {
+		(void)fprintf(stderr,
+			      "v8m_validate: slab pool drained_count=%u "
+			      "exceeds cap=%u\n",
+			      pool->drained_count,
+			      (unsigned int)V8M_SLAB_DRAINED_CAP);
+		issues++;
+	}
+	for (uint32_t i = 0;
+	     i < pool->drained_count && i < V8M_SLAB_DRAINED_CAP; i++) {
+		if (pool->drained[i] == NULL) {
+			(void)fprintf(stderr,
+				      "v8m_validate: slab pool drained slot "
+				      "%u is NULL below count\n",
+				      i);
+			issues++;
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
+	return issues;
 }

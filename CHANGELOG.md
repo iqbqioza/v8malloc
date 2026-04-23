@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Public `v8m_validate_internal_state()` debug helper. Walks the
+  page-heap region map (sort + non-overlap), the buddy pool's
+  arena array (drained-implies-in-use, in_use-implies-arena_base),
+  and every slab pool's drained cache (count <= cap, no NULL
+  entries below count) — including all four lifetime arenas.
+  Returns the count of invariant violations detected; each
+  violation prints a one-line diagnostic to stderr so a fuzzer
+  that runs the validator after every operation can capture the
+  offending state. Backed by three new internal helpers:
+  `v8m_page_heap_validate`, `v8m_buddy_pool_validate`,
+  `v8m_slab_pool_validate`. Pre-init returns 0. Exported under
+  V8MALLOC_1.0; coverage in
+  `tests/test_api.c::check_validate_internal_state_api` (rest +
+  post-workload assert 0 issues).
+
+### Added
 - riscv64 `riscv_hwprobe()` ISA query for Zbb / Zacas detection
   (resolution of the riscv64 follow-on note in TODO.md §Phase 3).
   New `v8m_arch_has_zbb()` + `v8m_arch_has_zacas()` probe via the

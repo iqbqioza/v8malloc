@@ -202,6 +202,15 @@ size_t v8m_slab_pool_purge_drained(struct v8m_slab_pool *pool);
 uint32_t v8m_slab_pool_drained_count(struct v8m_slab_pool *pool);
 
 /*
+ * Walk the pool's drained-cache state and check that the count
+ * stays inside the cap and that the entries below `drained_count`
+ * are non-NULL. Returns the number of violations detected; each
+ * violation prints a one-line diagnostic to stderr. Used by
+ * `v8m_validate_internal_state`.
+ */
+int v8m_slab_pool_validate(struct v8m_slab_pool *pool);
+
+/*
  * Initialize the global per-NUMA huge-page pool that sources slab
  * pages for any v8m_slab_pool instance with `use_numa_pool` set.
  * Returns 0 on success or a negative errno on init failure.

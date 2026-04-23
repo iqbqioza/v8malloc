@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h> /* fprintf for v8m_page_heap_validate diagnostics */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -420,6 +421,44 @@ size_t v8m_page_heap_live_region_count(void)
 	size_t count = g_region_count;
 	(void)pthread_mutex_unlock(&g_region_lock);
 	return count;
+}
+
+int v8m_page_heap_validate(void)
+{
+	int issues = 0;
+	(void)pthread_mutex_lock(&g_region_lock);
+	for (size_t i = 1; i < g_region_count; i++) {
+		const struct region_entry *prev = &g_regions[i - 1U];
+		const struct region_entry *cur = &g_regions[i];
+		if (cur->start < prev->start) {
+			(void)fprintf(
+			    stderr,
+			    "v8m_validate: region map unsorted at "
+			    "index %zu (prev.start=%lx cur.start=%lx)\n",
+			    i, (unsigned long)prev->start,
+			    (unsigned long)cur->start);
+			issues++;
+		}
+		if (cur->start < prev->end) {
+			(void)fprintf(
+			    stderr,
+			    "v8m_validate: regions overlap at "
+			    "index %zu (prev.end=%lx cur.start=%lx)\n",
+			    i, (unsigned long)prev->end,
+			    (unsigned long)cur->start);
+			issues++;
+		}
+		if (cur->start >= cur->end) {
+			(void)fprintf(stderr,
+				      "v8m_validate: region %zu has empty "
+				      "range (start=%lx end=%lx)\n",
+				      i, (unsigned long)cur->start,
+				      (unsigned long)cur->end);
+			issues++;
+		}
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+	return issues;
 }
 
 static bool is_power_of_two(size_t value)

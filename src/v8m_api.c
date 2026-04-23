@@ -1044,6 +1044,20 @@ V8M_EXPORT const char *v8m_option_name(int option_id)
 	return g_option_names[option_id];
 }
 
+V8M_EXPORT int v8m_validate_internal_state(void)
+{
+	if (!dispatch_ready()) {
+		return 0;
+	}
+	int total = v8m_page_heap_validate();
+	total += v8m_buddy_pool_validate(&g_dispatch.buddy);
+	total += v8m_slab_pool_validate(&g_dispatch.slab);
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		total += v8m_slab_pool_validate(&g_dispatch.slab_lifetime[i]);
+	}
+	return total;
+}
+
 V8M_EXPORT int v8m_init_thread(void)
 {
 	if (!dispatch_ready()) {

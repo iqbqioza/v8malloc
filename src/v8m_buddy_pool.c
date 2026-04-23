@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h> /* fprintf for v8m_buddy_pool_validate */
 
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
@@ -259,6 +260,34 @@ void v8m_buddy_pool_get_arena_stats(struct v8m_buddy_pool *pool,
 		}
 	}
 	(void)pthread_mutex_unlock(&pool->lock);
+}
+
+int v8m_buddy_pool_validate(struct v8m_buddy_pool *pool)
+{
+	if (pool == NULL) {
+		return 0;
+	}
+	int issues = 0;
+	(void)pthread_mutex_lock(&pool->lock);
+	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
+		const struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
+		if (slot->drained && !slot->in_use) {
+			(void)fprintf(stderr,
+				      "v8m_validate: buddy arena %u drained "
+				      "without in_use\n",
+				      i);
+			issues++;
+		}
+		if (slot->in_use && slot->buddy.arena_base == NULL) {
+			(void)fprintf(stderr,
+				      "v8m_validate: buddy arena %u in_use "
+				      "with NULL arena_base\n",
+				      i);
+			issues++;
+		}
+	}
+	(void)pthread_mutex_unlock(&pool->lock);
+	return issues;
 }
 
 size_t v8m_buddy_pool_block_size(struct v8m_buddy_pool *pool, const void *ptr)

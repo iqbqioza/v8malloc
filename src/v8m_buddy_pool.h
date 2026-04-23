@@ -133,4 +133,12 @@ struct v8m_buddy_pool_arena_stats {
 void v8m_buddy_pool_get_arena_stats(struct v8m_buddy_pool *pool,
 				    struct v8m_buddy_pool_arena_stats *out);
 
+/*
+ * Walk the arena array and check that every drained slot is also
+ * marked in_use. Returns the number of violations detected; each
+ * violation prints a one-line diagnostic to stderr. Used by
+ * `v8m_validate_internal_state`.
+ */
+int v8m_buddy_pool_validate(struct v8m_buddy_pool *pool);
+
 #endif /* V8M_BUDDY_POOL_H */

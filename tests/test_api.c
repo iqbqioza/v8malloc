@@ -1023,6 +1023,54 @@ static int check_slab_class_breakdown_lifetime_api(void)
 	return 0;
 }
 
+static int check_validate_internal_state_api(void)
+{
+	/* Healthy initial state. */
+	int issues = v8m_validate_internal_state();
+	if (issues != 0) {
+		(void)fprintf(
+		    stderr,
+		    "test_api: v8m_validate_internal_state reported %d "
+		    "issues at rest\n",
+		    issues);
+		return 1;
+	}
+
+	/* After a workload that exercises every backend, the validator
+	 * should still report 0. Drives a quick sweep across slab,
+	 * buddy, and Large to populate the region map + drained caches
+	 * before re-checking. */
+	static const size_t probe_sizes[] = {
+	    8, 64, 512, 4096, 16384, 65536, 262144, (size_t)1024 * 1024,
+	};
+	enum { probe_count = sizeof(probe_sizes) / sizeof(probe_sizes[0]) };
+	void *probes[probe_count];
+	int alloc_failed = 0;
+	for (size_t i = 0; i < probe_count; i++) {
+		probes[i] = malloc(probe_sizes[i]);
+		if (probes[i] == NULL) {
+			alloc_failed = 1;
+		}
+	}
+	for (size_t i = 0; i < probe_count; i++) {
+		free(probes[i]);
+	}
+	if (alloc_failed) {
+		return fail("validate-test alloc returned NULL");
+	}
+
+	issues = v8m_validate_internal_state();
+	if (issues != 0) {
+		(void)fprintf(
+		    stderr,
+		    "test_api: v8m_validate_internal_state reported %d "
+		    "issues after workload\n",
+		    issues);
+		return 1;
+	}
+	return 0;
+}
+
 static int check_option_name_api(void)
 {
 	/* Out-of-range ids return NULL. */
@@ -1271,6 +1319,10 @@ int main(void)
 		return status;
 	}
 	status = check_slab_class_breakdown_lifetime_api();
+	if (status != 0) {
+		return status;
+	}
+	status = check_validate_internal_state_api();
 	if (status != 0) {
 		return status;
 	}

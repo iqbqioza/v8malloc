@@ -42,6 +42,7 @@ V8MALLOC_1.0 {
 		v8m_init_thread;
 		v8m_release_thread;
 		v8m_option_name;
+		v8m_validate_internal_state;
 		v8m_install_size_class_table;
 		v8m_size_class_to_bytes;
 		v8m_get_lifetime_stats;

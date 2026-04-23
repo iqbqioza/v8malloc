@@ -414,6 +414,28 @@ V8M_EXPORT int v8m_release_thread(void);
 V8M_EXPORT const char *v8m_option_name(int option_id);
 
 /*
+ * Debug helper — walks the allocator's internal data structures
+ * and counts invariant violations. Returns the number of issues
+ * detected (0 = healthy). Designed for fuzzing, regression
+ * testing, and support diagnostics; safe to call from any
+ * context that an allocation is safe in.
+ *
+ * Current checks:
+ *   - Page-heap region map is sorted ascending by start address.
+ *   - No two regions overlap.
+ *   - Slab pool drained-cache count stays inside its cap.
+ *   - Buddy pool in_use / drained flags are mutually consistent
+ *     (a drained slot is also in_use).
+ *
+ * On detection, each issue prints a short diagnostic to stderr
+ * (one line per violation) so a fuzzer that runs the validator
+ * after every operation can capture the offending state. The
+ * return value is the line count emitted. Pre-init returns 0
+ * (no state to validate yet).
+ */
+V8M_EXPORT int v8m_validate_internal_state(void);
+
+/*
  * Hot-reload the active size-class size table. Atomically swaps
  * the pointer the slab-init paths read on every fresh-page
  * formatting. Already-allocated pages keep the size baked into

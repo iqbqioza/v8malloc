@@ -241,4 +241,13 @@ bool v8m_page_heap_owns(const void *ptr);
  */
 size_t v8m_page_heap_live_region_count(void);
 
+/*
+ * Walk the region map and check the sort + non-overlap
+ * invariants. Returns the number of violations detected. Each
+ * violation prints a one-line diagnostic to stderr. Used by
+ * `v8m_validate_internal_state` and by ad-hoc fuzz / regression
+ * harnesses; safe to call from any context.
+ */
+int v8m_page_heap_validate(void);
+
 #endif /* V8M_PAGE_HEAP_H */
