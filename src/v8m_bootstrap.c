@@ -44,6 +44,14 @@ static void v8m_bootstrap_oom(void)
 
 void *v8m_bootstrap_alloc(size_t size)
 {
+	/* Reject any size that cannot fit in the bootstrap buffer before
+	 * the round-up, so a near-SIZE_MAX request cannot wrap to a small
+	 * `aligned` and silently hand the caller a 16-byte slot for a
+	 * SIZE_MAX-bytes promise. The buffer is 256 KiB; anything larger
+	 * is a programming error and aborts via the existing OOM path. */
+	if (size > V8M_BOOTSTRAP_SIZE) {
+		v8m_bootstrap_oom();
+	}
 	size_t aligned = (size + (V8M_BOOTSTRAP_ALIGN - 1U)) &
 			 ~(size_t)(V8M_BOOTSTRAP_ALIGN - 1U);
 	if (aligned == 0) {

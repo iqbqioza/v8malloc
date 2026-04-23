@@ -16,6 +16,7 @@
 #include <malloc.h> /* malloc_usable_size */
 #include <signal.h>
 #include <stdatomic.h>
+#include <stddef.h> /* SIZE_MAX */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,6 +146,22 @@ static int check_inside_signal_handler(void)
 	return 0;
 }
 
+static int check_size_overflow_rejected(void)
+{
+	/* A near-SIZE_MAX request must NOT silently round to a 16-byte
+	 * slot — that would let the caller stomp on neighbouring memory
+	 * thinking they had SIZE_MAX bytes. The contract is to return
+	 * NULL on out-of-budget, and any size that cannot fit in the
+	 * emergency buffer (one page) is by definition out of budget. */
+	if (v8m_signal_safe_alloc(SIZE_MAX) != NULL) {
+		return fail("alloc(SIZE_MAX) did not return NULL");
+	}
+	if (v8m_signal_safe_alloc(SIZE_MAX - 8U) != NULL) {
+		return fail("alloc(SIZE_MAX - 8) did not return NULL");
+	}
+	return 0;
+}
+
 static int check_usable_size(void)
 {
 	/* malloc_usable_size on a signal-safe pointer should not
@@ -167,6 +184,7 @@ int main(void)
 	int result = 0;
 	result |= check_basic_alloc();
 	result |= check_zero_size();
+	result |= check_size_overflow_rejected();
 	result |= check_inside_signal_handler();
 	result |= check_usable_size();
 	/* exhaustion last — it leaves the buffer permanently empty */

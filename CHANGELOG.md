@@ -6,6 +6,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Bootstrap and signal-safe emergency allocators now reject
+  near-`SIZE_MAX` requests up front instead of letting
+  `(size + ALIGN-1) & ~(ALIGN-1)` wrap to a small `aligned`
+  value. Without the guard, a request with
+  `size > SIZE_MAX - V8M_BOOTSTRAP_ALIGN+1` would silently round
+  to a 16-byte slot — the caller, believing they had `SIZE_MAX`
+  bytes, would then write far past the slot and corrupt
+  neighbouring bootstrap allocations (or, on the signal-safe
+  path, neighbouring emergency-budget slots). Bootstrap aborts
+  via the existing OOM path (process-fatal is the right
+  behaviour for a near-`SIZE_MAX` ask before the real allocator
+  exists); signal-safe returns NULL to honour its
+  "handler must check the return" contract. Coverage in
+  `tests/test_signal_safe.c::check_size_overflow_rejected`.
+
 ### Added
 - Public `v8m_validate_internal_state()` debug helper. Walks the
   page-heap region map (sort + non-overlap), the buddy pool's

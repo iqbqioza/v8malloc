@@ -36,6 +36,14 @@ static atomic_size_t v8m_signal_safe_offset = 0;
 
 V8M_EXPORT void *v8m_signal_safe_alloc(size_t size)
 {
+	/* Reject any size that cannot fit in the emergency buffer before
+	 * the round-up, so a near-SIZE_MAX request cannot wrap to a small
+	 * `aligned` and silently hand the signal handler a 16-byte slot
+	 * for a SIZE_MAX-bytes promise. NULL on overflow matches the
+	 * "handler must check the return" contract. */
+	if (size > V8M_SIGNAL_SAFE_SIZE) {
+		return NULL;
+	}
 	size_t aligned = (size + (V8M_SIGNAL_SAFE_ALIGN - 1U)) &
 			 ~(size_t)(V8M_SIGNAL_SAFE_ALIGN - 1U);
 	if (aligned == 0) {
