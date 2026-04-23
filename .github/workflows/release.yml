@@ -197,7 +197,7 @@ jobs:
           retention-days: 1
 
   commit-and-tag:
-    name: Commit version bump + tag
+    name: Commit version bump + tag (signed)
     # Only run when every matrix lane in build-binaries succeeded.
     # `needs:` already enforces the dependency; the implicit job
     # success requirement (no `if: always()`) gates on green.
@@ -205,14 +205,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (with retry on transient HTTP 500)
-        # actions/checkout's internal retry only spans ~3 attempts
-        # over ~30 s; GitHub's git host occasionally returns HTTP
-        # 500 for longer than that, which would normally abort the
-        # workflow AFTER every binary built green — exactly the
-        # cycle this workflow is structured to avoid. Manual git
-        # clone with shell-level backoff (5 attempts, 5/10/15/20 s
-        # spacing) absorbs flares the action can't. Token comes
-        # from the workflow's `permissions: contents: write` grant.
+        # We still need a working copy to apply the version bump +
+        # CHANGELOG promotion; the actual commit is then created
+        # via the GraphQL `createCommitOnBranch` mutation below
+        # (which auto-signs with GitHub's web-flow GPG key).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -230,14 +226,12 @@ jobs:
               exit 1
             fi
           done
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-      - name: Update CMakeLists.txt
+      - name: Update CMakeLists.txt (locally)
         run: |
           ver="${{ needs.prepare.outputs.new_version }}"
           sed -i -E "s/^([[:space:]]*VERSION[[:space:]]+)[0-9]+\.[0-9]+\.[0-9]+/\1$ver/" CMakeLists.txt
           git --no-pager diff CMakeLists.txt
-      - name: Promote Unreleased section in CHANGELOG.md
+      - name: Promote Unreleased section in CHANGELOG.md (locally)
         # Convert `## [Unreleased]` → `## [Unreleased]\n\n## [X.Y.Z]
         # - YYYY-MM-DD`. The empty Unreleased block stays open so
         # the next cycle's notes accumulate under it. Python (vs
@@ -260,17 +254,102 @@ jobs:
               raise SystemExit("CHANGELOG.md: '## [Unreleased]' heading not found")
           path.write_text(updated)
           PY
-      - name: Commit + tag + push
-        # `git config user.{name,email}` already set by the
-        # checkout-with-retry step. Push runs over the same
-        # token-embedded origin URL the clone used, so no
-        # additional credential setup is needed.
+      - name: Create signed commit via GraphQL
+        # GitHub's `createCommitOnBranch` GraphQL mutation creates
+        # the commit on the remote in a single API call AND signs it
+        # with the GitHub web-flow GPG key — the resulting commit
+        # shows as **Verified** on the web UI without us having to
+        # manage a private GPG key in repo secrets. This is the
+        # documented zero-key-management path for signed commits
+        # from CI: see
+        # https://docs.github.com/en/graphql/reference/mutations#createcommitonbranch
+        #
+        # Multi-file commit support drops out for free — we send
+        # both CMakeLists.txt and CHANGELOG.md as base64-encoded
+        # additions and the mutation builds one tree containing
+        # both. expectedHeadOid bails the call (with a clear error)
+        # if main moved between checkout and commit, so a concurrent
+        # push can't be silently overwritten.
+        id: commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.prepare.outputs.new_version }}
+          REPO: ${{ github.repository }}
         run: |
-          ver="${{ needs.prepare.outputs.new_version }}"
-          git add CMakeLists.txt CHANGELOG.md
-          git commit -m "chore: Release v$ver"
-          git tag -a "v$ver" -m "Release v$ver"
-          git push origin HEAD --follow-tags
+          # Capture parent HEAD as our expected oid (concurrency check).
+          expected=$(git rev-parse HEAD)
+          # base64 -w0: no line wrapping, single-blob output that
+          # JSON requires.
+          cmake_b64=$(base64 -w0 CMakeLists.txt)
+          changelog_b64=$(base64 -w0 CHANGELOG.md)
+          # Build the mutation payload via python rather than a
+          # shell heredoc so the giant CHANGELOG payload doesn't
+          # have to traverse the shell's argv (avoids the same
+          # ARG_MAX trap the release-notes job hit earlier).
+          python3 - "$expected" "$cmake_b64" "$changelog_b64" > payload.json <<'PY'
+          import json, os, sys
+          expected, cmake_b64, changelog_b64 = sys.argv[1:]
+          payload = {
+              "query": (
+                  "mutation($input: CreateCommitOnBranchInput!) {"
+                  "  createCommitOnBranch(input: $input) {"
+                  "    commit { oid url }"
+                  "  }"
+                  "}"
+              ),
+              "variables": {
+                  "input": {
+                      "branch": {
+                          "repositoryNameWithOwner": os.environ["REPO"],
+                          "branchName": "main",
+                      },
+                      "expectedHeadOid": expected,
+                      "message": {
+                          "headline": f"chore: Release v{os.environ['NEW_VERSION']}",
+                      },
+                      "fileChanges": {
+                          "additions": [
+                              {"path": "CMakeLists.txt", "contents": cmake_b64},
+                              {"path": "CHANGELOG.md", "contents": changelog_b64},
+                          ],
+                      },
+                  },
+              },
+          }
+          json.dump(payload, sys.stdout)
+          PY
+          oid=$(gh api graphql --input payload.json \
+                  --jq '.data.createCommitOnBranch.commit.oid')
+          if [ -z "$oid" ] || [ "$oid" = "null" ]; then
+            echo "::error::createCommitOnBranch returned no oid"
+            gh api graphql --input payload.json
+            exit 1
+          fi
+          echo "Signed commit: $oid"
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+      - name: Create annotated tag pointing at signed commit
+        # Two-step REST API tag creation: first the tag object
+        # (annotated tag with message), then the tag ref pointing
+        # at it. The tag itself is unsigned (GitHub's web-flow
+        # signing only applies to commits, not tag objects); the
+        # underlying commit it points to is the signed one. For a
+        # fully-signed tag, switch to a GPG-key-based flow.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.prepare.outputs.new_version }}
+          REPO: ${{ github.repository }}
+          COMMIT_OID: ${{ steps.commit.outputs.oid }}
+        run: |
+          tag_oid=$(gh api -X POST "repos/$REPO/git/tags" \
+            -f tag="v$NEW_VERSION" \
+            -f message="Release v$NEW_VERSION" \
+            -f object="$COMMIT_OID" \
+            -f type=commit \
+            --jq '.sha')
+          gh api -X POST "repos/$REPO/git/refs" \
+            -f ref="refs/tags/v$NEW_VERSION" \
+            -f sha="$tag_oid"
+          echo "Tag v$NEW_VERSION → commit $COMMIT_OID"
 
   release:
     name: Publish GitHub Release
