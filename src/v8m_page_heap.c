@@ -386,12 +386,35 @@ static uint16_t region_unregister_with_flags(const void *ptr,
  * read, snapshot seq again, retry-or-bail) keeps the malloc/free
  * fast path off the region mutex on the typical case where reads
  * vastly outnumber writes. */
+/* Per-thread cache for v8m_page_heap_owns_fast. The malloc/free hot
+ * path tends to hit the same slab page repeatedly (especially in
+ * oscillating alloc/free patterns); caching the page-base + the
+ * last-result + the seq number it was valid at lets the second-and-
+ * later queries on the same page skip the binary search entirely.
+ * The seq match guarantees the cached verdict is still authoritative
+ * — if any writer has run since, the cached entry is invalidated and
+ * we fall through to the full check. */
+static __thread uintptr_t v8m_owns_cache_page_base;
+static __thread uint64_t v8m_owns_cache_seq;
+static __thread int v8m_owns_cache_result;
+
 int v8m_page_heap_owns_fast(const void *ptr)
 {
 	if (ptr == NULL) {
 		return 0;
 	}
 	uintptr_t addr = (uintptr_t)ptr;
+	uintptr_t page_base = addr & V8M_PAGE_MASK;
+	/* Per-thread fast-fast-path cache: same page as last query AND
+	 * no writer since. Common in oscillating alloc/free workloads
+	 * (the bin keeps cycling slots through the same slab page). */
+	if (page_base == v8m_owns_cache_page_base) {
+		uint64_t seq_now =
+		    atomic_load_explicit(&g_region_seq, memory_order_acquire);
+		if (seq_now == v8m_owns_cache_seq && (seq_now & 1U) == 0U) {
+			return v8m_owns_cache_result;
+		}
+	}
 	for (int retry = 0; retry < 4; retry++) {
 		/* seq1 acquire pairs with the writer's seq release on
 		 * its second bump (transition odd -> even). */
@@ -425,7 +448,13 @@ int v8m_page_heap_owns_fast(const void *ptr)
 		uint64_t seq2 =
 		    atomic_load_explicit(&g_region_seq, memory_order_relaxed);
 		if (seq1 == seq2) {
-			return owned ? 1 : 0;
+			int result = owned ? 1 : 0;
+			/* Cache the result for the next query on the same
+			 * page. seq carries the validity stamp. */
+			v8m_owns_cache_page_base = page_base;
+			v8m_owns_cache_seq = seq2;
+			v8m_owns_cache_result = result;
+			return result;
 		}
 	}
 	return -1; /* race-bound — caller falls back to slow owns */

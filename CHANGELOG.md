@@ -74,6 +74,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- **Per-thread cache for `v8m_page_heap_owns_fast`.** The malloc /
+  free hot path tends to query the same slab page repeatedly
+  (oscillating alloc/free workloads cycle slots through one page).
+  A 3-slot per-thread cache (page-base + last-seq + last-result)
+  short-circuits the binary search when the page matches AND no
+  writer has run since (seq still matches). Falls through to the
+  full seqlock binary search on cache miss; the cache is updated
+  with the verdict. Zero contention (TLS), zero bookkeeping cost
+  on the cold path.
+
 - **Inlined free fast path.** `v8m_free` now contains a TLC bin-
   push fast path that skips the dispatcher mutex on the typical
   "freshly allocated slab object freed by the same thread" case.
