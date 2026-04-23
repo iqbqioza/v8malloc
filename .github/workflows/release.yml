@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Manual release pipeline. One `workflow_dispatch` invocation:
+#
+#   1. Reads `project(... VERSION X.Y.Z)` out of CMakeLists.txt.
+#   2. Bumps the requested component (default: patch).
+#   3. Writes the new version back into CMakeLists.txt.
+#   4. Promotes the `## [Unreleased]` block in CHANGELOG.md to a
+#      `## [X.Y.Z] - YYYY-MM-DD` heading and re-opens an empty
+#      Unreleased section above it.
+#   5. Commits, tags `vX.Y.Z`, pushes both.
+#   6. Builds release tarballs for x86_64 + four cross-arch targets
+#      (aarch64 / ppc64le / s390x / riscv64) under qemu-user.
+#   7. Publishes the GitHub release with the CHANGELOG section as
+#      the body and an auto-generated PR-list appended; attaches
+#      every binary tarball + a source tarball + matching SHA256
+#      sidecar files.
+#
+# All actions are pinned by 40-char commit SHA with the release tag
+# in an inline comment (supply-chain hygiene; see
+# `.github/dependabot.yml` for the auto-bump cadence).
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semver component to bump'
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write   # commit + tag + release
+  pull-requests: read   # for `gh release create --generate-notes`
+
+concurrency:
+  # Two release runs in flight against the same branch would race
+  # on the bump-and-tag commit. Serialize them.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump-and-tag:
+    name: Bump version + tag
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      release_notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Default workflow token — bump commit + tag push need
+          # write access; the workflow's `permissions: contents:
+          # write` above grants it.
+          fetch-depth: 0
+      - name: Read current version
+        id: read
+        # CMakeLists has tab-indented `\tVERSION X.Y.Z` on its own
+        # line under `project(...)`. The regex matches that exact
+        # shape so a stray `VERSION` mention elsewhere doesn't get
+        # picked up.
+        run: |
+          cur=$(awk '/^[[:space:]]*VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$/ {print $2; exit}' CMakeLists.txt)
+          if [ -z "$cur" ]; then
+            echo "::error::could not extract VERSION from CMakeLists.txt"
+            exit 1
+          fi
+          echo "Current version: $cur"
+          echo "current=$cur" >> "$GITHUB_OUTPUT"
+      - name: Compute new version
+        id: bump
+        run: |
+          IFS='.' read -r M m p <<< "${{ steps.read.outputs.current }}"
+          case "${{ inputs.bump }}" in
+            major) M=$((M+1)); m=0; p=0 ;;
+            minor) m=$((m+1)); p=0 ;;
+            patch) p=$((p+1)) ;;
+          esac
+          new="$M.$m.$p"
+          echo "New version: $new"
+          echo "new_version=$new" >> "$GITHUB_OUTPUT"
+      - name: Update CMakeLists.txt
+        # Replace the `\tVERSION X.Y.Z` line in place, preserving
+        # the leading tab. Match the same regex as the read step.
+        run: |
+          sed -i -E "s/^([[:space:]]*VERSION[[:space:]]+)[0-9]+\.[0-9]+\.[0-9]+/\1${{ steps.bump.outputs.new_version }}/" CMakeLists.txt
+          echo "--- diff ---"
+          git --no-pager diff CMakeLists.txt
+      - name: Promote Unreleased section in CHANGELOG.md
+        # Convert `## [Unreleased]` → `## [Unreleased]\n\n## [X.Y.Z]
+        # - YYYY-MM-DD`. The empty Unreleased block stays open so
+        # the next cycle's notes accumulate under it. Python (vs
+        # sed) so the literal `\n` newline pair lands in the file
+        # without GNU-vs-BSD escape gymnastics.
+        env:
+          # env: forwards both into the python process; reading via
+          # os.environ closes shell-injection paths through the
+          # workflow_dispatch input.
+          NEW_VERSION: ${{ steps.bump.outputs.new_version }}
+        run: |
+          export TODAY=$(date -u +%Y-%m-%d)
+          python3 - <<'PY'
+          import os, re, pathlib
+          ver = os.environ['NEW_VERSION']
+          today = os.environ['TODAY']
+          path = pathlib.Path('CHANGELOG.md')
+          text = path.read_text()
+          replacement = f"## [Unreleased]\n\n## [{ver}] - {today}"
+          updated, n = re.subn(r'^## \[Unreleased\]', replacement, text,
+                               count=1, flags=re.MULTILINE)
+          if n == 0:
+              raise SystemExit("CHANGELOG.md: '## [Unreleased]' heading not found")
+          path.write_text(updated)
+          PY
+      - name: Extract release notes
+        id: notes
+        # Pull the just-promoted version's section out of CHANGELOG
+        # so the GitHub release body shows the human-curated notes
+        # the maintainer wrote during the cycle.
+        run: |
+          ver="${{ steps.bump.outputs.new_version }}"
+          awk -v ver="$ver" '
+            BEGIN { in_sec = 0 }
+            /^## \[/ {
+              if ($0 ~ "\\[" ver "\\]") { in_sec = 1; print; next }
+              else if (in_sec) { exit }
+            }
+            in_sec { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "::warning::release notes section [$ver] is empty"
+          fi
+          # Multi-line value emit for downstream jobs.
+          {
+            echo 'notes<<RELEASE_NOTES_EOF'
+            cat release_notes.md
+            echo RELEASE_NOTES_EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Commit + tag + push
+        run: |
+          ver="${{ steps.bump.outputs.new_version }}"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add CMakeLists.txt CHANGELOG.md
+          git commit -m "chore: Release v$ver"
+          git tag -a "v$ver" -m "Release v$ver"
+          git push origin HEAD --follow-tags
+
+  build-binaries:
+    name: Build (${{ matrix.arch }})
+    needs: bump-and-tag
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            qemu: false
+          - arch: aarch64
+            qemu: true
+          - arch: ppc64le
+            qemu: true
+          - arch: s390x
+            qemu: true
+          - arch: riscv64
+            qemu: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Build off the freshly-tagged commit, not the workflow
+          # run's checkout sha (which is the pre-bump tree).
+          ref: v${{ needs.bump-and-tag.outputs.new_version }}
+      - name: Build (native x86_64)
+        if: matrix.qemu == false
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+      - name: Build (cross ${{ matrix.arch }} via qemu)
+        if: matrix.qemu == true
+        uses: uraimo/run-on-arch-action@d94c13912ea685de38fccc1109385b83fd79427d # v3.0.1
+        with:
+          arch: ${{ matrix.arch }}
+          distro: bookworm
+          # Skip-arch-check so qemu-user emulation drives the
+          # build — we don't run a real arm/ppc/s390/riscv host.
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          install: |
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+              build-essential cmake
+          run: |
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build --parallel
+      - name: Package
+        run: |
+          ver="${{ needs.bump-and-tag.outputs.new_version }}"
+          dir="v8malloc-$ver-linux-${{ matrix.arch }}"
+          mkdir -p "$dir/lib" "$dir/include"
+          # Copy shared library + symlinks (cp -P preserves them).
+          cp -P build/libv8malloc.so* "$dir/lib/" 2>/dev/null || true
+          # Static archive when present.
+          if [ -f build/libv8malloc.a ]; then
+            cp build/libv8malloc.a "$dir/lib/"
+          fi
+          cp -r include/v8malloc "$dir/include/"
+          cp LICENSE README.md CHANGELOG.md "$dir/"
+          tar -cJf "$dir.tar.xz" "$dir"
+          sha256sum "$dir.tar.xz" > "$dir.tar.xz.sha256"
+          ls -la *.tar.xz*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: |
+            v8malloc-*.tar.xz
+            v8malloc-*.tar.xz.sha256
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: [bump-and-tag, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: v${{ needs.bump-and-tag.outputs.new_version }}
+          fetch-depth: 0   # need full history for `git archive`
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Build source tarball
+        # Reproducible, gz-compressed source archive (matches the
+        # auto-generated GitHub `Source code` archive but with our
+        # preferred prefix + a sha256 sidecar).
+        run: |
+          ver="${{ needs.bump-and-tag.outputs.new_version }}"
+          git archive --format=tar.gz \
+              --prefix="v8malloc-$ver/" \
+              -o "artifacts/v8malloc-$ver-src.tar.gz" \
+              "v$ver"
+          (cd artifacts && sha256sum "v8malloc-$ver-src.tar.gz" \
+              > "v8malloc-$ver-src.tar.gz.sha256")
+          ls -la artifacts/
+      - name: Compose release body
+        # CHANGELOG section first (human-curated narrative), then a
+        # divider, then the auto-generated PR list which `gh
+        # release create --notes-file ... --generate-notes` would
+        # normally REPLACE the file with — we render it ourselves
+        # via the API so both halves coexist.
+        env:
+          NOTES: ${{ needs.bump-and-tag.outputs.release_notes }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ needs.bump-and-tag.outputs.new_version }}"
+          # Find the previous release tag for the auto-changelog
+          # base (skip the just-pushed one).
+          prev=$(git tag --sort=-v:refname | grep '^v[0-9]' | grep -v "^v$ver$" | head -1)
+          {
+            echo "$NOTES"
+            echo
+            echo '---'
+            echo
+            echo '## What changed since the previous release'
+            echo
+          } > body.md
+          if [ -n "$prev" ]; then
+            # Use GitHub's auto-notes generator API directly so we
+            # can embed it inside our own body.
+            gh api -X POST \
+              -H 'Accept: application/vnd.github+json' \
+              "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="v$ver" \
+              -f previous_tag_name="$prev" \
+              --jq .body >> body.md
+          else
+            echo '_First release — no prior tag for diff._' >> body.md
+          fi
+          echo '--- body.md ---'
+          cat body.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver="${{ needs.bump-and-tag.outputs.new_version }}"
+          gh release create "v$ver" \
+            --title "v$ver" \
+            --notes-file body.md \
+            artifacts/v8malloc-$ver-linux-*.tar.xz \
+            artifacts/v8malloc-$ver-linux-*.tar.xz.sha256 \
+            "artifacts/v8malloc-$ver-src.tar.gz" \
+            "artifacts/v8malloc-$ver-src.tar.gz.sha256"
