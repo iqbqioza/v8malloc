@@ -660,7 +660,7 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 	return ptr;
 }
 
-V8M_EXPORT void *v8m_malloc(size_t size)
+__attribute__((hot)) V8M_EXPORT void *v8m_malloc(size_t size)
 {
 	return do_malloc_pc(size, __builtin_return_address(0));
 }
@@ -730,7 +730,7 @@ static void debug_clear_double_free_record(const void *ptr)
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 }
 
-V8M_EXPORT void v8m_free(void *ptr)
+__attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
 {
 	if (ptr == NULL) {
 		return;

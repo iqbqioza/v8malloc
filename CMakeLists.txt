@@ -245,6 +245,21 @@ function(v8malloc_configure_target tgt)
 		-Wcast-align
 		-Wpointer-arith
 		-Wwrite-strings
+		# Initial-exec TLS model. Default (general-dynamic) routes
+		# every __thread access through __tls_get_addr — a ~10-15ns
+		# call per access on the malloc fast path, which itself
+		# touches several __thread variables (TLC peek, caller-PC
+		# hint, etc.). Initial-exec uses a direct %fs-relative load
+		# (~3 cycles). Safe for an LD_PRELOAD-style allocator:
+		# the library must be loaded at exec time (which is exactly
+		# how every malloc replacement is used), and dlopen() at
+		# runtime would fail with a clear error rather than crash.
+		-ftls-model=initial-exec
+		# -fno-plt: skip the PLT trampoline for cross-DSO calls, so
+		# malloc/free fast paths don't pay an extra indirect jump
+		# per intra-library call. Combines with -z now to fully
+		# resolve symbols at load time.
+		-fno-plt
 		${V8MALLOC_ARCH_FLAGS}
 	)
 	target_compile_definitions(${tgt} PRIVATE

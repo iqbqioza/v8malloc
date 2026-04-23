@@ -74,6 +74,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- Build with `-ftls-model=initial-exec` so the per-thread cache
+  (`__thread t_cache` etc.) reads land on the direct `%fs`-relative
+  load (~3 cycles) instead of the general-dynamic
+  `__tls_get_addr` PLT call (~10-15 ns). The malloc fast path
+  touches several `__thread` slots — TLC pointer, caller-PC hint,
+  in-create / in-destructor flags — so the compounding cost
+  matters. Safe for an LD_PRELOAD-style allocator (the library
+  is loaded at exec time, not via runtime dlopen).
+
+- `-fno-plt` to skip the PLT trampoline on cross-DSO calls inside
+  the library, paired with the existing `-z now` for full
+  resolution at load time. Negligible on its own, but combines
+  with the TLS change to shave one indirect jump from each
+  cross-call on the hot path.
+
+- `__attribute__((hot))` on `v8m_malloc` and `v8m_free` so the
+  compiler keeps them in the binary's hot section (better i-cache
+  density for the most-called entry points).
+
 - Hot-path `rdtsc` removed from `v8m_malloc` / `v8m_free` when
   `V8M_OPT_LIFETIME_TRACKING` is off (the default). The lifetime-
   tracker helpers used to take `tsc` as a parameter and the
