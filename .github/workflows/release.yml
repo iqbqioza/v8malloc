@@ -206,9 +206,34 @@ jobs:
     outputs:
       release_notes: ${{ steps.notes.outputs.notes }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
+      - name: Checkout (with retry on transient HTTP 500)
+        # actions/checkout's internal retry only spans ~3 attempts
+        # over ~30 s; GitHub's git host occasionally returns HTTP
+        # 500 for longer than that, which would normally abort the
+        # workflow AFTER every binary built green — exactly the
+        # cycle this workflow is structured to avoid. Manual git
+        # clone with shell-level backoff (5 attempts, 5/10/15/20 s
+        # spacing) absorbs flares the action can't. Token comes
+        # from the workflow's `permissions: contents: write` grant.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if git clone --no-tags \
+                "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" .; then
+              break
+            fi
+            echo "::warning::checkout attempt $i failed, retrying in $((i * 5))s"
+            rm -rf ./* ./.git 2>/dev/null || true
+            sleep $((i * 5))
+            if [ "$i" -eq 5 ]; then
+              echo "::error::checkout failed after 5 attempts"
+              exit 1
+            fi
+          done
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
       - name: Update CMakeLists.txt
         run: |
           ver="${{ needs.prepare.outputs.new_version }}"
@@ -261,10 +286,12 @@ jobs:
             echo RELEASE_NOTES_EOF
           } >> "$GITHUB_OUTPUT"
       - name: Commit + tag + push
+        # `git config user.{name,email}` already set by the
+        # checkout-with-retry step. Push runs over the same
+        # token-embedded origin URL the clone used, so no
+        # additional credential setup is needed.
         run: |
           ver="${{ needs.prepare.outputs.new_version }}"
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add CMakeLists.txt CHANGELOG.md
           git commit -m "chore: Release v$ver"
           git tag -a "v$ver" -m "Release v$ver"
@@ -275,12 +302,29 @@ jobs:
     needs: [prepare, commit-and-tag]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # Pull the freshly-tagged commit so `git archive` produces
-          # a source tarball whose contents match the tag exactly.
-          ref: v${{ needs.prepare.outputs.new_version }}
-          fetch-depth: 0
+      - name: Checkout tag (with retry on transient HTTP 500)
+        # Same retry rationale as commit-and-tag — by this point
+        # every binary built green AND the tag was pushed; a
+        # transient checkout failure here would leave the release
+        # un-published despite the rest of the pipeline succeeding.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REF: v${{ needs.prepare.outputs.new_version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if git clone --no-checkout \
+                "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" .; then
+              git checkout "$REF" && break
+            fi
+            echo "::warning::checkout attempt $i failed, retrying in $((i * 5))s"
+            rm -rf ./* ./.git 2>/dev/null || true
+            sleep $((i * 5))
+            if [ "$i" -eq 5 ]; then
+              echo "::error::checkout failed after 5 attempts"
+              exit 1
+            fi
+          done
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
