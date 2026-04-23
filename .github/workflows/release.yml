@@ -348,32 +348,62 @@ jobs:
         # release create --notes-file ... --generate-notes` would
         # normally REPLACE the file with — we render it ourselves
         # via the API so both halves coexist.
+        #
+        # GitHub caps the release body at 125,000 characters and
+        # rejects the create call with `body is too long` (HTTP
+        # 422) above that. We size each half:
+        #   - CHANGELOG section: budget 100,000 chars. Truncated
+        #     with a "see CHANGELOG.md" footer if it exceeds.
+        #   - Auto PR list: budget 20,000 chars. Truncated similarly.
+        # Total ceiling ≈ 122,000 chars, leaving headroom for the
+        # divider + headings.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.prepare.outputs.new_version }}
+          REPO: ${{ github.repository }}
         run: |
-          ver="${{ needs.prepare.outputs.new_version }}"
+          ver="$NEW_VERSION"
           # Find the previous release tag for the auto-changelog
           # base (skip the just-pushed one).
           prev=$(git tag --sort=-v:refname | grep '^v[0-9]' | grep -v "^v$ver$" | head -1)
+          # 1. CHANGELOG section — truncate at 100k.
+          notes_cap=100000
+          if [ "$(wc -c < release_notes.md)" -gt "$notes_cap" ]; then
+            head -c "$notes_cap" release_notes.md > body.md
+            {
+              echo
+              echo "_… release notes truncated to fit the 125 KiB body limit; see [CHANGELOG.md](../../blob/v${ver}/CHANGELOG.md) for the full section._"
+            } >> body.md
+          else
+            cat release_notes.md > body.md
+          fi
+          # 2. Divider + auto PR list — truncate at 20k.
           {
-            cat release_notes.md
             echo
             echo '---'
             echo
             echo '## What changed since the previous release'
             echo
-          } > body.md
+          } >> body.md
           if [ -n "$prev" ]; then
             gh api -X POST \
               -H 'Accept: application/vnd.github+json' \
-              "repos/${{ github.repository }}/releases/generate-notes" \
+              "repos/$REPO/releases/generate-notes" \
               -f tag_name="v$ver" \
               -f previous_tag_name="$prev" \
-              --jq .body >> body.md
+              --jq .body > pr_list.md
+            pr_cap=20000
+            if [ "$(wc -c < pr_list.md)" -gt "$pr_cap" ]; then
+              head -c "$pr_cap" pr_list.md >> body.md
+              echo >> body.md
+              echo "_… PR list truncated; see [\`v${prev}…v${ver}\`](../../compare/${prev}...v${ver}) for the full diff._" >> body.md
+            else
+              cat pr_list.md >> body.md
+            fi
           else
             echo '_First release — no prior tag for diff._' >> body.md
           fi
-          wc -c body.md
+          echo "body.md size: $(wc -c < body.md) bytes"
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
