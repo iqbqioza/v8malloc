@@ -449,21 +449,46 @@ size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
 
 /* --- pthread_atfork plumbing -------------------------------------- */
 
+/*
+ * Lock every dispatcher-owned mutex before fork, unlock in a matching
+ * order after. Must include the lifetime arenas (slab_lifetime[0..2])
+ * in addition to the default slab + buddy — with
+ * V8M_OPT_LIFETIME_TRACKING on, a thread can be mid-alloc on any of
+ * them when another thread forks, and skipping their locks leaves the
+ * forked child to inherit a locked-by-dead-thread mutex that
+ * deadlocks on the first lifetime-routed allocation. Acquire order:
+ * default slab → lifetime arenas → buddy; release in the exact
+ * reverse so any other fork handler ordering is consistent.
+ */
 void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
 {
 	(void)pthread_mutex_lock(&dispatch->slab.lock);
+	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
+		(void)pthread_mutex_lock(&dispatch->slab_lifetime[i].lock);
+	}
 	(void)pthread_mutex_lock(&dispatch->buddy.lock);
+	v8m_page_heap_prefork();
 }
 
 void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
 {
+	v8m_page_heap_postfork_parent();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
+	for (uint32_t i = V8M_ARENA_COUNT - 1U; i > 0U; i--) {
+		(void)pthread_mutex_unlock(
+		    &dispatch->slab_lifetime[i - 1U].lock);
+	}
 	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }
 
 void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
 {
+	v8m_page_heap_postfork_child();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
+	for (uint32_t i = V8M_ARENA_COUNT - 1U; i > 0U; i--) {
+		(void)pthread_mutex_unlock(
+		    &dispatch->slab_lifetime[i - 1U].lock);
+	}
 	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }
 

@@ -236,4 +236,17 @@ size_t v8m_page_heap_live_region_count(void);
  */
 int v8m_page_heap_validate(void);
 
+/*
+ * pthread_atfork plumbing. The page heap owns its own region-map
+ * mutex (and the lazy-initialised anchor reservation owns its own
+ * mutex too). Without these hooks, a thread holding either lock
+ * when another thread forks leaves the child to inherit a
+ * locked-by-dead-thread mutex that deadlocks on the next page-heap
+ * call. The dispatcher's atfork handler calls these in the
+ * matching order.
+ */
+void v8m_page_heap_prefork(void);
+void v8m_page_heap_postfork_parent(void);
+void v8m_page_heap_postfork_child(void);
+
 #endif /* V8M_PAGE_HEAP_H */

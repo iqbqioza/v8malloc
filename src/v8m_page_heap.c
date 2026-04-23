@@ -437,6 +437,36 @@ int v8m_page_heap_validate(void)
 	return issues;
 }
 
+/* pthread_atfork plumbing for the page heap. Locks every page-heap-
+ * owned mutex (the region map + the lazy anchor reservation when
+ * initialised) before fork so the child does not inherit a
+ * locked-by-dead-thread mutex. The dispatcher's prefork calls this
+ * after locking its own pools so the global acquire order is
+ * dispatch-pools → page-heap → anchor. */
+void v8m_page_heap_prefork(void)
+{
+	(void)pthread_mutex_lock(&g_region_lock);
+	if (atomic_load_explicit(&g_anchor_initialized, memory_order_acquire)) {
+		(void)pthread_mutex_lock(&g_anchor.lock);
+	}
+}
+
+void v8m_page_heap_postfork_parent(void)
+{
+	if (atomic_load_explicit(&g_anchor_initialized, memory_order_acquire)) {
+		(void)pthread_mutex_unlock(&g_anchor.lock);
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+}
+
+void v8m_page_heap_postfork_child(void)
+{
+	if (atomic_load_explicit(&g_anchor_initialized, memory_order_acquire)) {
+		(void)pthread_mutex_unlock(&g_anchor.lock);
+	}
+	(void)pthread_mutex_unlock(&g_region_lock);
+}
+
 static bool is_power_of_two(size_t value)
 {
 	return value != 0 && (value & (value - 1U)) == 0;

@@ -74,6 +74,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- Fork safety hole: the dispatcher's prefork/postfork hooks
+  only locked the default slab pool and the buddy pool,
+  silently leaving three lifetime arenas
+  (`slab_lifetime[0..2]`), the page-heap region map
+  (`g_region_lock`), and the lazy anchor reservation
+  (`g_anchor.lock`) unguarded. With
+  `V8M_OPT_LIFETIME_TRACKING` on, a thread mid-alloc on a
+  lifetime arena when another thread `fork()`s would let the
+  child inherit the lifetime arena's mutex in held-by-dead-
+  thread state — the child then deadlocked on the first
+  lifetime-routed allocation. Same shape applied to the
+  region-map and anchor mutexes (held by any
+  page-heap call during fork). Fix: extended
+  `v8m_dispatch_prefork` to lock the lifetime arenas and to
+  call new `v8m_page_heap_prefork` / `_postfork_parent` /
+  `_postfork_child` hooks that own the page-heap-side mutex
+  set; release order mirrors acquire order so the global
+  acquire chain is dispatcher-pools → page-heap →
+  anchor. Existing `tests/test_fork*.c` continue to pass.
+
 - Aligned allocation paths (`v8m_aligned_alloc`,
   `v8m_posix_memalign`, `v8m_memalign`, `v8m_valloc`,
   `v8m_pvalloc`) now honour `V8M_OPT_SOFT_LIMIT` and the OOM
