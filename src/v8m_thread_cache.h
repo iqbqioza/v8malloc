@@ -391,6 +391,73 @@ bool v8m_thread_cache_free(struct v8m_thread_cache *cache, uint32_t cls,
 			   void *obj);
 
 /*
+ * Per-thread cache pointer, exposed so the inlined malloc fast path
+ * can read the TLS slot directly (one %fs-relative load) instead of
+ * routing through `v8m_thread_cache_peek` (function call + same load,
+ * but defeating the inliner's view). Slow-path consumers stay on the
+ * function form for the comment + scope niceness.
+ */
+extern __thread struct v8m_thread_cache *v8m_t_cache;
+
+/* Forward decl: the canonical decl with the doc comment is further
+ * down in this header (the GC-tick section); declared here too so
+ * the inlines below resolve it. */
+void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache);
+
+/*
+ * Inlined TLC bin pop. Exposes the same logic as
+ * v8m_thread_cache_alloc but as a static inline so the malloc fast
+ * path can collapse the call into a handful of instructions.
+ * Returns NULL on bin-empty / out-of-range class — caller falls
+ * through to the slow path. memcpy on a 1-byte read intrinsifies
+ * to a mov.
+ */
+static inline void *
+v8m_thread_cache_alloc_inline(struct v8m_thread_cache *cache, uint32_t cls)
+{
+	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+		return NULL;
+	}
+	void *head = cache->bin_heads[cls];
+	if (head == NULL) {
+		return NULL;
+	}
+	void *next = NULL;
+	__builtin_memcpy((void *)&next, head, sizeof(next));
+	cache->bin_heads[cls] = next;
+	cache->bin_count[cls]--;
+	cache->alloc_count_per_class[cls]++;
+	if (--cache->gc_countdown == 0U) {
+		v8m_thread_cache_gc_tick(cache);
+	}
+	return head;
+}
+
+/*
+ * Inlined TLC bin push. Mirror of v8m_thread_cache_alloc_inline.
+ * Returns true when the bin reached capacity (caller must invoke
+ * the flush-half slow path). `obj`'s first sizeof(void *) bytes are
+ * overwritten with the prior bin head — caller has relinquished the
+ * slot.
+ */
+static inline bool v8m_thread_cache_free_inline(struct v8m_thread_cache *cache,
+						uint32_t cls, void *obj)
+{
+	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS || obj == NULL) {
+		return false;
+	}
+	void *prev_head = cache->bin_heads[cls];
+	__builtin_memcpy(obj, (const void *)&prev_head, sizeof(prev_head));
+	cache->bin_heads[cls] = obj;
+	cache->bin_count[cls]++;
+	cache->free_count_per_class[cls]++;
+	if (--cache->gc_countdown == 0U) {
+		v8m_thread_cache_gc_tick(cache);
+	}
+	return cache->bin_count[cls] >= cache->bin_capacity[cls];
+}
+
+/*
  * Pop half the bin (rounded up — at least one object) and free
  * each via `v8m_slab_pool_free`. Used by the dispatcher's free
  * fast path when v8m_thread_cache_free reports overflow. Returns
@@ -491,7 +558,11 @@ void v8m_thread_cache_install_chain(struct v8m_thread_cache *cache,
  * free that crosses the new threshold will batch-flush via the
  * existing overflow path. Keeps the GC tick cheap and avoids
  * pulling the slab-pool pointer through this header.
+ *
+ * (Already forward-declared above for the inline-fast-path's
+ * countdown-hit branch.)
  */
+/* NOLINTNEXTLINE(readability-redundant-declaration) */
 void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache);
 
 /*

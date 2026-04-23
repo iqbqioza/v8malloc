@@ -74,6 +74,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Performance
+- **Inlined malloc fast path.** `v8m_malloc` now contains the
+  TLC bin-pop fast path inline (via the new
+  `v8m_thread_cache_alloc_inline` in `v8m_thread_cache.h` and the
+  exposed `extern __thread v8m_t_cache`), so the typical hit
+  collapses from a chain of 5 cross-TU calls
+  (`v8m_malloc → do_malloc_pc → v8m_dispatch_alloc →
+  try_tlc_fast_paths → v8m_thread_cache_alloc`) into ~12 inlined
+  instructions: TLS load, size-class compute, bin-head read,
+  next-pointer fetch, head/count update, return. Confirmed in
+  `objdump -d libv8malloc.so` — no function call on the hit path.
+  Falls through to `do_malloc_pc` (the slow body) on any miss
+  (NULL TLC, large class, empty bin), so the lifetime tracker /
+  predict prefetch / soft limit / OOM handler / dispatcher arena
+  routing still all work — only the *hit* case is collapsed.
+
+- **LTO (thin) for Release builds.** Cross-TU inlining for the
+  rest of the dispatcher chain. Minor on top of the manual inline
+  above, but the option costs nothing for Debug (gated on
+  `$<CONFIG:Release>`).
+
+- **`v8m_thread_cache_free_inline` exposed in the header** for a
+  future free fast path. Currently NOT wired into `v8m_free`: the
+  inlined free path was tried and reverted because the safe
+  ownership check (`v8m_page_heap_owns`) takes the region-map
+  mutex, defeating the inline win, and skipping the check
+  segfaults on libc-owned pointers (`v8m_ptr_to_meta` masks to a
+  page that may be unmapped). A lock-free ownership oracle is
+  the prerequisite for landing the free fast path; tracked.
+
 - `v8m_config_get` is now `static inline` in `src/v8m_config.h`
   (with the backing atomic array exposed as a non-static extern).
   The hot path's repeated `v8m_config_get(V8M_OPT_LIFETIME_TRACKING)`

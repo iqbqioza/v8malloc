@@ -44,7 +44,14 @@
  * rare but possible via destructors-of-destructors) gets a fresh
  * cache rather than dangling.
  */
-static __thread struct v8m_thread_cache *t_cache;
+/* Exposed via v8m_thread_cache.h so the inlined malloc fast path can
+ * read it directly with one %fs-relative load, instead of calling
+ * v8m_thread_cache_peek (function call + same load). The local
+ * `t_cache` alias keeps the existing in-file references readable
+ * without a search-and-replace across hundreds of lines. */
+__thread struct v8m_thread_cache *v8m_t_cache;
+/* NOLINTNEXTLINE(readability-identifier-naming) */
+#define t_cache v8m_t_cache
 
 /*
  * Reentrancy guard. The cache itself is allocated via malloc, which

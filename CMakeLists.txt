@@ -260,7 +260,19 @@ function(v8malloc_configure_target tgt)
 		# per intra-library call. Combines with -z now to fully
 		# resolve symbols at load time.
 		-fno-plt
+		# LTO collapses cross-TU function calls on the malloc
+		# fast path: v8m_malloc → do_malloc_pc → v8m_dispatch_alloc
+		# → try_tlc_fast_paths → v8m_thread_cache_alloc lives across
+		# four TUs, so without LTO every step is a separate function
+		# call. With LTO the compiler can inline the whole chain
+		# into v8m_malloc, collapsing the bin-pop fast path to ~5
+		# instructions. Only kicks in for Release builds (Debug
+		# wants line-by-line debuggability).
+		$<$<CONFIG:Release>:-flto=thin>
 		${V8MALLOC_ARCH_FLAGS}
+	)
+	target_link_options(${tgt} PRIVATE
+		$<$<CONFIG:Release>:-flto=thin>
 	)
 	target_compile_definitions(${tgt} PRIVATE
 		_GNU_SOURCE

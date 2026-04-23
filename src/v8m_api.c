@@ -660,8 +660,24 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 	return ptr;
 }
 
+/* Fast-path malloc: inlined TLC bin pop. Hits in steady-state
+ * workloads where the per-thread cache holds a slot for the
+ * requested size class. Falls through to do_malloc_pc on any miss
+ * (pre-init, no TLC yet, class > V8M_MEDIUM_FIRST_CLASS, bin
+ * empty, DEBUG-mode soft-limit, etc.) so all the slow-path
+ * machinery (lifetime tracker, predict prefetch, soft limit, OOM
+ * handler, dispatcher arena routing, slab pool refill) keeps
+ * working — the inline only collapses the *hit* case. */
 __attribute__((hot)) V8M_EXPORT void *v8m_malloc(size_t size)
 {
+	struct v8m_thread_cache *cache = v8m_t_cache;
+	if (__builtin_expect(cache != NULL && size <= V8M_SMALL_MAX_SIZE, 1)) {
+		uint32_t cls = v8m_size_class(size);
+		void *cached = v8m_thread_cache_alloc_inline(cache, cls);
+		if (__builtin_expect(cached != NULL, 1)) {
+			return cached;
+		}
+	}
 	return do_malloc_pc(size, __builtin_return_address(0));
 }
 
