@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test-coverage report. Builds with --coverage / -O0 -g, runs the
+# full ctest suite, generates an lcov HTML + summary, and uploads
+# both as an artifact (and to Codecov when CODECOV_TOKEN is set).
+#
+# Runs on push to main and on PRs that touch source / test files;
+# skipped for docs-only changes so coverage runs don't block
+# README edits. Manual `workflow_dispatch` is also wired so a
+# maintainer can trigger a coverage refresh without a push.
+
+name: coverage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - '.github/workflows/coverage.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'include/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - '.github/workflows/coverage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: gcov + lcov report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake gcc lcov
+      - name: Configure (coverage preset)
+        run: cmake --preset coverage
+      - name: Build
+        run: cmake --build --preset coverage --parallel
+      - name: Run tests
+        run: ctest --test-dir build/coverage --output-on-failure
+      - name: Capture lcov data
+        run: |
+          lcov --capture \
+               --directory build/coverage \
+               --output-file build/coverage/lcov.info \
+               --rc lcov_branch_coverage=1 \
+               --ignore-errors source,negative,unused,inconsistent,gcov
+          # Drop system + test source from the report so the summary
+          # reflects only the library's own source.
+          lcov --remove build/coverage/lcov.info \
+               '/usr/*' '*/tests/*' '*/build/*' \
+               --output-file build/coverage/lcov.info \
+               --rc lcov_branch_coverage=1 \
+               --ignore-errors source,unused,inconsistent
+      - name: Generate HTML report
+        run: |
+          genhtml build/coverage/lcov.info \
+            --output-directory build/coverage/html \
+            --branch-coverage \
+            --ignore-errors source,inconsistent
+      - name: Print summary
+        run: lcov --summary build/coverage/lcov.info \
+                  --rc lcov_branch_coverage=1 \
+                  --ignore-errors inconsistent
+      - name: Upload HTML report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build/coverage/html
+          retention-days: 14
+      - name: Upload to Codecov (optional)
+        # Only fires when the CODECOV_TOKEN secret is configured;
+        # the action itself no-ops gracefully when it's absent on
+        # public-repo PRs.
+        uses: codecov/codecov-action@v4
+        with:
+          files: build/coverage/lcov.info
+          fail_ci_if_error: false
+        continue-on-error: true

@@ -23,12 +23,13 @@ permissions:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.compiler }} build + ctest
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }} build + ctest
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
+        build_type: [Debug, Release]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,11 +42,48 @@ jobs:
         run: |
           cmake -S . -B build/ci \
             -DCMAKE_C_COMPILER=${{ matrix.compiler }} \
-            -DCMAKE_BUILD_TYPE=Debug
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - name: Build
         run: cmake --build build/ci --parallel
       - name: Test
         run: ctest --test-dir build/ci --output-on-failure
+
+  ld-preload-smoke:
+    # Loads libv8malloc.so into a handful of common binaries and
+    # confirms they don't crash on startup. Catches constructor-
+    # ordering regressions, missing symbol exports, ELF version-
+    # script breakage, and the "library mostly works but segfaults
+    # the first time bash forks" class of bug that the unit tests
+    # don't cover. Cheap (~30 s); a worthwhile PR-blocking gate.
+    name: LD_PRELOAD smoke (real binaries)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang
+      - name: Build (Release)
+        run: |
+          cmake -S . -B build/preload \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/preload --parallel
+      - name: Smoke each binary
+        env:
+          LIB: ${{ github.workspace }}/build/preload/libv8malloc.so
+        run: |
+          set -e
+          for bin in /bin/true /bin/echo /bin/ls /bin/cat /usr/bin/grep \
+                     /usr/bin/sort /usr/bin/uniq /bin/sh; do
+            echo "--- $bin ---"
+            LD_PRELOAD=$LIB $bin --version >/dev/null 2>&1 || \
+              LD_PRELOAD=$LIB $bin /etc/os-release >/dev/null
+          done
+          # Bash fork stress: exercises the malloc fast path under
+          # the fork/exec pattern v8malloc's atfork handlers cover.
+          LD_PRELOAD=$LIB bash -c 'for i in $(seq 1 50); do echo $i; done' >/dev/null
 
   ubsan:
     name: clang + UBSan

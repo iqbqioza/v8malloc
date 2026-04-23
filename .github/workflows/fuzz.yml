@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# libFuzzer + UBSan smoke run against the alloc/free fuzz harness in
+# tests/fuzz_alloc.c. Runs for a bounded duration so the workflow
+# fits inside a normal CI budget; the goal is "catch regressions
+# quickly", not "saturate the input space" (the latter belongs in a
+# longer-running OSS-Fuzz integration).
+#
+# Triggers:
+#   - weekly schedule  → routine regression sweep
+#   - workflow_dispatch → maintainer-triggered after a substantive
+#                          allocator-internals change
+#   - PRs that touch core allocator source → quick gate so a
+#     refactor that breaks ptr-validity invariants surfaces before
+#     merge.
+#
+# Crashes (if any) are uploaded as artifacts so the maintainer can
+# reproduce locally without re-running the workflow.
+
+name: fuzz
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: 'libFuzzer wall-clock budget in seconds'
+        required: false
+        default: '120'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/v8m_api.c'
+      - 'src/v8m_dispatch.c'
+      - 'src/v8m_slab_*.c'
+      - 'src/v8m_buddy*.c'
+      - 'src/v8m_large.c'
+      - 'src/v8m_page_heap.c'
+      - 'src/v8m_thread_cache.c'
+      - 'src/v8m_core_cache.c'
+      - 'tests/fuzz_alloc.c'
+      - '.github/workflows/fuzz.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: libFuzzer + UBSan smoke (${{ github.event.inputs.duration_seconds || '60' }}s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang
+      - name: Configure (fuzz + UBSan)
+        run: |
+          cmake -S . -B build/fuzz \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DV8MALLOC_BUILD_FUZZ=ON \
+            -DV8MALLOC_BUILD_UBSAN=ON
+      - name: Build fuzz harness
+        run: cmake --build build/fuzz --target fuzz_alloc --parallel
+      - name: Run fuzzer
+        env:
+          # Default to 60 s for PR / scheduled runs; manual dispatch
+          # may override with a longer budget.
+          DURATION: ${{ github.event.inputs.duration_seconds || '60' }}
+        run: |
+          mkdir -p build/fuzz/corpus build/fuzz/crashes
+          # -max_total_time bounds wall clock; -timeout caps a single
+          # input's run; -rss_limit_mb caps the fuzzer's footprint so
+          # the runner doesn't OOM under sustained allocation churn.
+          ./build/fuzz/tests/fuzz_alloc \
+            -max_total_time=$DURATION \
+            -timeout=10 \
+            -rss_limit_mb=2048 \
+            -artifact_prefix=build/fuzz/crashes/ \
+            build/fuzz/corpus
+      - name: Upload crash artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/crashes/
+          if-no-files-found: ignore
+          retention-days: 30
