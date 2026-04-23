@@ -505,6 +505,45 @@ static bool oom_handler_says_retry(size_t size)
 	return retry != 0;
 }
 
+/* Shared pre-alloc gate. Returns true if the soft limit allows the
+ * allocation (either it's under, or the OOM handler released enough
+ * to bring it under), false otherwise. On false the caller must
+ * surface ENOMEM and bail. Centralised so the malloc and aligned-
+ * alloc paths can never disagree on whether the soft limit applies
+ * — the previous divergence (aligned-alloc silently bypassed the
+ * limit) is what motivated the helper. */
+static bool pre_alloc_soft_limit_gate(size_t size)
+{
+	if (!over_soft_limit(size)) {
+		return true;
+	}
+	if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
+		return true;
+	}
+	errno = ENOMEM;
+	return false;
+}
+
+/* Shared post-alloc bookkeeping. Updates the predict-prefetch table
+ * with the class actually served and records the alloc against the
+ * lifetime tracker. Called after a successful allocation by every
+ * malloc-shaped entry point. The cache re-peek matters: the
+ * dispatcher may have lazily created a TLC for this thread on the
+ * just-completed alloc. */
+static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
+{
+	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
+	if (cache != NULL) {
+		v8m_thread_cache_predict_update(cache, caller_pc,
+						v8m_size_class(size));
+	}
+	/* Lifetime tracker (fragmentation.md §5.2). The helper exits
+	 * early when V8M_OPT_LIFETIME_TRACKING is off, so the cost is
+	 * one config load + one branch in the common path. */
+	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
+					       v8m_arch_rdtsc());
+}
+
 /* Shared malloc body parameterized on the user's caller PC. Every
  * public entry that ultimately serves a malloc-shaped allocation
  * (`v8m_malloc`, `v8m_calloc`, `v8m_realloc`'s alloc paths) routes
@@ -520,13 +559,8 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 		 * malloc(0) policy. */
 		return v8m_bootstrap_alloc(size > 0U ? size : 1U);
 	}
-	if (over_soft_limit(size)) {
-		if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
-			/* The handler released enough memory to fit. */
-		} else {
-			errno = ENOMEM;
-			return NULL;
-		}
+	if (!pre_alloc_soft_limit_gate(size)) {
+		return NULL;
 	}
 	/* Predictive prefetch (winning-algorithms.md §9): hash the
 	 * caller PC, look up the most recently observed class for
@@ -556,41 +590,20 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 		errno = ENOMEM;
 		return ptr;
 	}
-	/* Update the predict slot with the class we actually served.
-	 * Re-peek the cache because the dispatcher may have just
-	 * created one if this was the thread's first allocation. */
-	cache = v8m_thread_cache_peek();
-	if (cache != NULL) {
-		v8m_thread_cache_predict_update(cache, caller_pc,
-						v8m_size_class(size));
-	}
-	/* Lifetime tracker (fragmentation.md §5.2). The helper exits
-	 * early when V8M_OPT_LIFETIME_TRACKING is off, so the cost is
-	 * one config load + one branch in the common path. */
-	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
-					       v8m_arch_rdtsc());
+	post_alloc_record(ptr, caller_pc, size);
 	return ptr;
 }
 
 /* Shared aligned-alloc body parameterized on the user's caller PC.
- * Mirror of `do_malloc_pc` for the alignment-aware path: soft limit
- * check + OOM handler retry + prefetch + arena routing + lifetime
- * tracker hooks all consult the user's actual call site, same as
- * the malloc path. Without the soft-limit + handler plumbing here,
- * a workload that mixes plain malloc with posix_memalign /
- * aligned_alloc would have its limit silently bypassed by the
- * aligned allocations. */
+ * Mirror of `do_malloc_pc` for the alignment-aware path. The
+ * soft-limit gate and post-alloc bookkeeping route through the
+ * same helpers as the malloc path so the two cannot drift again. */
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
 static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 				 const void *caller_pc)
 {
-	if (over_soft_limit(size)) {
-		if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
-			/* The handler released enough memory to fit. */
-		} else {
-			errno = ENOMEM;
-			return NULL;
-		}
+	if (!pre_alloc_soft_limit_gate(size)) {
+		return NULL;
 	}
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 	if (cache != NULL) {
@@ -605,13 +618,7 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 	if (ptr == NULL) {
 		return NULL;
 	}
-	cache = v8m_thread_cache_peek();
-	if (cache != NULL) {
-		v8m_thread_cache_predict_update(cache, caller_pc,
-						v8m_size_class(size));
-	}
-	v8m_thread_cache_lifetime_record_alloc(ptr, caller_pc,
-					       v8m_arch_rdtsc());
+	post_alloc_record(ptr, caller_pc, size);
 	return ptr;
 }
 

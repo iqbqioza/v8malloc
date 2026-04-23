@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Refactor: extract `pre_alloc_soft_limit_gate` +
+  `post_alloc_record` helpers from `do_malloc_pc` +
+  `do_aligned_alloc_pc`.** The previous cycle's bug fix
+  (aligned-alloc silently bypassed `V8M_OPT_SOFT_LIMIT` and the
+  OOM handler) was rooted in two near-identical functions that had
+  drifted. Hoisting the shared shape into one helper for the
+  pre-alloc gate (soft-limit check + handler retry) and one for
+  the post-alloc bookkeeping (predict-prefetch update + lifetime
+  record) means the malloc and aligned-alloc paths can no longer
+  disagree on what the policy is. Behaviour preserved.
+
 - **Refactor: bump-pointer primitive shared by bootstrap +
   signal-safe.** New `src/v8m_bump.{h,c}` ships a tiny atomic-bump
   module (`v8m_bump_alloc` / `_owns` / `_remaining`); the bootstrap
