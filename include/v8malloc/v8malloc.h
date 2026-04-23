@@ -331,6 +331,9 @@ struct v8m_slab_class_breakdown {
 V8M_EXPORT void v8m_get_slab_class_breakdown(
     struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES]);
 
+/* Per-lifetime-arena slab breakdown — declared further down,
+ * after the `enum v8m_lifetime_class` definition. */
+
 /*
  * Architecture / runtime probe snapshot. Programmatic counterpart
  * to the `v8malloc isa: …` line the constructor writes to stderr
@@ -484,6 +487,26 @@ enum v8m_lifetime_class {
 };
 
 V8M_EXPORT enum v8m_lifetime_class v8m_estimate_lifetime(const void *caller_pc);
+
+/*
+ * Per-lifetime-arena slab breakdown. Same shape as
+ * `v8m_get_slab_class_breakdown` but reads from one of the four
+ * dispatcher arenas:
+ *   V8M_LIFETIME_UNKNOWN  → default arena (the one
+ *                           v8m_get_slab_class_breakdown reports)
+ *   V8M_LIFETIME_EPHEMERAL → ephemeral lifetime arena
+ *   V8M_LIFETIME_SHORT     → short lifetime arena
+ *   V8M_LIFETIME_LONG      → long lifetime arena
+ *
+ * Only meaningful when `V8M_OPT_LIFETIME_TRACKING` is on and the
+ * dispatcher has accumulated enough per-PC samples to route
+ * allocations to the matching arena; otherwise the lifetime arenas
+ * read as empty. Pre-init returns all zeroes. Out-of-range
+ * `lifetime` values fall through to the default arena.
+ */
+V8M_EXPORT void v8m_get_slab_class_breakdown_lifetime(
+    enum v8m_lifetime_class lifetime,
+    struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES]);
 
 /*
  * Per-NUMA-node memory balance snapshot (numa.md §6.1 — inter-node

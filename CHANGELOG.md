@@ -7,6 +7,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Public `v8m_get_slab_class_breakdown_lifetime(lifetime, out)` API.
+  Same shape as `v8m_get_slab_class_breakdown` but reads from one
+  of the four dispatcher arenas (default + EPHEMERAL/SHORT/LONG
+  lifetime arenas), so an operator with `V8M_OPT_LIFETIME_TRACKING`
+  on can see the per-arena utilization that the lifetime routing
+  produces. `V8M_LIFETIME_UNKNOWN` routes to the default arena
+  (matching `v8m_get_slab_class_breakdown` exactly); the three
+  classified values route to their dedicated lifetime arena pools.
+  Out-of-range values fall through to default. Backed by a new
+  shared `api_fill_slab_breakdown` core so the
+  raw-stats-to-public-struct conversion lives in one place.
+  Exported under V8MALLOC_1.0; coverage in
+  `tests/test_api.c::check_slab_class_breakdown_lifetime_api`
+  (NULL tolerance, UNKNOWN-vs-default agreement, lifetime arena
+  zeroes when tracking is off).
+
+### Added
 - Public `v8m_option_name(option_id)` API + companion config dump
   on `V8M_VERBOSE`. The accessor returns the stable short name
   for each `V8M_OPT_*` (e.g. "verbose", "huge_pages",

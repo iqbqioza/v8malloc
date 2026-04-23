@@ -1099,6 +1099,63 @@ V8M_EXPORT void v8m_get_arch_info(struct v8m_arch_info *out)
 	out->has_lse = v8m_arch_has_lse() ? 1U : 0U;
 }
 
+/* Map a public lifetime class to the dispatcher's slab pool.
+ * Out-of-range values fall through to the default pool — callers
+ * that pass a malformed value still get sensible data instead of
+ * a NULL deref. */
+static struct v8m_slab_pool *
+api_pool_for_lifetime(enum v8m_lifetime_class lifetime)
+{
+	switch (lifetime) {
+	case V8M_LIFETIME_EPHEMERAL:
+		return &g_dispatch.slab_lifetime[V8M_ARENA_EPHEMERAL - 1U];
+	case V8M_LIFETIME_SHORT:
+		return &g_dispatch.slab_lifetime[V8M_ARENA_SHORT - 1U];
+	case V8M_LIFETIME_LONG:
+		return &g_dispatch.slab_lifetime[V8M_ARENA_LONG - 1U];
+	case V8M_LIFETIME_UNKNOWN:
+	default:
+		return &g_dispatch.slab;
+	}
+}
+
+/* Shared core. Both the default-arena and per-lifetime accessors
+ * delegate here so the conversion-from-raw-stats logic lives in
+ * one place. */
+static void api_fill_slab_breakdown(
+    struct v8m_slab_pool *pool,
+    struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES])
+{
+	struct v8m_slab_pool_class_stats raw[V8M_MEDIUM_FIRST_CLASS] = {0};
+	v8m_slab_pool_get_class_stats(pool, raw, V8M_MEDIUM_FIRST_CLASS);
+	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
+		out[i].pages_in_use = raw[i].pages_in_use;
+		out[i].slots_total = raw[i].slots_total;
+		out[i].slots_used = raw[i].slots_used;
+		out[i].utilization_pct =
+		    raw[i].slots_total == 0U
+			? 0U
+			: (uint32_t)((raw[i].slots_used * 100U) /
+				     raw[i].slots_total);
+	}
+}
+
+V8M_EXPORT void v8m_get_slab_class_breakdown_lifetime(
+    enum v8m_lifetime_class lifetime,
+    struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES])
+{
+	if (out == NULL) {
+		return;
+	}
+	(void)memset(out, 0,
+		     sizeof(struct v8m_slab_class_breakdown) *
+			 V8M_PUBLIC_NUM_SIZE_CLASSES);
+	if (!dispatch_ready()) {
+		return;
+	}
+	api_fill_slab_breakdown(api_pool_for_lifetime(lifetime), out);
+}
+
 V8M_EXPORT void v8m_get_slab_class_breakdown(
     struct v8m_slab_class_breakdown out[V8M_PUBLIC_NUM_SIZE_CLASSES])
 {
@@ -1111,19 +1168,7 @@ V8M_EXPORT void v8m_get_slab_class_breakdown(
 	if (!dispatch_ready()) {
 		return;
 	}
-	struct v8m_slab_pool_class_stats raw[V8M_MEDIUM_FIRST_CLASS] = {0};
-	v8m_slab_pool_get_class_stats(&g_dispatch.slab, raw,
-				      V8M_MEDIUM_FIRST_CLASS);
-	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
-		out[i].pages_in_use = raw[i].pages_in_use;
-		out[i].slots_total = raw[i].slots_total;
-		out[i].slots_used = raw[i].slots_used;
-		out[i].utilization_pct =
-		    raw[i].slots_total == 0U
-			? 0U
-			: (uint32_t)((raw[i].slots_used * 100U) /
-				     raw[i].slots_total);
-	}
+	api_fill_slab_breakdown(&g_dispatch.slab, out);
 	/* Indices [V8M_MEDIUM_FIRST_CLASS, V8M_PUBLIC_NUM_SIZE_CLASSES)
 	 * cover Medium / Large / Huge classes that have no slab
 	 * backing — leave them zeroed by the memset above. */
