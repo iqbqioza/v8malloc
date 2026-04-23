@@ -203,8 +203,6 @@ jobs:
     # success requirement (no `if: always()`) gates on green.
     needs: [prepare, build-binaries]
     runs-on: ubuntu-latest
-    outputs:
-      release_notes: ${{ steps.notes.outputs.notes }}
     steps:
       - name: Checkout (with retry on transient HTTP 500)
         # actions/checkout's internal retry only spans ~3 attempts
@@ -262,29 +260,6 @@ jobs:
               raise SystemExit("CHANGELOG.md: '## [Unreleased]' heading not found")
           path.write_text(updated)
           PY
-      - name: Extract release notes
-        id: notes
-        # Pull the just-promoted version's section out of CHANGELOG
-        # so the GitHub release body shows the human-curated notes
-        # the maintainer wrote during the cycle.
-        run: |
-          ver="${{ needs.prepare.outputs.new_version }}"
-          awk -v ver="$ver" '
-            BEGIN { in_sec = 0 }
-            /^## \[/ {
-              if ($0 ~ "\\[" ver "\\]") { in_sec = 1; print; next }
-              else if (in_sec) { exit }
-            }
-            in_sec { print }
-          ' CHANGELOG.md > release_notes.md
-          if [ ! -s release_notes.md ]; then
-            echo "::warning::release notes section [$ver] is empty"
-          fi
-          {
-            echo 'notes<<RELEASE_NOTES_EOF'
-            cat release_notes.md
-            echo RELEASE_NOTES_EOF
-          } >> "$GITHUB_OUTPUT"
       - name: Commit + tag + push
         # `git config user.{name,email}` already set by the
         # checkout-with-retry step. Push runs over the same
@@ -342,6 +317,31 @@ jobs:
           (cd artifacts && sha256sum "v8malloc-$ver-src.tar.gz" \
               > "v8malloc-$ver-src.tar.gz.sha256")
           ls -la artifacts/
+      - name: Extract release notes from CHANGELOG
+        # Pull the just-promoted version's section out of the
+        # checked-out CHANGELOG. Plumbing the notes through a job
+        # output instead would expand the value into an env var on
+        # every downstream step — when the section is large
+        # (multi-cycle Unreleased block being promoted), bash hits
+        # `argument list too long` at exec time and the whole job
+        # aborts after the tag is already pushed. Re-extracting
+        # here keeps the giant payload in a file the entire time.
+        env:
+          NEW_VERSION: ${{ needs.prepare.outputs.new_version }}
+        run: |
+          awk -v ver="$NEW_VERSION" '
+            BEGIN { in_sec = 0 }
+            /^## \[/ {
+              if ($0 ~ "\\[" ver "\\]") { in_sec = 1; print; next }
+              else if (in_sec) { exit }
+            }
+            in_sec { print }
+          ' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "::warning::release notes section [$NEW_VERSION] is empty"
+            echo "_(no notes)_" > release_notes.md
+          fi
+          wc -c release_notes.md
       - name: Compose release body
         # CHANGELOG section first (human-curated narrative), then a
         # divider, then the auto-generated PR list which `gh
@@ -349,7 +349,6 @@ jobs:
         # normally REPLACE the file with — we render it ourselves
         # via the API so both halves coexist.
         env:
-          NOTES: ${{ needs.commit-and-tag.outputs.release_notes }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ver="${{ needs.prepare.outputs.new_version }}"
@@ -357,7 +356,7 @@ jobs:
           # base (skip the just-pushed one).
           prev=$(git tag --sort=-v:refname | grep '^v[0-9]' | grep -v "^v$ver$" | head -1)
           {
-            echo "$NOTES"
+            cat release_notes.md
             echo
             echo '---'
             echo
@@ -374,8 +373,7 @@ jobs:
           else
             echo '_First release — no prior tag for diff._' >> body.md
           fi
-          echo '--- body.md ---'
-          cat body.md
+          wc -c body.md
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
