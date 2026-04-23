@@ -21,6 +21,7 @@
 #include "v8m_internal.h"
 #include "v8m_large.h"
 #include "v8m_libc_fallback.h"
+#include "v8m_numa.h" /* v8m_numa_current_cpu for the L2 steal exclude id */
 #include "v8m_page.h"
 #include "v8m_page_heap.h"
 #include "v8m_refill_controller.h"
@@ -153,11 +154,25 @@ static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 	uint32_t batch_size =
 	    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
 
+	uint32_t cur_cpu = v8m_numa_current_cpu();
 	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
 	size_t got = 0;
 	if (l2_cache != NULL) {
 		got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
 					       &batch_head, &batch_tail);
+	}
+	if (got == 0U) {
+		/* Local L2 empty — try cross-CPU work-stealing. The
+		 * producer/consumer pattern (mb_03) leaves consumer CPUs'
+		 * L2s hoarding freed slots while producer CPUs starve to
+		 * the slab-pool mutex; the steal is an O(1) hint-driven
+		 * pop_batch against the most recent donor's stack. On
+		 * uncontended workloads the donor is usually the calling
+		 * CPU itself (excluded), so steal returns 0 and we drop
+		 * straight through to the slab pool — same shape as before
+		 * for the single-thread case. */
+		got = v8m_core_cache_steal_batch(cls, cur_cpu, batch_size,
+						 &batch_head, &batch_tail);
 	}
 	if (got == 0U) {
 		/* L2 empty (cold start or no overflow has published yet)

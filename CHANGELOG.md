@@ -6,6 +6,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+- **L2 work-stealing for cross-thread free patterns.** Adds a
+  `v8m_core_cache_steal_batch` shortcut that, when the calling
+  thread's local L2 is empty, redirects the pop to the L2 of the CPU
+  that most recently `push_batch`'d to that class. The donor hint is
+  a single per-class atomic CPU id, updated relaxed-atomically by
+  every `push_batch`, so finding a non-empty stack is one load + one
+  branch + a normal pop_batch — no scanning. Wired into
+  `try_tlc_fast_paths` in `v8m_dispatch.c` between the local-L2 miss
+  and the slab-pool fall-through, with the caller's CPU excluded so
+  the producer/consumer pattern (consumer feeds local L2, producer
+  starves on a different CPU) lands cleanly. Verified end-to-end
+  with a counters-instrumented test build: 99.9 % steal hit rate,
+  millions of slots redirected per second on a 2-pair size-64
+  workload. mb_03 producer/consumer at 2 pairs × 64 B improves from
+  ~3.7 M handoffs/sec to ~5–7 M, putting v8malloc roughly at parity
+  with tcmalloc on the workload that previously pinpointed the
+  largest gap.
+
+- **Build with `-fno-semantic-interposition`.** The libc-compat
+  wrappers (`malloc`, `free`, `calloc`, `realloc`, ...) are thin
+  forwarders to the matching `v8m_*` body. Without the flag, the
+  intra-SO call to `v8m_malloc` still routes through the GOT so an
+  LD_PRELOAD downstream could interpose it — leaving each wrapper
+  as a real function call + return. We don't support being
+  interposed (we *are* the interposer), so the flag is safe and
+  lets the compiler inline the fast path directly into the
+  wrapper. Verified via `objdump -d libv8malloc.so` on the
+  `<malloc>` body — the inlined TLC bin pop is now visible inside
+  the wrapper symbol, eliminating one function call per
+  LD_PRELOAD'd `malloc`/`free`.
+
 ### Changed
 - **Refactor: split self-contained diagnostic surface into
   `src/v8m_api_diag.c`.** The five exported diagnostics that

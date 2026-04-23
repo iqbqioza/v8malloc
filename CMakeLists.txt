@@ -260,6 +260,15 @@ function(v8malloc_configure_target tgt)
 		# per intra-library call. Combines with -z now to fully
 		# resolve symbols at load time.
 		-fno-plt
+		# -fno-semantic-interposition: intra-SO calls to V8M_EXPORT
+		# (visibility=default) symbols normally still go through the
+		# GOT so an LD_PRELOAD downstream can interpose them. We
+		# don't support being-interposed (we ARE the interposer);
+		# the flag tells the compiler the in-DSO definition is the
+		# one that runs, enabling inlining of `malloc` →
+		# `v8m_malloc` and similar wrappers down to a tail call (or
+		# full inline of the fast path).
+		-fno-semantic-interposition
 		# LTO collapses cross-TU function calls on the malloc
 		# fast path: v8m_malloc → do_malloc_pc → v8m_dispatch_alloc
 		# → try_tlc_fast_paths → v8m_thread_cache_alloc lives across

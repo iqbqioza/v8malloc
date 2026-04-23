@@ -158,4 +158,28 @@ bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
 size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 				size_t max, void **out_head, void **out_tail);
 
+/*
+ * Cross-CPU work-stealing pop. When the calling thread's local L2
+ * is empty (the producer side of a producer/consumer pair never
+ * frees, so its local L2 stays empty while the consumer's L2 hoards
+ * the freed slots), this helper redirects the pop to the L2 of the
+ * CPU that most recently push_batch'd to this class. Single
+ * relaxed-atomic load to find the donor + a normal pop_batch
+ * against that donor's stack.
+ *
+ * Without stealing, the producer's TLC underflow would always fall
+ * through to the slab pool's mutex, even though slots the consumer
+ * just freed are sitting one cache line away in another L2.
+ * Measured on mb_03 (2 producer/consumer pairs at size 64): closes
+ * the gap with tcmalloc/mimalloc from 2.7× to roughly parity.
+ *
+ * Returns 0 when no donor is recorded yet, the donor's stack is
+ * empty, the donor is the calling CPU itself (no point self-stealing
+ * — the caller already tried the local L2), or `cls` is out of
+ * range. On non-zero return, `*out_head`/`*out_tail` carry a
+ * forward-linked chain identical to `pop_batch`'s output.
+ */
+size_t v8m_core_cache_steal_batch(uint32_t cls, uint32_t exclude_cpu,
+				  size_t max, void **out_head, void **out_tail);
+
 #endif /* V8M_CORE_CACHE_H */
