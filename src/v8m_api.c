@@ -523,14 +523,23 @@ static bool pre_alloc_soft_limit_gate(size_t size)
 	return false;
 }
 
+/* Forward declaration: defined later with the rest of the
+ * double-free ring helpers. */
+static void debug_clear_double_free_record(const void *ptr);
+
 /* Shared post-alloc bookkeeping. Updates the predict-prefetch table
- * with the class actually served and records the alloc against the
- * lifetime tracker. Called after a successful allocation by every
- * malloc-shaped entry point. The cache re-peek matters: the
- * dispatcher may have lazily created a TLC for this thread on the
- * just-completed alloc. */
+ * with the class actually served, records the alloc against the
+ * lifetime tracker, and (under V8M_OPT_DEBUG) drops the freed-
+ * pointer record so the next free of this address is not
+ * misclassified as a double-free. Called after a successful
+ * allocation by every malloc-shaped entry point. The cache re-peek
+ * matters: the dispatcher may have lazily created a TLC for this
+ * thread on the just-completed alloc. */
 static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
 {
+	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
+		debug_clear_double_free_record(ptr);
+	}
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 	if (cache != NULL) {
 		v8m_thread_cache_predict_update(cache, caller_pc,
@@ -629,12 +638,20 @@ V8M_EXPORT void *v8m_malloc(size_t size)
 /* Double-free detection ring buffer (api.md §6.2). Off the hot
  * path entirely when V8M_OPT_DEBUG is 0 — the ring touch is gated
  * behind the config check. When DEBUG is on, every free consults
- * the ring; if the pointer is already there, abort with a
- * diagnostic. The ring is small (4096 entries = 32 KiB) and the
- * overwrite policy is round-robin: a sustained free rate above
- * 4096 ops between detections will miss the duplicate. That's the
- * tradeoff for not paying per-pointer hash-table cost. The full
- * call-site-aware leak detector lands later. */
+ * the ring; if the pointer is already there AND has not been
+ * re-allocated since, abort with a diagnostic. The ring is small
+ * (4096 entries = 32 KiB) and the overwrite policy is round-robin:
+ * a sustained free rate above 4096 ops between detections will miss
+ * the duplicate. That's the tradeoff for not paying per-pointer
+ * hash-table cost.
+ *
+ * `debug_clear_double_free_record` MUST be called on every fresh
+ * allocation in DEBUG mode — without it, the lifecycle
+ * `free(P) → malloc returns P → free(P)` is misclassified as a
+ * double-free even though it is the legitimate alloc/free reuse
+ * pattern that every workload runs. The clear is O(N) over the
+ * ring under the same mutex; acceptable in DEBUG mode where
+ * correctness wins over speed. */
 #define V8M_DOUBLE_FREE_RING_SIZE 4096
 static void *g_double_free_ring[V8M_DOUBLE_FREE_RING_SIZE];
 static atomic_size_t g_double_free_ring_idx;
@@ -662,6 +679,24 @@ static void debug_check_double_free(void *ptr)
 						memory_order_relaxed) %
 		      V8M_DOUBLE_FREE_RING_SIZE;
 	g_double_free_ring[slot] = ptr;
+	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
+}
+
+/* Drop `ptr` from the freed-pointer ring on a fresh allocation that
+ * returned it — without this, the next free is misflagged as a
+ * double-free. Single linear scan; only fires when DEBUG is on. */
+static void debug_clear_double_free_record(const void *ptr)
+{
+	if (ptr == NULL) {
+		return;
+	}
+	(void)pthread_mutex_lock(&g_double_free_ring_lock);
+	for (size_t i = 0; i < V8M_DOUBLE_FREE_RING_SIZE; i++) {
+		if (g_double_free_ring[i] == ptr) {
+			g_double_free_ring[i] = NULL;
+			break;
+		}
+	}
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 }
 

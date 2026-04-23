@@ -105,10 +105,17 @@ static int check_single_round_trip(void)
 	/* Free now drains the arena (MADV_DONTNEED) and keeps the VMA
 	 * for cheap revival; the actual munmap waits for the bg-purge
 	 * sweep. Force the sweep with idle_ticks=0 so this test still
-	 * verifies that a fully-drained arena is releasable. */
+	 * verifies that a fully-drained arena is releasable. The MADV
+	 * is gated on V8M_OPT_DEBUG=0 — with DEBUG on, the buddy pool
+	 * skips the MADV to preserve the UAF-poison invariant that the
+	 * verify path on the next alloc relies on, so the
+	 * advise_calls assertion only holds when DEBUG is off. */
 	struct v8m_page_heap_stats after_free = {0};
 	v8m_page_heap_get_stats(&after_free);
-	if (after_free.advise_calls <= before_free.advise_calls) {
+	int64_t debug_on = 0;
+	(void)v8m_get_option(V8M_OPT_DEBUG, &debug_on);
+	if (debug_on == 0 &&
+	    after_free.advise_calls <= before_free.advise_calls) {
 		v8m_buddy_pool_destroy(&pool);
 		return fail("single free did not MADV_DONTNEED the arena");
 	}

@@ -74,6 +74,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- DEBUG-mode double-free detector no longer false-positives on
+  the legitimate alloc/free reuse pattern. The 4096-entry ring
+  recorded every freed pointer but never cleared an entry when
+  that address was subsequently re-allocated, so the lifecycle
+  `free(P) → malloc returns P → free(P)` was misclassified as a
+  double-free. With V8M_DEBUG=1, every realistic workload tripped
+  the detector almost immediately. Fix: added
+  `debug_clear_double_free_record(ptr)` invoked from
+  `post_alloc_record` (single linear scan, only fires when DEBUG
+  is on) so the next free of a fresh allocation is correctly
+  unflagged.
+
+- DEBUG-mode UAF poison no longer destroyed by the buddy pool's
+  drained-arena MADV_DONTNEED. When an arena went empty, the
+  buddy pool issued MADV_DONTNEED to release physical frames
+  while keeping the VMA intact for cheap revival. The next
+  fault-in returns zero pages — which the UAF verify on the
+  revival alloc reads as `byte=0x00, expected=0xdf` and aborts.
+  The slab pool's drained cache re-runs init (which re-poisons)
+  on revival, so it was unaffected; the buddy pool only re-runs
+  `v8m_buddy_alloc` (which only verifies, never re-poisons). Fix:
+  skip the MADV when V8M_OPT_DEBUG is on. The DEBUG cost of
+  holding RSS for idle arenas is acceptable — DEBUG mode is
+  already paying for poison + verify everywhere else.
+  `tests/test_buddy_pool.c::check_single_round_trip` updated to
+  skip its `advise_calls` assertion when DEBUG is on so the
+  V8M_DEBUG=1 env-driven case does not flip the expectation.
+
 - Fork safety hole: the dispatcher's prefork/postfork hooks
   only locked the default slab pool and the buddy pool,
   silently leaving three lifetime arenas

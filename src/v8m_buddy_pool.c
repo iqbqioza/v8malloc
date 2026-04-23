@@ -194,11 +194,20 @@ bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 		 * frames immediately. A revival alloc within the next
 		 * few bg-purge ticks reuses the slot without an
 		 * mmap/munmap round trip; otherwise the bg purge sweep
-		 * fully releases it (see v8m_buddy_pool_sweep_idle). */
+		 * fully releases it (see v8m_buddy_pool_sweep_idle).
+		 *
+		 * Skip the MADV when V8M_OPT_DEBUG is on: MADV_DONTNEED
+		 * causes the kernel to re-fault zero pages on the next
+		 * touch, which destroys the UAF-poison invariant the
+		 * verify path on the next alloc relies on. The DEBUG
+		 * cost of holding RSS for idle arenas is acceptable —
+		 * DEBUG mode is already paying for poison + verify. */
 		slot->drained = true;
 		slot->idle_ticks = 0;
-		v8m_page_heap_advise_dont_need(slot->buddy.arena_base,
-					       V8M_BUDDY_MAX_BLOCK);
+		if (v8m_config_get(V8M_OPT_DEBUG) == 0) {
+			v8m_page_heap_advise_dont_need(slot->buddy.arena_base,
+						       V8M_BUDDY_MAX_BLOCK);
+		}
 	}
 
 	(void)pthread_mutex_unlock(&pool->lock);
