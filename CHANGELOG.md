@@ -47,6 +47,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   appears under V8MALLOC_1.0.
 
 ### Fixed
+- Aligned allocation paths (`v8m_aligned_alloc`,
+  `v8m_posix_memalign`, `v8m_memalign`, `v8m_valloc`,
+  `v8m_pvalloc`) now honour `V8M_OPT_SOFT_LIMIT` and the OOM
+  handler retry, mirroring the malloc path. The previous
+  `do_aligned_alloc_pc` implementation skipped both the
+  pre-allocation soft-limit check and the post-allocation OOM
+  handler retry, so a workload that mixed plain `malloc` with
+  `posix_memalign` or `aligned_alloc` would have its limit
+  silently bypassed by the aligned allocations and the OOM
+  handler would never fire on aligned-alloc failures. Both
+  paths now route through the same shape — `over_soft_limit` →
+  optional handler retry → dispatch → OOM handler retry on
+  NULL — so the policy applies uniformly.
+
 - THP stats snapshot no longer triggers lazy-init of the cold
   threshold as a side effect. The previous refactor routed the
   `thp_cold_threshold_ticks` field of `v8m_page_heap_stats`

@@ -573,20 +573,34 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 }
 
 /* Shared aligned-alloc body parameterized on the user's caller PC.
- * Mirror of `do_malloc_pc` for the alignment-aware path: prefetch
- * + arena routing + lifetime tracker hooks all consult the user's
- * actual call site. */
+ * Mirror of `do_malloc_pc` for the alignment-aware path: soft limit
+ * check + OOM handler retry + prefetch + arena routing + lifetime
+ * tracker hooks all consult the user's actual call site, same as
+ * the malloc path. Without the soft-limit + handler plumbing here,
+ * a workload that mixes plain malloc with posix_memalign /
+ * aligned_alloc would have its limit silently bypassed by the
+ * aligned allocations. */
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
 static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 				 const void *caller_pc)
 {
-	void *ptr = NULL;
+	if (over_soft_limit(size)) {
+		if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
+			/* The handler released enough memory to fit. */
+		} else {
+			errno = ENOMEM;
+			return NULL;
+		}
+	}
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 	if (cache != NULL) {
 		v8m_thread_cache_predict_prefetch(cache, caller_pc);
 	}
 	v8m_dispatch_set_caller_pc(caller_pc);
-	ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	if (ptr == NULL && oom_handler_says_retry(size)) {
+		ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
+	}
 	v8m_dispatch_set_caller_pc(NULL);
 	if (ptr == NULL) {
 		return NULL;
