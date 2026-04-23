@@ -189,9 +189,14 @@ jobs:
         uses: uraimo/run-on-arch-action@d94c13912ea685de38fccc1109385b83fd79427d # v3.0.1
         with:
           arch: ${{ matrix.arch }}
-          distro: bookworm
-          # Skip-arch-check so qemu-user emulation drives the
-          # build — we don't run a real arm/ppc/s390/riscv host.
+          # Must ship GCC >= 13 to satisfy the top-level CMakeLists
+          # version gate. Debian `bookworm` ships GCC 12.2 and would
+          # fail the configure step with
+          # `GCC >= 13 required (got 12.2.0)`; `ubuntu24.04` is the
+          # distro the regular multi-arch CI workflow already uses
+          # successfully on every non-x86 target, so keeping the two
+          # workflows aligned minimises surprise.
+          distro: ubuntu24.04
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           install: |
             apt-get update -qq
