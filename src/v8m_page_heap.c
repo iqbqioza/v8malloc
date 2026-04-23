@@ -24,6 +24,7 @@
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node, v8m_numa_node_count */
 #include "v8m_page_heap.h"
+#include "v8m_thp.h"
 #include "v8malloc/v8malloc.h"
 
 /* MPOL_BIND lives in <linux/mempolicy.h> which pulls in conflicting
@@ -46,34 +47,12 @@ static _Atomic uint64_t v8m_mbind_failures = 0;
 static _Atomic uint64_t v8m_gigantic_alloc_calls = 0;
 static _Atomic uint64_t v8m_gigantic_alloc_failures = 0;
 /*
- * Adaptive THP advice (huge-pages.md §5). The page heap tracks the
- * EMA of inter-allocation TSC ticks for THP-eligible mappings; when
- * the EMA exceeds `g_thp_cold_threshold_ticks` (cold workload), the
- * MADV_HUGEPAGE hint is replaced with MADV_NOHUGEPAGE so the kernel
- * does not waste effort promoting a region that the program is
- * unlikely to actively touch. The hot/warm path keeps the existing
- * MADV_HUGEPAGE behaviour (and increments the legacy
- * `hugepage_advise_calls` counter), so the only behaviour change vs.
- * the unconditional baseline is the addition of the demote branch
- * for cold workloads.
- *
- * Threshold derivation: lazy-init from `v8m_arch_tsc_frequency_mhz()`
- * to ≈ 1 second in TSC ticks (mhz × 1e6). Tests can override both
- * the threshold and the current EMA via
- * `v8m_page_heap_thp_test_inject` so the decision can be exercised
- * without depending on wall-clock timing.
+ * Adaptive THP advice (huge-pages.md §5). The decision logic lives
+ * in v8m_thp.{h,c} now; the page heap calls into it on each THP-
+ * eligible allocation and consults the threshold on the per-region
+ * age sweep. The per-region age tracker (`promoted_at_tsc` on each
+ * region_entry) stays here because it belongs to the region map.
  */
-static _Atomic uint64_t v8m_thp_promote_calls = 0;
-static _Atomic uint64_t v8m_thp_demote_calls = 0;
-/*
- * Bg-sweep age demotes — counts regions whose alloc-time PROMOTE
- * advice was reversed by the bg purge thread when the region
- * outlasted `g_thp_cold_threshold_ticks` without re-promotion.
- * Distinct from `v8m_thp_demote_calls` which counts alloc-time
- * demote decisions; this counter measures the per-region tracker's
- * effect.
- */
-static _Atomic uint64_t v8m_thp_age_demote_calls = 0;
 
 /*
  * Process-wide anchor reservation. Lazy-initialized on first
@@ -119,9 +98,6 @@ void v8m_page_heap_anchor_destroy_for_test(void)
 				      memory_order_release);
 	}
 }
-static _Atomic uint64_t g_thp_last_alloc_tsc;
-static _Atomic uint64_t g_thp_ema_ticks;
-static _Atomic uint64_t g_thp_cold_threshold_ticks;
 
 /*
  * Allocations at or above the kernel huge-page size are candidates
@@ -655,68 +631,6 @@ static void bind_and_account(void *addr, size_t bytes)
 				  memory_order_relaxed);
 }
 
-enum v8m_thp_advice {
-	V8M_THP_PROMOTE = 0,
-	V8M_THP_DEMOTE = 1,
-};
-
-static uint64_t thp_cold_threshold_ticks(void)
-{
-	uint64_t cached = atomic_load_explicit(&g_thp_cold_threshold_ticks,
-					       memory_order_relaxed);
-	if (cached != 0U) {
-		return cached;
-	}
-	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
-	if (mhz == 0U) {
-		mhz = 1000U; /* non-x86_64 fallback returns 1000 by contract:
-			      * v8m_arch_rdtsc returns nanoseconds, so the
-			      * "mhz" basis becomes ticks-per-microsecond. */
-	}
-	uint64_t ticks = mhz * 1000U * 1000U; /* ≈ 1 second */
-	atomic_store_explicit(&g_thp_cold_threshold_ticks, ticks,
-			      memory_order_relaxed);
-	return ticks;
-}
-
-static enum v8m_thp_advice thp_decide_and_record(void)
-{
-	uint64_t now = v8m_arch_rdtsc();
-	uint64_t last = atomic_exchange_explicit(&g_thp_last_alloc_tsc, now,
-						 memory_order_relaxed);
-	if (last == 0U || now <= last) {
-		/* First THP-eligible alloc since process start (or a
-		 * monotonic-clock wrap on the rdtsc fallback path) — no
-		 * inter-arrival delta to fold into the EMA. Default to
-		 * PROMOTE (current behaviour). */
-		return V8M_THP_PROMOTE;
-	}
-	uint64_t delta = now - last;
-	uint64_t prev_ema =
-	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
-	uint64_t new_ema =
-	    (prev_ema == 0U) ? delta : ((prev_ema * 3U + delta) / 4U);
-	atomic_store_explicit(&g_thp_ema_ticks, new_ema, memory_order_relaxed);
-	if (new_ema > thp_cold_threshold_ticks()) {
-		return V8M_THP_DEMOTE;
-	}
-	return V8M_THP_PROMOTE;
-}
-
-/* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
-void v8m_page_heap_thp_test_inject(uint64_t cold_threshold_ticks,
-				   uint64_t ema_ticks)
-{
-	atomic_store_explicit(&g_thp_cold_threshold_ticks, cold_threshold_ticks,
-			      memory_order_relaxed);
-	atomic_store_explicit(&g_thp_ema_ticks, ema_ticks,
-			      memory_order_relaxed);
-	/* Reset last-alloc TSC so the next decision recomputes from a
-	 * clean baseline rather than mixing the test-injected EMA with
-	 * a stale delta. */
-	atomic_store_explicit(&g_thp_last_alloc_tsc, 0U, memory_order_relaxed);
-}
-
 /*
  * Anchor-or-mmap: VMA-minimization fallback for THP-eligible
  * allocations. Tries the global anchor first when the request is at
@@ -868,17 +782,15 @@ void *v8m_page_heap_alloc(size_t bytes, size_t alignment)
 		 * threshold, demote to MADV_NOHUGEPAGE so the kernel
 		 * does not waste effort promoting a region the program
 		 * is unlikely to actively touch. */
-		enum v8m_thp_advice advice = thp_decide_and_record();
+		enum v8m_thp_advice advice = v8m_thp_decide_and_record();
 		if (advice == V8M_THP_DEMOTE) {
 			(void)madvise(result, bytes, MADV_NOHUGEPAGE);
-			atomic_fetch_add_explicit(&v8m_thp_demote_calls, 1U,
-						  memory_order_relaxed);
+			v8m_thp_record_demote();
 		} else {
 			(void)madvise(result, bytes, MADV_HUGEPAGE);
 			atomic_fetch_add_explicit(&v8m_hugepage_advise_calls,
 						  1U, memory_order_relaxed);
-			atomic_fetch_add_explicit(&v8m_thp_promote_calls, 1U,
-						  memory_order_relaxed);
+			v8m_thp_record_promote();
 			/* Stamp the region's promote timestamp so the bg
 			 * sweep can age it out and demote when it goes
 			 * cold. Anchor-carved regions can't be re-advised
@@ -955,14 +867,10 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    &v8m_gigantic_alloc_calls, memory_order_relaxed);
 	out->gigantic_alloc_failures = atomic_load_explicit(
 	    &v8m_gigantic_alloc_failures, memory_order_relaxed);
-	out->thp_promote_calls =
-	    atomic_load_explicit(&v8m_thp_promote_calls, memory_order_relaxed);
-	out->thp_demote_calls =
-	    atomic_load_explicit(&v8m_thp_demote_calls, memory_order_relaxed);
-	out->thp_ema_ticks =
-	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
-	out->thp_cold_threshold_ticks = atomic_load_explicit(
-	    &g_thp_cold_threshold_ticks, memory_order_relaxed);
+	out->thp_promote_calls = v8m_thp_promote_calls();
+	out->thp_demote_calls = v8m_thp_demote_calls();
+	out->thp_ema_ticks = v8m_thp_ema_ticks();
+	out->thp_cold_threshold_ticks = v8m_thp_cold_threshold_ticks();
 	out->anchor_carve_calls =
 	    atomic_load_explicit(&v8m_anchor_carve_calls, memory_order_relaxed);
 	out->anchor_carve_failures = atomic_load_explicit(
@@ -971,7 +879,7 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 
 size_t v8m_page_heap_thp_age_sweep(void)
 {
-	uint64_t threshold = thp_cold_threshold_ticks();
+	uint64_t threshold = v8m_thp_cold_threshold_ticks();
 	uint64_t now = v8m_arch_rdtsc();
 	size_t demoted = 0;
 	(void)pthread_mutex_lock(&g_region_lock);
@@ -990,8 +898,7 @@ size_t v8m_page_heap_thp_age_sweep(void)
 				      memory_order_relaxed);
 		(void)pthread_mutex_unlock(&g_region_lock);
 		(void)madvise(ptr, bytes, MADV_NOHUGEPAGE);
-		atomic_fetch_add_explicit(&v8m_thp_age_demote_calls, 1U,
-					  memory_order_relaxed);
+		v8m_thp_record_age_demote();
 		demoted++;
 		(void)pthread_mutex_lock(&g_region_lock);
 		/* Region table may have shrunk under us during the
@@ -1007,8 +914,7 @@ size_t v8m_page_heap_thp_age_sweep(void)
 
 uint64_t v8m_page_heap_thp_age_demote_calls(void)
 {
-	return atomic_load_explicit(&v8m_thp_age_demote_calls,
-				    memory_order_relaxed);
+	return v8m_thp_age_demote_calls();
 }
 
 /*

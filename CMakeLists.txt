@@ -184,9 +184,12 @@ endif()
 set(V8MALLOC_SOURCES
 	src/v8m_anchor_reservation.c
 	src/v8m_api.c
+	src/v8m_api_cxx.c
+	src/v8m_api_libc_compat.c
 	src/v8m_arch.c
 	src/v8m_bg_purge.c
 	src/v8m_bootstrap.c
+	src/v8m_bump.c
 	src/v8m_buddy.c
 	src/v8m_buddy_pool.c
 	src/v8m_config.c
@@ -207,6 +210,7 @@ set(V8MALLOC_SOURCES
 	src/v8m_slab_pool.c
 	src/v8m_slab_small.c
 	src/v8m_slab_tiny.c
+	src/v8m_thp.c
 	src/v8m_thread_cache.c
 	src/v8m_version.c
 )

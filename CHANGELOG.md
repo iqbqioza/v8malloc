@@ -6,6 +6,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Refactor: bump-pointer primitive shared by bootstrap +
+  signal-safe.** New `src/v8m_bump.{h,c}` ships a tiny atomic-bump
+  module (`v8m_bump_alloc` / `_owns` / `_remaining`); the bootstrap
+  allocator and the async-signal-safe emergency allocator are now
+  thin policy wrappers around it (each owns the buffer + the
+  out-of-budget contract — bootstrap aborts, signal-safe returns
+  NULL). Hoists ~80 lines of duplication and prevents the next
+  divergence (the SIZE_MAX overflow fix in the previous cycle had
+  to land in two places because the same code was copied).
+
+- **Refactor: extract adaptive THP advice from page_heap.c into
+  `src/v8m_thp.{h,c}`.** The EMA / cold-threshold / promote-vs-
+  demote decision moves to its own module; `v8m_page_heap.c`
+  delegates via `v8m_thp_decide_and_record()` and reads the
+  threshold via `v8m_thp_cold_threshold_ticks()` from the per-
+  region age sweep. Counter accessors (`v8m_thp_promote_calls()`
+  etc.) replace the prior atomic-load boilerplate at the snapshot
+  call sites. The per-region age tracker (the `promoted_at_tsc`
+  field on each region_entry) stays in page_heap.c because it
+  belongs to the region map. Test-only injector moves with the
+  rest: `v8m_page_heap_thp_test_inject` → `v8m_thp_test_inject`
+  (only consumer is `tests/test_page_heap.c`).
+
+- **Refactor: split `src/v8m_api.c` (1860 → 1459 lines) into three
+  TUs.** New `src/v8m_api_libc_compat.c` carries the glibc
+  reporters (`mallinfo` / `mallinfo2` / `malloc_stats` /
+  `malloc_info` / `mallopt` / `malloc_trim`), the POSIX
+  malloc-family overrides (`malloc` / `free` / `calloc` / ...),
+  and the `__libc_*` glibc-internal aliases. New
+  `src/v8m_api_cxx.c` carries the 16 C++ Itanium ABI
+  operator-new/delete mangled names. New `src/v8m_api_internal.h`
+  exposes the shared `v8m_api_collect_live_stats` snapshot helper
+  and `v8m_api_dispatch_ready` predicate so the split TUs route
+  through the same source of truth as the core. The
+  `__attribute__((alias))` aliases that were within v8m_api.c
+  become thin wrappers in the split TUs (alias requires same-TU
+  definition); the public ABI is unchanged — every export still
+  appears under V8MALLOC_1.0.
+
 ### Fixed
 - Bootstrap and signal-safe emergency allocators now reject
   near-`SIZE_MAX` requests up front instead of letting

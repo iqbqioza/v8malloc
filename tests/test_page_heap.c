@@ -14,6 +14,7 @@
 #include "v8m_config.h"
 #include "v8m_internal.h"
 #include "v8m_page_heap.h"
+#include "v8m_thp.h"
 #include "v8malloc/v8malloc.h"
 
 static int fail(const char *msg)
@@ -371,19 +372,19 @@ static int check_thp_adaptive_decision(void)
 	 * decision; the first alloc resets last_tsc (the inject helper
 	 * clears it), and the second computes a real delta that lands
 	 * past the threshold and triggers DEMOTE. */
-	v8m_page_heap_thp_test_inject(1U, 1000U);
+	v8m_thp_test_inject(1U, 1000U);
 
 	struct v8m_page_heap_stats before = {0};
 	v8m_page_heap_get_stats(&before);
 	void *first = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	if (first == NULL) {
-		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		v8m_thp_test_inject(saved_threshold, saved_ema);
 		return fail("first THP-eligible alloc returned NULL");
 	}
 	void *second = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	if (second == NULL) {
 		v8m_page_heap_free(first, HUGEPAGE_BYTES);
-		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		v8m_thp_test_inject(saved_threshold, saved_ema);
 		return fail("second THP-eligible alloc returned NULL");
 	}
 	struct v8m_page_heap_stats after = {0};
@@ -393,13 +394,13 @@ static int check_thp_adaptive_decision(void)
 	v8m_page_heap_free(first, HUGEPAGE_BYTES);
 	v8m_page_heap_free(second, HUGEPAGE_BYTES);
 	if (demote_delta == 0U) {
-		v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+		v8m_thp_test_inject(saved_threshold, saved_ema);
 		return fail("DEMOTE branch did not fire under tiny threshold");
 	}
 
 	/* Force the promote branch: a huge threshold ensures any natural
 	 * EMA stays well below it. */
-	v8m_page_heap_thp_test_inject(UINT64_MAX, 0U);
+	v8m_thp_test_inject(UINT64_MAX, 0U);
 	v8m_page_heap_get_stats(&before);
 	void *third = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
 	void *fourth = v8m_page_heap_alloc(HUGEPAGE_BYTES, V8M_PAGE_SIZE);
@@ -414,7 +415,7 @@ static int check_thp_adaptive_decision(void)
 	if (fourth != NULL) {
 		v8m_page_heap_free(fourth, HUGEPAGE_BYTES);
 	}
-	v8m_page_heap_thp_test_inject(saved_threshold, saved_ema);
+	v8m_thp_test_inject(saved_threshold, saved_ema);
 	if (promote_delta == 0U) {
 		return fail("PROMOTE branch did not fire under huge threshold");
 	}

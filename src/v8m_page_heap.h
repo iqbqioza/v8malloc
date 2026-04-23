@@ -204,20 +204,6 @@ uint64_t v8m_page_heap_thp_age_demote_calls(void);
 void v8m_page_heap_anchor_destroy_for_test(void);
 
 /*
- * Test-only knob for the adaptive THP advice (huge-pages.md §5).
- * Overrides the cold-threshold ticks and the live EMA so a test can
- * deterministically exercise the promote / demote branches without
- * depending on wall-clock timing. NOT exported from the library; the
- * symbol is internal-only — `v8malloc.map` does not list it. Pass
- * any non-zero `cold_threshold_ticks` to lock the threshold (the
- * lazy initializer's early-return treats non-zero as "already
- * computed"); zero behaves as a reset that re-enables the lazy
- * derivation on the next decision.
- */
-void v8m_page_heap_thp_test_inject(uint64_t cold_threshold_ticks,
-				   uint64_t ema_ticks);
-
-/*
  * Region map — every successful v8m_page_heap_alloc records the
  * returned (start, length) range in an internal table; v8m_page_heap_free
  * removes the matching entry. v8m_page_heap_owns is a safe predicate
