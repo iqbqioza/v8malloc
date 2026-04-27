@@ -363,7 +363,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	 * `requested_size`, so reusing under DEBUG would mis-bound the
 	 * window. Easier to just skip the cache when DEBUG is on. */
 	void *region = NULL;
-	if (!guard_on) {
+	if (__builtin_expect(!guard_on, 1)) {
 		region = large_cache_take(mmap_size);
 	}
 	if (region == NULL) {
@@ -373,7 +373,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 		}
 	}
 
-	if (guard_on) {
+	if (__builtin_expect(guard_on, 0)) {
 		void *guard = (unsigned char *)region + mmap_size - guard_bytes;
 		if (mprotect(guard, guard_bytes, PROT_NONE) != 0) {
 			/* mprotect failure is rare (kernel out of VMAs is
@@ -404,7 +404,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	meta->guard_bytes = guard_bytes;
 	meta->requested_size = guard_on ? size : 0U;
 
-	if (guard_on) {
+	if (__builtin_expect(guard_on, 0)) {
 		unsigned char *user = (unsigned char *)region + header_offset;
 		large_fill_redzone(user, meta, header_offset);
 	}
@@ -499,7 +499,7 @@ void v8m_large_free(const void *obj)
 	/* Verify the red zone before tearing down the meta. `guard_bytes`
 	 * is the marker for "DEBUG was on at alloc time" — if it's zero
 	 * the allocation predates DEBUG and there is no canary to check. */
-	if (meta->guard_bytes != 0U) {
+	if (__builtin_expect(meta->guard_bytes != 0U, 0)) {
 		uintptr_t header_offset = (uintptr_t)obj & (V8M_PAGE_SIZE - 1U);
 		large_check_redzone((const unsigned char *)obj, meta,
 				    header_offset);
@@ -508,7 +508,7 @@ void v8m_large_free(const void *obj)
 	atomic_store_explicit(&meta->used_count, 0U, memory_order_relaxed);
 	meta->magic = 0U;
 
-	if (was_huge) {
+	if (__builtin_expect(was_huge, 0)) {
 		atomic_fetch_add_explicit(&v8m_huge_free_count, 1U,
 					  memory_order_relaxed);
 		atomic_fetch_sub_explicit(&v8m_huge_bytes_in_use, mmap_size,
@@ -527,7 +527,7 @@ void v8m_large_free(const void *obj)
 	 * `requested_size`). On cache-full, the oldest entry is evicted
 	 * here and we munmap that one instead — keeps the steady-state
 	 * VMA count bounded. */
-	if (meta->guard_bytes == 0U) {
+	if (__builtin_expect(meta->guard_bytes == 0U, 1)) {
 		size_t evicted_size = 0;
 		void *evicted =
 		    large_cache_put(common, mmap_size, &evicted_size);

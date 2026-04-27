@@ -29,7 +29,7 @@ uint64_t v8m_thp_cold_threshold_ticks(void)
 {
 	uint64_t cached = atomic_load_explicit(&g_thp_cold_threshold_ticks,
 					       memory_order_relaxed);
-	if (cached != 0U) {
+	if (__builtin_expect(cached != 0U, 1)) {
 		return cached;
 	}
 	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
@@ -49,7 +49,7 @@ enum v8m_thp_advice v8m_thp_decide_and_record(void)
 	uint64_t now = v8m_arch_rdtsc();
 	uint64_t last = atomic_exchange_explicit(&g_thp_last_alloc_tsc, now,
 						 memory_order_relaxed);
-	if (last == 0U || now <= last) {
+	if (__builtin_expect(last == 0U || now <= last, 0)) {
 		/* First THP-eligible alloc since process start (or a
 		 * monotonic-clock wrap on the rdtsc fallback path) — no
 		 * inter-arrival delta to fold into the EMA. Default to
@@ -59,8 +59,9 @@ enum v8m_thp_advice v8m_thp_decide_and_record(void)
 	uint64_t delta = now - last;
 	uint64_t prev_ema =
 	    atomic_load_explicit(&g_thp_ema_ticks, memory_order_relaxed);
-	uint64_t new_ema =
-	    (prev_ema == 0U) ? delta : ((prev_ema * 3U + delta) / 4U);
+	uint64_t new_ema = __builtin_expect(prev_ema == 0U, 0)
+			       ? delta
+			       : ((prev_ema * 3U + delta) / 4U);
 	atomic_store_explicit(&g_thp_ema_ticks, new_ema, memory_order_relaxed);
 	if (new_ema > v8m_thp_cold_threshold_ticks()) {
 		return V8M_THP_DEMOTE;

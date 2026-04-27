@@ -255,7 +255,7 @@ void v8m_slab_pool_destroy(struct v8m_slab_pool *pool)
  */
 static void *try_current(struct v8m_slab_pool_class *cls)
 {
-	if (cls->current == NULL) {
+	if (__builtin_expect(cls->current == NULL, 0)) {
 		return NULL;
 	}
 	void *obj = slab_alloc_dispatch(cls->current);
@@ -362,10 +362,10 @@ void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
 	struct v8m_slab_pool_class *cls = &pool->classes[size_class];
 
 	void *obj = try_current(cls);
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		obj = try_partials(cls);
 	}
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		obj = acquire_fresh_page(pool, cls, size_class, owner_thread,
 					 arena_id);
 	}
@@ -475,10 +475,10 @@ bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 
 	struct v8m_slab_pool_class *cls = &pool->classes[size_class];
 
-	if (became_empty) {
+	if (__builtin_expect(became_empty, 0)) {
 		unlink_from_class(cls, meta);
 		release_slab_page(pool, meta);
-	} else if (was_full && cls->current != meta) {
+	} else if (__builtin_expect(was_full && cls->current != meta, 0)) {
 		/* Full -> partial transition; the page wasn't in any
 		 * list, so add it to partials. The `cls->current != meta`
 		 * guard matters: a page can be `current` AND full (the

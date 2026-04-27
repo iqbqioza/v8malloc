@@ -170,8 +170,10 @@ static _Atomic uint64_t g_lifetime_long_threshold_ticks;
 
 static void ensure_lifetime_thresholds(void)
 {
-	if (atomic_load_explicit(&g_lifetime_long_threshold_ticks,
-				 memory_order_relaxed) != 0U) {
+	if (__builtin_expect(
+		atomic_load_explicit(&g_lifetime_long_threshold_ticks,
+				     memory_order_relaxed) != 0U,
+		1)) {
 		return;
 	}
 	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
@@ -465,11 +467,12 @@ static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
 __attribute__((hot)) void *
 v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS,
+			     0)) {
 		return NULL;
 	}
 	void *head = cache->bin_heads[cls];
-	if (head == NULL) {
+	if (__builtin_expect(head == NULL, 0)) {
 		return NULL;
 	}
 	/* The cached object's first 8 bytes hold the next pointer.

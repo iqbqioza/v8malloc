@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h> /* fprintf for v8m_buddy_pool_validate */
 
+#include "v8m_arch.h"
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
 #include "v8m_config.h"
@@ -51,7 +52,7 @@ find_owning_arena(struct v8m_buddy_pool *pool, const void *ptr)
 	uintptr_t addr = (uintptr_t)ptr;
 	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
 		struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
-		if (!slot->in_use) {
+		if (__builtin_expect(!slot->in_use, 0)) {
 			continue;
 		}
 		uintptr_t base = (uintptr_t)slot->buddy.arena_base;
@@ -75,7 +76,7 @@ static void *try_existing_arenas(struct v8m_buddy_pool *pool, size_t size)
 {
 	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
 		struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
-		if (!slot->in_use) {
+		if (__builtin_expect(!slot->in_use, 0)) {
 			continue;
 		}
 		void *obj = v8m_buddy_alloc(&slot->buddy, size);
@@ -101,7 +102,7 @@ static void *acquire_fresh_arena(struct v8m_buddy_pool *pool, size_t size)
 {
 	for (uint32_t i = 0; i < V8M_BUDDY_POOL_MAX_ARENAS; i++) {
 		struct v8m_buddy_pool_arena *slot = &pool->arenas[i];
-		if (slot->in_use) {
+		if (__builtin_expect(slot->in_use, 1)) {
 			continue;
 		}
 		void *arena = v8m_page_heap_alloc(V8M_BUDDY_MAX_BLOCK,
@@ -133,7 +134,7 @@ void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size)
 	(void)pthread_mutex_lock(&pool->lock);
 
 	void *obj = try_existing_arenas(pool, size);
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		obj = acquire_fresh_arena(pool, size);
 	}
 	/* Deferred-coalesce fallback: when the regular path returns
@@ -171,20 +172,20 @@ void *v8m_buddy_pool_alloc(struct v8m_buddy_pool *pool, size_t size)
 
 bool v8m_buddy_pool_free(struct v8m_buddy_pool *pool, void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return false;
 	}
 
 	(void)pthread_mutex_lock(&pool->lock);
 
 	struct v8m_buddy_pool_arena *slot = find_owning_arena(pool, ptr);
-	if (slot == NULL) {
+	if (__builtin_expect(slot == NULL, 0)) {
 		(void)pthread_mutex_unlock(&pool->lock);
 		return false;
 	}
 
 	size_t size = v8m_buddy_block_size(&slot->buddy, ptr);
-	if (size == 0) {
+	if (__builtin_expect(size == 0, 0)) {
 		(void)pthread_mutex_unlock(&pool->lock);
 		return false;
 	}
