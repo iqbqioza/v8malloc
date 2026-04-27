@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(v8malloc
-	VERSION 0.1.1
+	VERSION 0.1.2
 	DESCRIPTION "High-performance memory allocator targeting jemalloc/mimalloc/tcmalloc"
 	HOMEPAGE_URL "https://github.com/iqbqioza/v8malloc"
 	LANGUAGES C
