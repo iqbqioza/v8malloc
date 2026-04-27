@@ -39,10 +39,21 @@
  * EMA controller (`v8m_thread_cache_gc_tick`) recomputes capacity
  * from observed demand each GC interval and clamps the result into
  * the [MIN, MAX] band.
+ *
+ * MAX raised from 256 → 512 to amortize the slab-pool refill
+ * mutex acquisition over a longer cached run on multi-thread
+ * workloads. MB-02 @ 8 threads spends a measurable fraction of
+ * its time blocked on `g_dispatch.slab.lock` during refills; a
+ * larger bin capacity halves the refill rate per thread, cutting
+ * the per-class lock pressure proportionally. Worst-case per-thread
+ * RSS overhead is ~2× the prior figure for hot classes (the
+ * adaptive controller leaves cold classes near MIN), which the
+ * fragmentation bench (MB-05) confirms stays inside the
+ * "ties mimalloc / glibc" band.
  */
 #define V8M_BIN_CAPACITY_MIN 16U
 #define V8M_BIN_CAPACITY_DEFAULT 64U
-#define V8M_BIN_CAPACITY_MAX 256U
+#define V8M_BIN_CAPACITY_MAX 512U
 
 /*
  * GC interval, in TLC operations (allocs + frees combined). The
@@ -280,6 +291,22 @@ struct v8m_thread_cache {
 	 * the predicate to a single AND.
 	 */
 	uint64_t histogram_tick;
+	/*
+	 * Per-cache mirror of the dispatcher's process-wide alloc /
+	 * free counters (api.md §4.2 `total_alloc_count` /
+	 * `total_free_count`). The owner thread bumps them with a
+	 * plain non-atomic increment on every alloc / free that
+	 * routes through `v8m_dispatch_record_alloc_cache` /
+	 * `v8m_dispatch_record_free_cache`; aggregation reads them
+	 * under `g_registry_lock` with the existing stale-tolerant
+	 * pattern (`v8m_thread_cache_aggregate_alloc_free`). The
+	 * indirection eliminates the cross-thread cacheline ping on
+	 * the v8m_free hot path that the previous single global
+	 * `atomic_fetch_add` produced — under MB-02 @ 8t the global
+	 * was being hammered ~25M times/sec from every CPU.
+	 */
+	uint64_t local_alloc_count;
+	uint64_t local_free_count;
 	/*
 	 * Registry list link (size-class histogram aggregation +
 	 * lifetime stats aggregation share the same registry).
@@ -626,6 +653,26 @@ void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size);
  * snapshot value may be stale by one increment.
  */
 void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out);
+
+/*
+ * Sum the per-cache `local_alloc_count` / `local_free_count`
+ * mirrors across every live cache. Caller adds the dispatcher's
+ * global atomic fallback values to obtain the api.md §4.2
+ * `total_alloc_count` / `total_free_count` snapshots. Either out
+ * pointer may be NULL to skip that field. Holds `g_registry_lock`
+ * briefly during the walk; loads are non-atomic with stale-tolerance
+ * (the same model the histogram aggregator uses).
+ */
+void v8m_thread_cache_aggregate_alloc_free(uint64_t *out_allocs,
+					   uint64_t *out_frees);
+
+/*
+ * Reset the per-cache `local_alloc_count` / `local_free_count`
+ * mirrors to zero across every live cache. Companion to
+ * `v8m_dispatch_reset_alloc_free_counts`, invoked by
+ * `v8m_reset_stats`. Holds `g_registry_lock` for the walk.
+ */
+void v8m_thread_cache_reset_alloc_free_counts(void);
 
 /*
  * Lifetime tracker (fragmentation.md §5.2). Both record helpers

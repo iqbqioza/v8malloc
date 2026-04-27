@@ -42,8 +42,8 @@
  * subsequent allocation); the upper bound caps the worst-case
  * refill latency a single L3/L4 round trip can incur.
  */
-#define V8M_REFILL_BATCH_MIN 4U
-#define V8M_REFILL_BATCH_MAX 256U
+#define V8M_REFILL_BATCH_MIN 8U
+#define V8M_REFILL_BATCH_MAX 64U
 
 /*
  * Target hold duration: the controller sizes each batch so it lasts

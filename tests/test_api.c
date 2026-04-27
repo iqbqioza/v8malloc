@@ -577,10 +577,10 @@ static int check_v8m_stats_api(void)
 	/* NULL out is a no-op, not a crash. */
 	v8m_get_stats(NULL);
 
-	/* v8m_dump_stats writes the same digest as malloc_stats; just
-	 * confirm it does not crash. The malloc_stats output check
-	 * already lives in check_glibc_compat_surface. */
-	v8m_dump_stats();
+	/* v8m_dump_stats(NULL) routes to stderr; just confirm it
+	 * does not crash. The malloc_stats() output check already
+	 * lives in check_glibc_compat_surface. */
+	v8m_dump_stats(NULL);
 	return 0;
 }
 
@@ -1235,12 +1235,8 @@ static int check_arch_info_api(void)
 
 static int check_purge_and_namespaced_compat(void)
 {
-	if (v8m_purge() != 0) {
-		return fail("v8m_purge returned non-zero");
-	}
-	if (v8m_purge_thread() != 0) {
-		return fail("v8m_purge_thread returned non-zero");
-	}
+	v8m_purge();
+	v8m_purge_thread();
 
 	/* The v8m_-namespaced wrappers forward to the unprefixed
 	 * names; smoke-test that they don't crash and report

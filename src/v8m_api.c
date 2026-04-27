@@ -569,6 +569,7 @@ static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
 	if (v8m_config_get(V8M_OPT_DEBUG) != 0) {
 		debug_clear_double_free_record(ptr);
 	}
+	v8m_dispatch_record_alloc();
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
 	if (cache != NULL) {
 		v8m_thread_cache_predict_update(cache, caller_pc,
@@ -770,6 +771,7 @@ __attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
 	 * forwarding, DEBUG-mode double-free detector, lifetime
 	 * tracker, large/buddy free). */
 	if (__builtin_expect(ptr != NULL, 1)) {
+		v8m_dispatch_record_free();
 		struct v8m_thread_cache *cache = v8m_t_cache;
 		int owned = v8m_page_heap_owns_fast(ptr);
 		if (__builtin_expect(cache != NULL && owned == 1 &&
@@ -1092,23 +1094,93 @@ V8M_EXPORT void v8m_get_stats(struct v8m_stats *out)
 		return;
 	}
 	struct v8m_page_heap_stats stats = {0};
+	struct v8m_large_stats large = {0};
 	size_t live_regions = 0;
 	if (dispatch_ready()) {
 		v8m_page_heap_get_stats(&stats);
+		v8m_large_get_stats(&large);
 		live_regions = v8m_page_heap_live_region_count();
 	}
+	uint64_t live_bytes = (stats.bytes_mapped > stats.bytes_unmapped)
+				  ? stats.bytes_mapped - stats.bytes_unmapped
+				  : 0;
+	uint64_t huge_live =
+	    (large.huge_alloc_count > large.huge_free_count)
+		? large.huge_alloc_count - large.huge_free_count
+		: 0;
+	/* api.md §4.2 spec fields. v0 maps page-heap counters into
+	 * the spec surface; per-call user-byte accounting requires
+	 * hooking every backend and is not yet wired. */
+	out->total_allocated = stats.bytes_mapped;
+	out->total_freed = stats.bytes_unmapped;
+	out->current_usage = live_bytes;
+	out->peak_usage = stats.peak_live_bytes;
+	out->total_alloc_count = v8m_dispatch_total_alloc_count();
+	out->total_free_count = v8m_dispatch_total_free_count();
+	out->mmap_count = stats.mmap_calls;
+	out->munmap_count = stats.munmap_calls;
+	out->mmap_bytes = stats.bytes_mapped;
+	out->huge_page_count = huge_live;
+	/* Proxy in v0: regions whose mbind() succeeded land on the
+	 * local node by construction; failures fall back to the
+	 * kernel default policy and may end up remote. */
+	out->numa_local_allocs = (stats.mbind_calls > stats.mbind_failures)
+				     ? stats.mbind_calls - stats.mbind_failures
+				     : 0;
+	out->numa_remote_allocs = stats.mbind_failures;
+	/* v8malloc-specific extensions */
+	out->live_regions = (uint64_t)live_regions;
+	out->advise_calls = stats.advise_calls;
+	/* Backward-compat aliases for pre-spec callers */
 	out->mmap_calls = stats.mmap_calls;
 	out->munmap_calls = stats.munmap_calls;
-	out->advise_calls = stats.advise_calls;
 	out->bytes_mapped = stats.bytes_mapped;
 	out->bytes_unmapped = stats.bytes_unmapped;
-	out->live_regions = (uint64_t)live_regions;
-	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
+	out->live_bytes = live_bytes;
 }
 
-V8M_EXPORT void v8m_dump_stats(void)
+V8M_EXPORT void v8m_reset_stats(void)
 {
-	malloc_stats();
+	/* api.md §4.2: cumulative page-heap counters are monotonic
+	 * by design (zeroing them mid-flight would silently break
+	 * diagnostic tooling that polls the snapshot). Resettable
+	 * subset: peak_usage rebases to current live, alloc/free
+	 * counts zero out. */
+	if (!dispatch_ready()) {
+		return;
+	}
+	v8m_page_heap_reset_peak();
+	v8m_dispatch_reset_alloc_free_counts();
+}
+
+V8M_EXPORT void v8m_dump_stats(void *stream)
+{
+	/* `stream` is `FILE *`; declared as `void *` so this header
+	 * doesn't drag in `<stdio.h>` (api.md §4.2 spec uses FILE *).
+	 * NULL routes to stderr to preserve the historic behaviour
+	 * of the void-arg variant. */
+	FILE *out = (stream == NULL) ? stderr : (FILE *)stream;
+	struct v8m_stats snap;
+	v8m_get_stats(&snap);
+	(void)fprintf(out,
+		      "v8malloc stats: total_allocated=%llu total_freed=%llu "
+		      "current_usage=%llu peak_usage=%llu alloc_count=%llu "
+		      "free_count=%llu mmap=%llu munmap=%llu mmap_bytes=%llu "
+		      "huge=%llu numa_local=%llu numa_remote=%llu "
+		      "live_regions=%llu\n",
+		      (unsigned long long)snap.total_allocated,
+		      (unsigned long long)snap.total_freed,
+		      (unsigned long long)snap.current_usage,
+		      (unsigned long long)snap.peak_usage,
+		      (unsigned long long)snap.total_alloc_count,
+		      (unsigned long long)snap.total_free_count,
+		      (unsigned long long)snap.mmap_count,
+		      (unsigned long long)snap.munmap_count,
+		      (unsigned long long)snap.mmap_bytes,
+		      (unsigned long long)snap.huge_page_count,
+		      (unsigned long long)snap.numa_local_allocs,
+		      (unsigned long long)snap.numa_remote_allocs,
+		      (unsigned long long)snap.live_regions);
 }
 
 V8M_EXPORT void v8m_get_huge_stats(struct v8m_huge_stats *out)
@@ -1351,7 +1423,7 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 		: (slab.slots_used * 100U) / slab.slots_total;
 }
 
-V8M_EXPORT int v8m_purge(void)
+V8M_EXPORT void v8m_purge(void)
 {
 	/* Drain the calling thread's TLC bins back to the slab pool
 	 * so single-thread workloads (the thread never exits, the
@@ -1376,10 +1448,9 @@ V8M_EXPORT int v8m_purge(void)
 		(void)v8m_dispatch_purge_drained(&g_dispatch);
 	}
 	v8m_bg_purge_run_once();
-	return 0;
 }
 
-V8M_EXPORT int v8m_purge_thread(void)
+V8M_EXPORT void v8m_purge_thread(void)
 {
 	/* Drain the calling thread's TLC bins back to the slab pool.
 	 * Distinct from v8m_purge in that it does NOT touch the
@@ -1396,7 +1467,6 @@ V8M_EXPORT int v8m_purge_thread(void)
 		}
 		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 	}
-	return 0;
 }
 
 /* --- v8m_-namespaced glibc-compat wrappers ------------------------ */
@@ -1444,9 +1514,19 @@ V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler)
 					memory_order_acq_rel);
 }
 
-V8M_EXPORT void v8m_set_soft_limit(size_t bytes)
+V8M_EXPORT int v8m_set_soft_limit(size_t bytes)
 {
+	/* api.md §4.5: int return so callers can detect a pre-init
+	 * call. The dispatcher must be READY for the soft-limit gate
+	 * in the alloc path to actually consult the stored value;
+	 * setting it before the constructor publishes READY would
+	 * silently lose the cap once the constructor runs. */
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
 	atomic_store_explicit(&g_soft_limit, bytes, memory_order_relaxed);
+	return 0;
 }
 
 V8M_EXPORT size_t v8m_get_soft_limit(void)

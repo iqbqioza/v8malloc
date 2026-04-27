@@ -26,6 +26,7 @@ V8MALLOC_1.0 {
 		v8m_set_option;
 		v8m_get_option;
 		v8m_get_stats;
+		v8m_reset_stats;
 		v8m_dump_stats;
 		v8m_set_oom_handler;
 		v8m_set_soft_limit;
