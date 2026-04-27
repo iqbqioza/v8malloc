@@ -20,6 +20,25 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 		message(FATAL_ERROR
 			"GCC >= 13 required (got ${CMAKE_C_COMPILER_VERSION})")
 	endif()
+	# GCC Release builds use whole-program LTO (`-flto=auto` further
+	# down). Same motivation as the clang branch: the malloc fast
+	# path lives across four TUs and only LTO can collapse them
+	# into v8m_malloc. GCC LTO emits "GIMPLE bytecode" archive
+	# members (also not understood by the default `ar` / `ranlib`
+	# index step), so we route through `gcc-ar` / `gcc-ranlib` —
+	# wrapper scripts shipped with GCC that load the LTO plugin
+	# automatically and hand the host `ar` / `ranlib` a usable
+	# index. The host `ld` (binutils) DOES understand LTO objects
+	# because GCC's LTO plugin is auto-loaded on modern binutils,
+	# so no `-fuse-ld=` redirection is needed.
+	find_program(V8M_GCC_AR NAMES gcc-ar)
+	find_program(V8M_GCC_RANLIB NAMES gcc-ranlib)
+	if(V8M_GCC_AR AND V8M_GCC_RANLIB)
+		set(CMAKE_AR "${V8M_GCC_AR}" CACHE FILEPATH "" FORCE)
+		set(CMAKE_RANLIB "${V8M_GCC_RANLIB}" CACHE FILEPATH "" FORCE)
+		set(CMAKE_C_COMPILER_AR "${V8M_GCC_AR}" CACHE FILEPATH "" FORCE)
+		set(CMAKE_C_COMPILER_RANLIB "${V8M_GCC_RANLIB}" CACHE FILEPATH "" FORCE)
+	endif()
 elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
 	if(CMAKE_C_COMPILER_VERSION VERSION_LESS 16)
 		message(FATAL_ERROR
@@ -326,17 +345,21 @@ function(v8malloc_configure_target tgt)
 		# call. With LTO the compiler can inline the whole chain
 		# into v8m_malloc, collapsing the bin-pop fast path to ~5
 		# instructions. Only kicks in for Release builds (Debug
-		# wants line-by-line debuggability) AND for clang — `gcc`
-		# does not accept `-flto=thin` (only `-flto=auto` /
-		# `-flto=N`), and the toolchain wiring below (llvm-ar /
-		# llvm-ranlib / lld) is clang-specific. GCC Release builds
-		# fall back to the v0 baseline of no LTO; the cross-TU
-		# inlining win is clang-only today.
+		# wants line-by-line debuggability). Per-compiler flag:
+		#   - clang: `-flto=thin` (incremental, fast link)
+		#   - gcc:   `-flto=auto` (whole-program, parallel ltrans
+		#     phase pinned to the host's CPU count)
+		# The toolchain wiring above swaps in `llvm-ar`/`llvm-ranlib`
+		# for clang and `gcc-ar`/`gcc-ranlib` for gcc so the static
+		# archive index step understands each compiler's bitcode
+		# format.
 		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>>:-flto=thin>
+		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:GNU>>:-flto=auto>
 		${V8MALLOC_ARCH_FLAGS}
 	)
 	target_link_options(${tgt} PRIVATE
 		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>>:-flto=thin>
+		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:GNU>>:-flto=auto>
 		# Pair clang's thin LTO with lld: the static-library member
 		# objects are LLVM bitcode, and the binutils `ld` can't
 		# read bitcode (fails with "file format not recognized").
@@ -344,6 +367,9 @@ function(v8malloc_configure_target tgt)
 		# which is bitcode-aware. Conditional on lld actually being
 		# present so a clang install without lld still builds (it
 		# just won't link the static-library tests).
+		# GCC LTO does NOT need `-fuse-ld=lld`: modern binutils ld
+		# auto-loads GCC's LTO plugin via the host gcc driver, so
+		# the standard linker handles GIMPLE bitcode objects.
 		$<$<AND:$<CONFIG:Release>,$<C_COMPILER_ID:Clang>,$<BOOL:${V8M_HAVE_LLD}>>:-fuse-ld=lld>
 	)
 	target_compile_definitions(${tgt} PRIVATE

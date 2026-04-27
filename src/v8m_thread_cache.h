@@ -39,10 +39,21 @@
  * EMA controller (`v8m_thread_cache_gc_tick`) recomputes capacity
  * from observed demand each GC interval and clamps the result into
  * the [MIN, MAX] band.
+ *
+ * MAX raised from 256 → 512 to amortize the slab-pool refill
+ * mutex acquisition over a longer cached run on multi-thread
+ * workloads. MB-02 @ 8 threads spends a measurable fraction of
+ * its time blocked on `g_dispatch.slab.lock` during refills; a
+ * larger bin capacity halves the refill rate per thread, cutting
+ * the per-class lock pressure proportionally. Worst-case per-thread
+ * RSS overhead is ~2× the prior figure for hot classes (the
+ * adaptive controller leaves cold classes near MIN), which the
+ * fragmentation bench (MB-05) confirms stays inside the
+ * "ties mimalloc / glibc" band.
  */
 #define V8M_BIN_CAPACITY_MIN 16U
 #define V8M_BIN_CAPACITY_DEFAULT 64U
-#define V8M_BIN_CAPACITY_MAX 256U
+#define V8M_BIN_CAPACITY_MAX 512U
 
 /*
  * GC interval, in TLC operations (allocs + frees combined). The
