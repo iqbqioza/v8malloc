@@ -771,8 +771,10 @@ __attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
 	 * forwarding, DEBUG-mode double-free detector, lifetime
 	 * tracker, large/buddy free). */
 	if (__builtin_expect(ptr != NULL, 1)) {
-		v8m_dispatch_record_free();
+		/* Load v8m_t_cache once; pass it to record_free_cache to
+		 * avoid a second TLS read inside the out-of-line function. */
 		struct v8m_thread_cache *cache = v8m_t_cache;
+		v8m_dispatch_record_free_cache(cache);
 		int owned = v8m_page_heap_owns_fast(ptr);
 		if (__builtin_expect(cache != NULL && owned == 1 &&
 					 v8m_config_fast_path_ok(),

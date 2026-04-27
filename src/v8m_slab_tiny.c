@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h"
 #include "v8m_debug.h"
 #include "v8m_internal.h"
 #include "v8m_page.h"
@@ -103,8 +104,8 @@ void v8m_slab_tiny_init(void *page_base, uint32_t size_class,
 				       object_size, capacity, 0);
 }
 
-static void *claim_slot(struct v8m_tiny_page_meta *tiny, uint32_t word,
-			uint32_t bit)
+V8M_ALWAYS_INLINE static void *claim_slot(struct v8m_tiny_page_meta *tiny,
+					  uint32_t word, uint32_t bit)
 {
 	tiny->bitmap[word] |= (uint64_t)1U << bit;
 	tiny->search_hint = word;
@@ -128,14 +129,14 @@ void *v8m_slab_tiny_alloc(struct v8m_page_meta *meta)
 	uint32_t start = (uint32_t)tiny->search_hint;
 	for (uint32_t word = start; word < BITMAP_WORDS; word++) {
 		uint64_t value = tiny->bitmap[word];
-		if (value != UINT64_MAX) {
+		if (__builtin_expect(value != UINT64_MAX, 1)) {
 			uint32_t bit = (uint32_t)__builtin_ctzll(~value);
 			return claim_slot(tiny, word, bit);
 		}
 	}
 	for (uint32_t word = 0; word < start; word++) {
 		uint64_t value = tiny->bitmap[word];
-		if (value != UINT64_MAX) {
+		if (__builtin_expect(value != UINT64_MAX, 1)) {
 			uint32_t bit = (uint32_t)__builtin_ctzll(~value);
 			return claim_slot(tiny, word, bit);
 		}

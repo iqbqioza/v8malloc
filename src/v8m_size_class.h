@@ -97,7 +97,7 @@ static inline uint32_t v8m_size_class(size_t req_size)
 	/* Tiny: 8B-spaced buckets. Coerce size==0 to 1 so the unsigned
 	 * arithmetic below never underflows into UINT32_MAX. */
 	if (req_size <= V8M_TINY_MAX_SIZE) {
-		size_t coerced = req_size ? req_size : 1U;
+		size_t coerced = req_size + (size_t)(req_size == 0U);
 		return (uint32_t)(((coerced + V8M_TINY_ROUND_UP_MASK) >>
 				   V8M_TINY_SHIFT) -
 				  1U);

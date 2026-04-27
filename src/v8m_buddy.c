@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h" /* V8M_PURE */
 #include "v8m_buddy.h"
 #include "v8m_debug.h"
 
@@ -20,7 +21,7 @@ static_assert(V8M_BUDDY_LEVELS ==
 static_assert(V8M_BUDDY_MAX_BLOCK / V8M_BUDDY_MIN_BLOCK <= 64,
 	      "level-0 block count must fit a uint64_t bitmap");
 
-static uint32_t size_to_level(size_t size)
+V8M_PURE static uint32_t size_to_level(size_t size)
 {
 	if (size <= V8M_BUDDY_MIN_BLOCK) {
 		return 0;

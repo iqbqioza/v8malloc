@@ -454,7 +454,7 @@ v8m_thread_cache_alloc_inline(struct v8m_thread_cache *cache, uint32_t cls)
 	cache->bin_heads[cls] = next;
 	cache->bin_count[cls]--;
 	cache->alloc_count_per_class[cls]++;
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 	return head;
@@ -478,7 +478,7 @@ static inline bool v8m_thread_cache_free_inline(struct v8m_thread_cache *cache,
 	cache->bin_heads[cls] = obj;
 	cache->bin_count[cls]++;
 	cache->free_count_per_class[cls]++;
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];

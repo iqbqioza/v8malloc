@@ -457,7 +457,7 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
  */
 static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
 {
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 }
@@ -858,12 +858,11 @@ void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
 	struct v8m_thread_cache *cache = t_cache;
 	if (cache != NULL && cache->initialized != 0U) {
 		/* Sample-rate cadence: only every Nth observation lands.
-		 * Increment unconditionally so the cadence holds; the
-		 * AND mask collapses the predicate to a single branch on
-		 * the histogram's hot exit. */
-		cache->histogram_tick++;
-		if ((cache->histogram_tick &
-		     (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U) {
+		 * Combine increment + mask-test so the hot exit is a
+		 * single compare-and-branch. */
+		if (__builtin_expect((++cache->histogram_tick &
+				      (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U,
+				     1)) {
 			return;
 		}
 		if (cls < V8M_NUM_SIZE_CLASSES) {

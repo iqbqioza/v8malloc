@@ -15,6 +15,7 @@
 #include <stdio.h> /* fprintf for v8m_slab_pool_validate */
 #include <string.h> /* memcpy for the batch-alloc chain link */
 
+#include "v8m_arch.h" /* V8M_ALWAYS_INLINE */
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_numa_pool.h"
@@ -167,7 +168,7 @@ static void release_slab_page(struct v8m_slab_pool *pool, void *page)
 #include "v8m_slab_small.h"
 #include "v8m_slab_tiny.h"
 
-static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
+V8M_ALWAYS_INLINE static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_alloc(meta);
@@ -175,7 +176,8 @@ static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
 	return v8m_slab_small_alloc(meta);
 }
 
-static bool slab_free_dispatch(struct v8m_page_meta *meta, void *obj)
+V8M_ALWAYS_INLINE static bool slab_free_dispatch(struct v8m_page_meta *meta,
+						 void *obj)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_free(meta, obj);
@@ -183,7 +185,8 @@ static bool slab_free_dispatch(struct v8m_page_meta *meta, void *obj)
 	return v8m_slab_small_free(meta, obj);
 }
 
-static bool slab_is_full_dispatch(const struct v8m_page_meta *meta)
+V8M_ALWAYS_INLINE static bool
+slab_is_full_dispatch(const struct v8m_page_meta *meta)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_is_full(meta);

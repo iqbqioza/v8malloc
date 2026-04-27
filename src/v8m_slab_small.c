@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h"
 #include "v8m_debug.h"
 #include "v8m_internal.h"
 #include "v8m_page.h"
@@ -99,7 +100,7 @@ void v8m_slab_small_init(void *page_base, uint32_t size_class,
 void *v8m_slab_small_alloc(struct v8m_page_meta *meta)
 {
 	void *head = meta->free_list_head;
-	if (head == NULL) {
+	if (__builtin_expect(head == NULL, 0)) {
 		return NULL;
 	}
 	void **link = (void **)head;

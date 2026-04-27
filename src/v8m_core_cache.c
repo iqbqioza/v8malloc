@@ -239,31 +239,50 @@ size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 		}
 		return 0;
 	}
-	void *first = v8m_core_cache_pop(cache, cls);
-	if (first == NULL) {
-		*out_head = NULL;
-		*out_tail = NULL;
-		return 0;
-	}
-	void *tail = first;
-	size_t count = 1;
-	while (count < max) {
-		void *node = v8m_core_cache_pop(cache, cls);
-		if (node == NULL) {
-			break;
+	/* Single-CAS batch pop: walk `max` links on a snapshot of the
+	 * stack, then atomically swing the head to the node after the
+	 * last one we want. On a CAS failure, retry from the new head
+	 * — the chain is rebuilt by whatever contender updated it. */
+	v8m_tagged_ptr old_head =
+	    atomic_load_explicit(&cache->stacks[cls], memory_order_acquire);
+	for (;;) {
+		void *first = v8m_tagptr_ptr(old_head);
+		if (first == NULL) {
+			*out_head = NULL;
+			*out_tail = NULL;
+			return 0;
 		}
-		/* Chain `node` after `tail` so the caller receives a
-		 * forward-linked list head→...→tail with NULL after
-		 * tail. Each pop already cleared `node`'s next slot
-		 * (no — pop reads next but does not clear it; we must
-		 * write the chain link explicitly). */
-		(void)memcpy(tail, (const void *)&node, sizeof(node));
-		tail = node;
-		count++;
+		/* Walk up to `max` nodes, keeping a pointer to the
+		 * current tail and the node that follows it. */
+		void *tail = first;
+		void *after_tail = NULL;
+		size_t count = 1;
+		while (count < max) {
+			void *next = NULL;
+			(void)memcpy((void *)&next, tail, sizeof(next));
+			if (next == NULL) {
+				break;
+			}
+			tail = next;
+			count++;
+		}
+		/* Read the node that follows `tail` — that's where the
+		 * stack head will point after our pop. */
+		(void)memcpy((void *)&after_tail, tail, sizeof(after_tail));
+		uint16_t new_tag = (uint16_t)(v8m_tagptr_tag(old_head) + 1U);
+		v8m_tagged_ptr new_head = v8m_tagptr_make(after_tail, new_tag);
+		if (atomic_compare_exchange_weak_explicit(
+			&cache->stacks[cls], &old_head, new_head,
+			memory_order_acquire, memory_order_acquire)) {
+			/* Terminate the extracted chain. */
+			void *terminator = NULL;
+			(void)memcpy(tail, (const void *)&terminator,
+				     sizeof(terminator));
+			*out_head = first;
+			*out_tail = tail;
+			return count;
+		}
+		/* CAS failed — old_head was refreshed by the cmpxchg;
+		 * retry with the new snapshot. */
 	}
-	void *terminator = NULL;
-	(void)memcpy(tail, (const void *)&terminator, sizeof(terminator));
-	*out_head = first;
-	*out_tail = tail;
-	return count;
 }

@@ -299,15 +299,19 @@ void v8m_dispatch_record_alloc(void)
 				  memory_order_relaxed);
 }
 
-void v8m_dispatch_record_free(void)
+void v8m_dispatch_record_free_cache(struct v8m_thread_cache *cache)
 {
-	struct v8m_thread_cache *cache = v8m_t_cache;
 	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
 		cache->local_free_count++;
 		return;
 	}
 	atomic_fetch_add_explicit(&g_dispatch_free_count, 1U,
 				  memory_order_relaxed);
+}
+
+void v8m_dispatch_record_free(void)
+{
+	v8m_dispatch_record_free_cache(v8m_t_cache);
 }
 
 void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees)
