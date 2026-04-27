@@ -39,6 +39,11 @@ static _Atomic uint64_t v8m_munmap_calls = 0;
 static _Atomic uint64_t v8m_advise_calls = 0;
 static _Atomic uint64_t v8m_bytes_mapped = 0;
 static _Atomic uint64_t v8m_bytes_unmapped = 0;
+/* High-watermark of `bytes_mapped - bytes_unmapped` since boot.
+ * Updated lock-free via a CAS loop on every mmap/munmap so a
+ * snapshot reader sees a value that was actually live at some
+ * point in the past. Backs `struct v8m_stats::peak_usage`. */
+static _Atomic uint64_t v8m_peak_live_bytes = 0;
 static _Atomic uint64_t v8m_hugepage_advise_calls = 0;
 static _Atomic uint64_t v8m_hugetlb_alloc_calls = 0;
 static _Atomic uint64_t v8m_hugetlb_alloc_failures = 0;
@@ -605,8 +610,18 @@ static size_t v8m_os_page_size(void)
 static void record_mmap(size_t bytes)
 {
 	atomic_fetch_add_explicit(&v8m_mmap_calls, 1U, memory_order_relaxed);
-	atomic_fetch_add_explicit(&v8m_bytes_mapped, bytes,
-				  memory_order_relaxed);
+	uint64_t mapped = atomic_fetch_add_explicit(&v8m_bytes_mapped, bytes,
+						    memory_order_relaxed) +
+			  bytes;
+	uint64_t unmapped =
+	    atomic_load_explicit(&v8m_bytes_unmapped, memory_order_relaxed);
+	uint64_t live = (mapped > unmapped) ? mapped - unmapped : 0;
+	uint64_t prev =
+	    atomic_load_explicit(&v8m_peak_live_bytes, memory_order_relaxed);
+	while (live > prev && !atomic_compare_exchange_weak_explicit(
+				  &v8m_peak_live_bytes, &prev, live,
+				  memory_order_relaxed, memory_order_relaxed)) {
+	}
 }
 
 static void record_munmap(size_t bytes)
@@ -983,6 +998,8 @@ void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out)
 	    atomic_load_explicit(&v8m_bytes_mapped, memory_order_relaxed);
 	out->bytes_unmapped =
 	    atomic_load_explicit(&v8m_bytes_unmapped, memory_order_relaxed);
+	out->peak_live_bytes =
+	    atomic_load_explicit(&v8m_peak_live_bytes, memory_order_relaxed);
 	out->hugepage_advise_calls = atomic_load_explicit(
 	    &v8m_hugepage_advise_calls, memory_order_relaxed);
 	out->hugetlb_alloc_calls = atomic_load_explicit(
@@ -1048,6 +1065,16 @@ size_t v8m_page_heap_thp_age_sweep(void)
 uint64_t v8m_page_heap_thp_age_demote_calls(void)
 {
 	return v8m_thp_age_demote_calls();
+}
+
+void v8m_page_heap_reset_peak(void)
+{
+	uint64_t mapped =
+	    atomic_load_explicit(&v8m_bytes_mapped, memory_order_relaxed);
+	uint64_t unmapped =
+	    atomic_load_explicit(&v8m_bytes_unmapped, memory_order_relaxed);
+	uint64_t live = (mapped > unmapped) ? mapped - unmapped : 0;
+	atomic_store_explicit(&v8m_peak_live_bytes, live, memory_order_relaxed);
 }
 
 /*

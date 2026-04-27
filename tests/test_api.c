@@ -577,10 +577,10 @@ static int check_v8m_stats_api(void)
 	/* NULL out is a no-op, not a crash. */
 	v8m_get_stats(NULL);
 
-	/* v8m_dump_stats writes the same digest as malloc_stats; just
-	 * confirm it does not crash. The malloc_stats output check
-	 * already lives in check_glibc_compat_surface. */
-	v8m_dump_stats();
+	/* v8m_dump_stats(NULL) routes to stderr; just confirm it
+	 * does not crash. The malloc_stats() output check already
+	 * lives in check_glibc_compat_surface. */
+	v8m_dump_stats(NULL);
 	return 0;
 }
 

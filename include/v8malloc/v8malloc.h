@@ -183,18 +183,48 @@ V8M_EXPORT int v8m_get_option(int opt, int64_t *out);
 /* --- Runtime statistics ----------------------------------------- */
 
 /*
- * Snapshot of allocator-wide counters. All fields are monotonic
- * across the process lifetime except `live_regions` and
- * `live_bytes`, which reflect the current set of mmap'd regions.
+ * Snapshot of allocator-wide counters per api.md §4.2. The first
+ * twelve fields are the spec'd surface; the trailing fields are
+ * v8malloc-specific extensions retained for backward compatibility
+ * (some are aliases of spec fields — `current_usage == live_bytes`,
+ * `total_allocated == mmap_bytes == bytes_mapped`, etc.). Most
+ * counters are monotonic across the process lifetime; the
+ * exceptions are `current_usage`, `peak_usage`, `live_regions`,
+ * and `live_bytes`, which reflect the current state.
+ *
+ * v0 caveats:
+ *   - `total_allocated` / `total_freed` mirror cumulative bytes
+ *     mmap'd / munmap'd from the kernel (the page heap's
+ *     observable surface). Per-call user-byte accounting requires
+ *     hooking every backend and is not yet wired.
+ *   - `numa_local_allocs` / `numa_remote_allocs` use the page
+ *     heap's mbind success / failure counts as a proxy for v0
+ *     since per-allocation node tracking is not yet wired.
  */
 struct v8m_stats {
-	uint64_t mmap_calls;
-	uint64_t munmap_calls;
-	uint64_t advise_calls;
-	uint64_t bytes_mapped;
-	uint64_t bytes_unmapped;
-	uint64_t live_regions;
-	uint64_t live_bytes;
+	/* Spec fields (api.md §4.2) */
+	uint64_t total_allocated;
+	uint64_t total_freed;
+	uint64_t current_usage;
+	uint64_t peak_usage;
+	uint64_t total_alloc_count;
+	uint64_t total_free_count;
+	uint64_t mmap_count;
+	uint64_t munmap_count;
+	uint64_t mmap_bytes;
+	uint64_t huge_page_count;
+	uint64_t numa_local_allocs;
+	uint64_t numa_remote_allocs;
+
+	/* v8malloc extensions (not in spec; some alias spec fields
+	 * for backward source compatibility with pre-spec callers). */
+	uint64_t mmap_calls; /* alias of mmap_count */
+	uint64_t munmap_calls; /* alias of munmap_count */
+	uint64_t advise_calls; /* MADV_DONTNEED hint count */
+	uint64_t bytes_mapped; /* alias of mmap_bytes */
+	uint64_t bytes_unmapped; /* alias of total_freed */
+	uint64_t live_regions; /* live mmap region count */
+	uint64_t live_bytes; /* alias of current_usage */
 };
 
 /*
@@ -204,12 +234,21 @@ struct v8m_stats {
 V8M_EXPORT void v8m_get_stats(struct v8m_stats *out);
 
 /*
- * Print a human-readable summary to stderr — equivalent to
- * malloc_stats(), kept under the v8m_ namespace so users can
- * call it explicitly without relying on glibc's deprecated
- * mallinfo path.
+ * Reset resettable counters per api.md §4.2. v8malloc keeps the
+ * cumulative page-heap counters monotonic (zeroing them mid-flight
+ * would silently break diagnostic tooling), so this clears only
+ * the resettable subset: `peak_usage` re-baselines to the current
+ * `current_usage`, and `total_alloc_count` / `total_free_count`
+ * reset to zero. Other fields are left untouched. Pre-init is a
+ * no-op.
  */
-V8M_EXPORT void v8m_dump_stats(void);
+V8M_EXPORT void v8m_reset_stats(void);
+
+/*
+ * Emit a human-readable summary to `stream` (defaults to stderr
+ * when `stream` is NULL). Spec signature per api.md §4.2.
+ */
+V8M_EXPORT void v8m_dump_stats(void *stream);
 
 /*
  * Per-class breakdown for the Large/Huge direct-mmap path. The

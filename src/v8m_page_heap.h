@@ -57,6 +57,11 @@ struct v8m_page_heap_stats {
 	uint64_t advise_calls;
 	uint64_t bytes_mapped;
 	uint64_t bytes_unmapped;
+	/* High-watermark of `bytes_mapped - bytes_unmapped` since
+	 * boot. Backs `struct v8m_stats::peak_usage`. Reset by
+	 * `v8m_page_heap_reset_peak()` (rebaselined to current
+	 * live bytes — never goes backward past that floor). */
+	uint64_t peak_live_bytes;
 	/* Number of MADV_HUGEPAGE hints emitted to the kernel for
 	 * allocations large enough (>= 2 MiB) to benefit from being
 	 * backed by transparent huge pages. */
@@ -126,6 +131,12 @@ struct v8m_page_heap_stats {
  * inconsistent by a small amount.
  */
 void v8m_page_heap_get_stats(struct v8m_page_heap_stats *out);
+
+/*
+ * Re-baseline the peak-live-bytes high-watermark to the current
+ * `bytes_mapped - bytes_unmapped`. Called from v8m_reset_stats().
+ */
+void v8m_page_heap_reset_peak(void);
 
 /*
  * Snapshot per-node bytes-mapped + computed imbalance flag (numa.md

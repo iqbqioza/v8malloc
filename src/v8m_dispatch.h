@@ -198,6 +198,20 @@ size_t v8m_dispatch_drain_local_l2(struct v8m_dispatch *dispatch);
 void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled);
 
 /*
+ * Process-wide cumulative counts of successful malloc / free
+ * operations routed through the public API singleton. Backs
+ * `struct v8m_stats::total_alloc_count` and `::total_free_count`.
+ * Reset to zero by `v8m_reset_stats`. The hot paths use relaxed
+ * atomic increments (no fences) so the cost is one cache-coherent
+ * RMW per call.
+ */
+uint64_t v8m_dispatch_total_alloc_count(void);
+uint64_t v8m_dispatch_total_free_count(void);
+void v8m_dispatch_reset_alloc_free_counts(void);
+void v8m_dispatch_record_alloc(void);
+void v8m_dispatch_record_free(void);
+
+/*
  * Per-thread "caller PC for the next alloc" hint. v8m_malloc
  * captures the user's caller PC and stores it here before
  * invoking v8m_dispatch_alloc; the dispatcher consults it to pick

@@ -257,6 +257,39 @@ void v8m_dispatch_set_use_tlc(struct v8m_dispatch *dispatch, bool enabled)
 	dispatch->use_tlc = enabled;
 }
 
+static _Atomic uint64_t g_dispatch_alloc_count;
+static _Atomic uint64_t g_dispatch_free_count;
+
+uint64_t v8m_dispatch_total_alloc_count(void)
+{
+	return atomic_load_explicit(&g_dispatch_alloc_count,
+				    memory_order_relaxed);
+}
+
+uint64_t v8m_dispatch_total_free_count(void)
+{
+	return atomic_load_explicit(&g_dispatch_free_count,
+				    memory_order_relaxed);
+}
+
+void v8m_dispatch_reset_alloc_free_counts(void)
+{
+	atomic_store_explicit(&g_dispatch_alloc_count, 0, memory_order_relaxed);
+	atomic_store_explicit(&g_dispatch_free_count, 0, memory_order_relaxed);
+}
+
+void v8m_dispatch_record_alloc(void)
+{
+	atomic_fetch_add_explicit(&g_dispatch_alloc_count, 1U,
+				  memory_order_relaxed);
+}
+
+void v8m_dispatch_record_free(void)
+{
+	atomic_fetch_add_explicit(&g_dispatch_free_count, 1U,
+				  memory_order_relaxed);
+}
+
 void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
 {
 	v8m_buddy_pool_destroy(&dispatch->buddy);
