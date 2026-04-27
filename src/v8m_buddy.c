@@ -36,20 +36,20 @@ V8M_PURE static uint32_t size_to_level(size_t size)
 	return shift - V8M_BUDDY_MIN_SHIFT;
 }
 
-static size_t level_to_size(uint32_t level)
+V8M_CONST_FN static size_t level_to_size(uint32_t level)
 {
 	return (size_t)1U << (V8M_BUDDY_MIN_SHIFT + level);
 }
 
-static uint32_t addr_to_index(const struct v8m_buddy *buddy, const void *ptr,
-			      uint32_t level)
+V8M_PURE static uint32_t addr_to_index(const struct v8m_buddy *buddy,
+				       const void *ptr, uint32_t level)
 {
 	uintptr_t offset = (uintptr_t)ptr - (uintptr_t)buddy->arena_base;
 	return (uint32_t)(offset >> (V8M_BUDDY_MIN_SHIFT + level));
 }
 
-static struct v8m_buddy_node *index_to_node(const struct v8m_buddy *buddy,
-					    uint32_t idx, uint32_t level)
+V8M_ALWAYS_INLINE static struct v8m_buddy_node *
+index_to_node(const struct v8m_buddy *buddy, uint32_t idx, uint32_t level)
 {
 	unsigned char *base =
 	    buddy->arena_base + ((size_t)idx * level_to_size(level));

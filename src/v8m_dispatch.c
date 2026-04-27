@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h> /* memcpy for the L2 chain traversal */
 
+#include "v8m_arch.h"
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
 #include "v8m_config.h"
@@ -66,8 +67,8 @@ static struct v8m_refill_controller g_l2_refill;
  * lifetime arena otherwise. Centralizes the index arithmetic so
  * the alloc / free paths don't repeat the `arena - 1` indirection.
  */
-static struct v8m_slab_pool *slab_pool_for_arena(struct v8m_dispatch *dispatch,
-						 uint8_t arena_id)
+V8M_ALWAYS_INLINE static struct v8m_slab_pool *
+slab_pool_for_arena(struct v8m_dispatch *dispatch, uint8_t arena_id)
 {
 	if (arena_id == V8M_ARENA_DEFAULT || arena_id >= V8M_ARENA_COUNT) {
 		return &dispatch->slab;
@@ -133,11 +134,11 @@ __attribute__((hot)) static void *
 try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 {
 	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
-	if (cache == NULL) {
+	if (__builtin_expect(cache == NULL, 0)) {
 		return NULL;
 	}
 	void *cached = v8m_thread_cache_alloc(cache, cls);
-	if (cached != NULL) {
+	if (__builtin_expect(cached != NULL, 1)) {
 		return cached;
 	}
 	if (v8m_thread_cache_drain_remote(cache) > 0U) {
@@ -347,7 +348,7 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 
 	uint32_t cls = v8m_size_class(size);
 	v8m_thread_cache_record_alloc(cls, size);
-	if (cls < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cls < V8M_MEDIUM_FIRST_CLASS, 1)) {
 		/* TLC fast path: per-thread bin pop. Only enabled on
 		 * dispatchers that opted in (`use_tlc` true) — the
 		 * test fixtures that create their own dispatchers
@@ -372,11 +373,11 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 		 * across arenas would mix slab pages from different
 		 * pools and break the arena invariant on free. The
 		 * default arena keeps the fast TLC path. */
-		if (arena_id == V8M_ARENA_DEFAULT) {
-			if (dispatch->use_tlc) {
+		if (__builtin_expect(arena_id == V8M_ARENA_DEFAULT, 1)) {
+			if (__builtin_expect(dispatch->use_tlc, 1)) {
 				void *served =
 				    try_tlc_fast_paths(dispatch, cls);
-				if (served != NULL) {
+				if (__builtin_expect(served != NULL, 1)) {
 					return served;
 				}
 			}
@@ -473,7 +474,7 @@ void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 					    void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return;
 	}
 
@@ -481,14 +482,15 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 	 * map. Without this, the magic-check read below could fault
 	 * on a foreign pointer whose page-aligned base sits in an
 	 * unmapped page. */
-	if (!v8m_page_heap_owns(ptr)) {
+	if (__builtin_expect(!v8m_page_heap_owns(ptr), 0)) {
 		v8m_libc_free(ptr);
 		return;
 	}
 
 	struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
-	if (v8m_page_meta_valid(meta)) {
-		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(v8m_page_meta_valid(meta), 1)) {
+		if (__builtin_expect(meta->size_class < V8M_MEDIUM_FIRST_CLASS,
+				     1)) {
 			/* TLC fast path (gated on dispatch->use_tlc;
 			 * see v8m_dispatch_alloc for the rationale).
 			 * Overflow triggers a half-bin batch flush back
@@ -503,10 +505,10 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 				       meta->arena_id == V8M_ARENA_DEFAULT;
 			struct v8m_thread_cache *cache =
 			    use_tlc ? v8m_thread_cache_get_or_create() : NULL;
-			if (cache != NULL) {
+			if (__builtin_expect(cache != NULL, 1)) {
 				bool overflowed = v8m_thread_cache_free(
 				    cache, meta->size_class, ptr);
-				if (overflowed) {
+				if (__builtin_expect(overflowed, 0)) {
 					slab_overflow_to_l2_or_slab(
 					    dispatch, cache, meta->size_class);
 				}

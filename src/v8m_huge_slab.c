@@ -11,12 +11,13 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "v8m_arch.h"
 #include "v8m_internal.h" /* V8M_PAGE_SIZE — surfaces through the header */
 
 /* Mask of all bits the bitmap considers valid for this descriptor.
  * Used by the full-detect predicate and to reject out-of-range
  * slot indices on the free path. */
-static uint32_t valid_mask(const struct v8m_huge_slab *slab)
+V8M_PURE static uint32_t valid_mask(const struct v8m_huge_slab *slab)
 {
 	uint8_t count = slab->slabs_per_huge;
 	if (count == 0U) {
@@ -54,7 +55,7 @@ void *v8m_huge_slab_alloc(struct v8m_huge_slab *slab)
 		return NULL;
 	}
 	uint32_t full = valid_mask(slab);
-	if ((slab->bitmap & full) == full) {
+	if (__builtin_expect((slab->bitmap & full) == full, 0)) {
 		return NULL; /* every slot in use */
 	}
 	/* First free slot — `~bitmap & full` clears already-used bits
