@@ -114,14 +114,14 @@ bool v8m_core_cache_push(struct v8m_core_cache *cache, uint32_t cls, void *node)
 
 void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_NUM_SIZE_CLASSES, 0)) {
 		return NULL;
 	}
 	v8m_tagged_ptr old_head =
 	    atomic_load_explicit(&cache->stacks[cls], memory_order_acquire);
 	for (;;) {
 		void *node = v8m_tagptr_ptr(old_head);
-		if (node == NULL) {
+		if (__builtin_expect(node == NULL, 0)) {
 			return NULL;
 		}
 		void *next = NULL;

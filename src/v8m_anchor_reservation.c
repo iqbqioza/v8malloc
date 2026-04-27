@@ -80,15 +80,16 @@ void *v8m_anchor_reservation_carve(struct v8m_anchor_reservation *res,
 				   size_t bytes, size_t alignment)
 /* NOLINTEND(bugprone-easily-swappable-parameters) */
 {
-	if (res == NULL || res->base == NULL || bytes == 0U) {
+	if (__builtin_expect(res == NULL || res->base == NULL || bytes == 0U,
+			     0)) {
 		return NULL;
 	}
-	if (alignment == 0U) {
+	if (__builtin_expect(alignment == 0U, 0)) {
 		alignment = 1U;
 	}
 	/* Reject non-power-of-two alignment so the round-up below
 	 * stays well-defined. */
-	if ((alignment & (alignment - 1U)) != 0U) {
+	if (__builtin_expect((alignment & (alignment - 1U)) != 0U, 0)) {
 		return NULL;
 	}
 
@@ -102,20 +103,23 @@ void *v8m_anchor_reservation_carve(struct v8m_anchor_reservation *res,
 	uintptr_t target = (uintptr_t)res->base + res->bump_offset;
 	uintptr_t aligned_target =
 	    (target + (alignment - 1U)) & ~(uintptr_t)(alignment - 1U);
-	if (aligned_target < target) {
+	if (__builtin_expect(aligned_target < target, 0)) {
 		res->carve_failures++;
 		(void)pthread_mutex_unlock(&res->lock);
 		return NULL;
 	}
 	size_t aligned_offset = aligned_target - (uintptr_t)res->base;
-	if (aligned_offset > res->cap || bytes > res->cap - aligned_offset) {
+	if (__builtin_expect(aligned_offset > res->cap ||
+				 bytes > res->cap - aligned_offset,
+			     0)) {
 		res->carve_failures++;
 		(void)pthread_mutex_unlock(&res->lock);
 		return NULL;
 	}
 	/* NOLINTNEXTLINE(performance-no-int-to-ptr) */
 	void *carved = (void *)aligned_target;
-	if (mprotect(carved, bytes, PROT_READ | PROT_WRITE) != 0) {
+	if (__builtin_expect(
+		mprotect(carved, bytes, PROT_READ | PROT_WRITE) != 0, 0)) {
 		res->carve_failures++;
 		(void)pthread_mutex_unlock(&res->lock);
 		return NULL;
@@ -129,13 +133,16 @@ void *v8m_anchor_reservation_carve(struct v8m_anchor_reservation *res,
 bool v8m_anchor_reservation_release(struct v8m_anchor_reservation *res,
 				    void *ptr, size_t bytes)
 {
-	if (res == NULL || res->base == NULL || ptr == NULL || bytes == 0U) {
+	if (__builtin_expect(res == NULL || res->base == NULL || ptr == NULL ||
+				 bytes == 0U,
+			     0)) {
 		return false;
 	}
 	uintptr_t base = (uintptr_t)res->base;
 	uintptr_t addr = (uintptr_t)ptr;
-	if (addr < base || addr - base >= res->cap ||
-	    bytes > res->cap - (addr - base)) {
+	if (__builtin_expect(addr < base || addr - base >= res->cap ||
+				 bytes > res->cap - (addr - base),
+			     0)) {
 		return false;
 	}
 	/* MADV_DONTNEED returns physical pages to the OS while leaving
@@ -153,7 +160,8 @@ bool v8m_anchor_reservation_release(struct v8m_anchor_reservation *res,
 bool v8m_anchor_reservation_owns(const struct v8m_anchor_reservation *res,
 				 const void *ptr)
 {
-	if (res == NULL || res->base == NULL || ptr == NULL) {
+	if (__builtin_expect(res == NULL || res->base == NULL || ptr == NULL,
+			     0)) {
 		return false;
 	}
 	uintptr_t base = (uintptr_t)res->base;

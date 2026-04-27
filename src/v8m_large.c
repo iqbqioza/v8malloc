@@ -368,7 +368,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 	}
 	if (region == NULL) {
 		region = v8m_page_heap_alloc(mmap_size, pheap_alignment);
-		if (region == NULL) {
+		if (__builtin_expect(region == NULL, 0)) {
 			return NULL;
 		}
 	}
@@ -427,7 +427,7 @@ static void *large_alloc_with_offset(size_t size, size_t header_offset,
 /* NOLINTNEXTLINE(bugprone-easily-swappable-parameters) */
 void *v8m_large_alloc(size_t size, uint64_t owner_thread)
 {
-	if (size == 0) {
+	if (__builtin_expect(size == 0, 0)) {
 		return NULL;
 	}
 	/* Huge allocations bump the page-heap alignment to 2 MiB so
@@ -454,10 +454,11 @@ void *v8m_large_alloc(size_t size, uint64_t owner_thread)
 void *v8m_large_alloc_aligned(size_t size, size_t alignment,
 			      uint64_t owner_thread)
 {
-	if (size == 0) {
+	if (__builtin_expect(size == 0, 0)) {
 		return NULL;
 	}
-	if (alignment == 0 || alignment <= V8M_SLAB_HEADER_SIZE) {
+	if (__builtin_expect(
+		alignment == 0 || alignment <= V8M_SLAB_HEADER_SIZE, 1)) {
 		/* Default header offset already satisfies alignment <=
 		 * V8M_SLAB_HEADER_SIZE (which is a power of two). The
 		 * aligned variant always uses V8M_PAGE_SIZE for the
@@ -483,7 +484,7 @@ void *v8m_large_alloc_aligned(size_t size, size_t alignment,
 
 void v8m_large_free(const void *obj)
 {
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		return;
 	}
 	/* Recover the page base via the shared ptr-to-meta helper so the
@@ -541,7 +542,7 @@ void v8m_large_free(const void *obj)
 
 size_t v8m_large_usable_size(const void *obj)
 {
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		return 0;
 	}
 	const struct v8m_page_meta *common = v8m_ptr_to_meta(obj);

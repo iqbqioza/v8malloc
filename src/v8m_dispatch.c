@@ -533,12 +533,13 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return 0;
 	}
 	const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
-	if (v8m_page_meta_valid(meta)) {
-		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(v8m_page_meta_valid(meta), 1)) {
+		if (__builtin_expect(meta->size_class < V8M_MEDIUM_FIRST_CLASS,
+				     1)) {
 			return meta->object_size;
 		}
 		return v8m_large_usable_size(ptr);

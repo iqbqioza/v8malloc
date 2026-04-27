@@ -84,7 +84,7 @@ static uint64_t riscv_ima_ext_0(void)
 {
 	static _Atomic uint64_t cached = 0;
 	uint64_t value = atomic_load_explicit(&cached, memory_order_relaxed);
-	if (value != 0U) {
+	if (__builtin_expect(value != 0U, 1)) {
 		return value == UINT64_MAX ? 0U : value;
 	}
 	struct v8m_riscv_hwprobe pair = {
@@ -179,7 +179,7 @@ uint32_t v8m_arch_tsc_frequency_mhz(void)
 	 * the EMA controller never sees a wildly wrong tick rate. */
 	static _Atomic uint32_t cached = 0;
 	uint32_t value = atomic_load_explicit(&cached, memory_order_relaxed);
-	if (value != 0U) {
+	if (__builtin_expect(value != 0U, 1)) {
 		return value;
 	}
 

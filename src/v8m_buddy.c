@@ -121,11 +121,11 @@ void v8m_buddy_init(struct v8m_buddy *buddy, void *arena)
 
 void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size)
 {
-	if (size == 0) {
+	if (__builtin_expect(size == 0, 0)) {
 		return NULL;
 	}
 	uint32_t target = size_to_level(size);
-	if (target >= V8M_BUDDY_LEVELS) {
+	if (__builtin_expect(target >= V8M_BUDDY_LEVELS, 0)) {
 		return NULL;
 	}
 
@@ -133,7 +133,7 @@ void *v8m_buddy_alloc(struct v8m_buddy *buddy, size_t size)
 	while (level < V8M_BUDDY_LEVELS && buddy->free_lists[level] == NULL) {
 		level++;
 	}
-	if (level >= V8M_BUDDY_LEVELS) {
+	if (__builtin_expect(level >= V8M_BUDDY_LEVELS, 0)) {
 		return NULL;
 	}
 
@@ -225,11 +225,11 @@ static uint32_t coalesce_upward(struct v8m_buddy *buddy,
 
 void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return;
 	}
 	uint32_t level = size_to_level(size);
-	if (level >= V8M_BUDDY_LEVELS) {
+	if (__builtin_expect(level >= V8M_BUDDY_LEVELS, 0)) {
 		return;
 	}
 
@@ -241,11 +241,11 @@ void v8m_buddy_free(struct v8m_buddy *buddy, void *ptr, size_t size)
 
 void v8m_buddy_free_no_coalesce(struct v8m_buddy *buddy, void *ptr, size_t size)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return;
 	}
 	uint32_t level = size_to_level(size);
-	if (level >= V8M_BUDDY_LEVELS) {
+	if (__builtin_expect(level >= V8M_BUDDY_LEVELS, 0)) {
 		return;
 	}
 	uint32_t idx = addr_to_index(buddy, ptr, level);
@@ -294,12 +294,13 @@ size_t v8m_buddy_coalesce_all(struct v8m_buddy *buddy)
 
 size_t v8m_buddy_block_size(const struct v8m_buddy *buddy, const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return 0;
 	}
 	uintptr_t addr = (uintptr_t)ptr;
 	uintptr_t base = (uintptr_t)buddy->arena_base;
-	if (addr < base || addr >= base + buddy->arena_size) {
+	if (__builtin_expect(addr < base || addr >= base + buddy->arena_size,
+			     0)) {
 		return 0;
 	}
 	uintptr_t offset = addr - base;

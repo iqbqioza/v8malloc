@@ -469,7 +469,7 @@ int v8m_page_heap_owns_fast(const void *ptr)
 
 bool v8m_page_heap_owns(const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return false;
 	}
 	uintptr_t addr = (uintptr_t)ptr;

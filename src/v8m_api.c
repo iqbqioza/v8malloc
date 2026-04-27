@@ -592,13 +592,13 @@ static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
  * that would result from one entry point thunking through another. */
 static void *do_malloc_pc(size_t size, const void *caller_pc)
 {
-	if (!dispatch_ready()) {
+	if (__builtin_expect(!dispatch_ready(), 0)) {
 		/* Pre-init / post-shutdown — serve from bootstrap.
 		 * size == 0 still produces a unique pointer per our
 		 * malloc(0) policy. */
 		return v8m_bootstrap_alloc(size > 0U ? size : 1U);
 	}
-	if (!pre_alloc_soft_limit_gate(size)) {
+	if (__builtin_expect(!pre_alloc_soft_limit_gate(size), 0)) {
 		return NULL;
 	}
 	/* Predictive prefetch (winning-algorithms.md §9): hash the
@@ -621,11 +621,11 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 	 * stack (e.g. internal v8malloc machinery). */
 	v8m_dispatch_set_caller_pc(caller_pc);
 	void *ptr = v8m_dispatch_alloc(&g_dispatch, size);
-	if (ptr == NULL && oom_handler_says_retry(size)) {
+	if (__builtin_expect(ptr == NULL && oom_handler_says_retry(size), 0)) {
 		ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	}
 	v8m_dispatch_set_caller_pc(NULL);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		errno = ENOMEM;
 		return ptr;
 	}
@@ -641,7 +641,7 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 				 const void *caller_pc)
 {
-	if (!pre_alloc_soft_limit_gate(size)) {
+	if (__builtin_expect(!pre_alloc_soft_limit_gate(size), 0)) {
 		return NULL;
 	}
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
@@ -650,11 +650,11 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 	}
 	v8m_dispatch_set_caller_pc(caller_pc);
 	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
-	if (ptr == NULL && oom_handler_says_retry(size)) {
+	if (__builtin_expect(ptr == NULL && oom_handler_says_retry(size), 0)) {
 		ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
 	}
 	v8m_dispatch_set_caller_pc(NULL);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return NULL;
 	}
 	post_alloc_record(ptr, caller_pc, size);
@@ -857,7 +857,7 @@ V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 	 * forces the overflow signal into a separate flag the optimizer
 	 * cannot eliminate. */
 	size_t total;
-	if (__builtin_mul_overflow(nmemb, size, &total)) {
+	if (__builtin_expect(__builtin_mul_overflow(nmemb, size, &total), 0)) {
 		errno = ENOMEM;
 		return NULL;
 	}
@@ -865,7 +865,7 @@ V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 	 * table and lifetime tracker see the user's call site, not the
 	 * v8m_calloc body. */
 	void *ptr = do_malloc_pc(total, __builtin_return_address(0));
-	if (ptr != NULL && total > 0U) {
+	if (__builtin_expect(ptr != NULL && total > 0U, 1)) {
 		(void)memset(ptr, 0, total);
 	}
 	return ptr;
@@ -897,10 +897,10 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 	 * and the alloc-and-move path attribute the new allocation to
 	 * the user's actual call site. */
 	const void *caller_pc = __builtin_return_address(0);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return do_malloc_pc(size, caller_pc);
 	}
-	if (size == 0U) {
+	if (__builtin_expect(size == 0U, 0)) {
 		v8m_free(ptr);
 		return NULL;
 	}
@@ -914,7 +914,7 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 	}
 
 	void *new_ptr = do_malloc_pc(size, caller_pc);
-	if (new_ptr == NULL) {
+	if (__builtin_expect(new_ptr == NULL, 0)) {
 		return NULL;
 	}
 
@@ -933,7 +933,7 @@ V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
 	/* Same builtin-overflow choice as v8m_calloc — the division
 	 * check folds away under LTO. */
 	size_t total;
-	if (__builtin_mul_overflow(nmemb, size, &total)) {
+	if (__builtin_expect(__builtin_mul_overflow(nmemb, size, &total), 0)) {
 		errno = ENOMEM;
 		return NULL;
 	}
