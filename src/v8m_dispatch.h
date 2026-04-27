@@ -212,6 +212,16 @@ void v8m_dispatch_record_alloc(void);
 void v8m_dispatch_record_free(void);
 
 /*
+ * Fold a thread-cache's accumulated `local_alloc_count` /
+ * `local_free_count` into the dispatcher's global atomic
+ * fallback. Called from `registry_unregister_and_fold` when a
+ * thread cache is destroyed so the per-thread counts persist past
+ * thread exit (otherwise the aggregator walk would lose them).
+ * Zero arguments are a no-op.
+ */
+void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees);
+
+/*
  * Per-thread "caller PC for the next alloc" hint. v8m_malloc
  * captures the user's caller PC and stores it here before
  * invoking v8m_dispatch_alloc; the dispatcher consults it to pick

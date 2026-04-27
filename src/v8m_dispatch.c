@@ -129,7 +129,8 @@ static uint8_t arena_for_caller(const struct v8m_dispatch *dispatch,
  * v8m_dispatch_alloc inside clang-tidy's cognitive-complexity
  * threshold by hoisting the multi-layer fast path here.
  */
-static void *try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
+__attribute__((hot)) static void *
+try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 {
 	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
 	if (cache == NULL) {
@@ -262,32 +263,63 @@ static _Atomic uint64_t g_dispatch_free_count;
 
 uint64_t v8m_dispatch_total_alloc_count(void)
 {
-	return atomic_load_explicit(&g_dispatch_alloc_count,
-				    memory_order_relaxed);
+	uint64_t allocs = 0;
+	uint64_t frees = 0;
+	v8m_thread_cache_aggregate_alloc_free(&allocs, &frees);
+	allocs +=
+	    atomic_load_explicit(&g_dispatch_alloc_count, memory_order_relaxed);
+	return allocs;
 }
 
 uint64_t v8m_dispatch_total_free_count(void)
 {
-	return atomic_load_explicit(&g_dispatch_free_count,
-				    memory_order_relaxed);
+	uint64_t allocs = 0;
+	uint64_t frees = 0;
+	v8m_thread_cache_aggregate_alloc_free(&allocs, &frees);
+	frees +=
+	    atomic_load_explicit(&g_dispatch_free_count, memory_order_relaxed);
+	return frees;
 }
 
 void v8m_dispatch_reset_alloc_free_counts(void)
 {
 	atomic_store_explicit(&g_dispatch_alloc_count, 0, memory_order_relaxed);
 	atomic_store_explicit(&g_dispatch_free_count, 0, memory_order_relaxed);
+	v8m_thread_cache_reset_alloc_free_counts();
 }
 
 void v8m_dispatch_record_alloc(void)
 {
+	struct v8m_thread_cache *cache = v8m_t_cache;
+	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
+		cache->local_alloc_count++;
+		return;
+	}
 	atomic_fetch_add_explicit(&g_dispatch_alloc_count, 1U,
 				  memory_order_relaxed);
 }
 
 void v8m_dispatch_record_free(void)
 {
+	struct v8m_thread_cache *cache = v8m_t_cache;
+	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
+		cache->local_free_count++;
+		return;
+	}
 	atomic_fetch_add_explicit(&g_dispatch_free_count, 1U,
 				  memory_order_relaxed);
+}
+
+void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees)
+{
+	if (allocs != 0U) {
+		atomic_fetch_add_explicit(&g_dispatch_alloc_count, allocs,
+					  memory_order_relaxed);
+	}
+	if (frees != 0U) {
+		atomic_fetch_add_explicit(&g_dispatch_free_count, frees,
+					  memory_order_relaxed);
+	}
 }
 
 void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
@@ -299,7 +331,8 @@ void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
 	v8m_slab_pool_destroy(&dispatch->slab);
 }
 
-void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch, size_t size)
+__attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
+					      size_t size)
 {
 	/* malloc(0) — POSIX permits NULL or a unique pointer; return a
 	 * unique pointer so that downstream code that frees the result
@@ -433,7 +466,8 @@ void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
  * free-list link, so the type must remain non-const all the way
  * down. */
 /* cppcheck-suppress constParameterPointer */
-void v8m_dispatch_free(struct v8m_dispatch *dispatch, void *ptr)
+__attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
+					    void *ptr)
 {
 	if (ptr == NULL) {
 		return;

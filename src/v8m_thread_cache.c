@@ -27,6 +27,7 @@
 #include "v8m_config.h" /* v8m_config_get for the migration opt-in */
 /* v8m_arch_rdtsc + tsc_frequency_mhz live in v8m_arch.h via the
  * same include above — no extra include needed. */
+#include "v8m_dispatch.h" /* v8m_dispatch_fold_alloc_free on cache destroy */
 #include "v8m_internal.h" /* V8M_PAGE_MASK */
 #include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_page.h" /* v8m_ptr_to_meta — meta recovery on flush */
@@ -278,6 +279,8 @@ static void registry_unregister_and_fold(struct v8m_thread_cache *cache)
 					  cache->huge_request_bytes,
 					  memory_order_relaxed);
 	}
+	v8m_dispatch_fold_alloc_free(cache->local_alloc_count,
+				     cache->local_free_count);
 	if (cache->lifetime_samples_recorded != 0U) {
 		atomic_fetch_add_explicit(&g_global_lifetime_recorded,
 					  cache->lifetime_samples_recorded,
@@ -459,7 +462,8 @@ static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
 	}
 }
 
-void *v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
+__attribute__((hot)) void *
+v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 {
 	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
 		return NULL;
@@ -483,8 +487,8 @@ void *v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 	return head;
 }
 
-bool v8m_thread_cache_free(struct v8m_thread_cache *cache, uint32_t cls,
-			   void *obj)
+__attribute__((hot)) bool v8m_thread_cache_free(struct v8m_thread_cache *cache,
+						uint32_t cls, void *obj)
 {
 	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS || obj == NULL) {
 		return false;
@@ -665,8 +669,8 @@ void v8m_thread_cache_gc_tick(struct v8m_thread_cache *cache)
 	cache->gc_countdown = V8M_TLC_GC_INTERVAL;
 }
 
-size_t v8m_thread_cache_flush_half(struct v8m_thread_cache *cache,
-				   struct v8m_slab_pool *pool, uint32_t cls)
+__attribute__((hot)) size_t v8m_thread_cache_flush_half(
+    struct v8m_thread_cache *cache, struct v8m_slab_pool *pool, uint32_t cls)
 {
 	if (cache == NULL || pool == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
 		return 0;
@@ -921,6 +925,37 @@ void v8m_thread_cache_aggregate_histogram(struct v8m_size_class_histogram *out)
 		}
 		out->huge_request_count += cache->huge_request_count;
 		out->huge_request_bytes += cache->huge_request_bytes;
+	}
+	(void)pthread_mutex_unlock(&g_registry_lock);
+}
+
+void v8m_thread_cache_aggregate_alloc_free(uint64_t *out_allocs,
+					   uint64_t *out_frees)
+{
+	uint64_t allocs = 0;
+	uint64_t frees = 0;
+	(void)pthread_mutex_lock(&g_registry_lock);
+	for (struct v8m_thread_cache *cache = g_registry_head; cache != NULL;
+	     cache = cache->registry_next) {
+		allocs += cache->local_alloc_count;
+		frees += cache->local_free_count;
+	}
+	(void)pthread_mutex_unlock(&g_registry_lock);
+	if (out_allocs != NULL) {
+		*out_allocs += allocs;
+	}
+	if (out_frees != NULL) {
+		*out_frees += frees;
+	}
+}
+
+void v8m_thread_cache_reset_alloc_free_counts(void)
+{
+	(void)pthread_mutex_lock(&g_registry_lock);
+	for (struct v8m_thread_cache *cache = g_registry_head; cache != NULL;
+	     cache = cache->registry_next) {
+		cache->local_alloc_count = 0;
+		cache->local_free_count = 0;
 	}
 	(void)pthread_mutex_unlock(&g_registry_lock);
 }
