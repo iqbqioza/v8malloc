@@ -637,17 +637,16 @@ V8M_EXPORT void *v8m_signal_safe_alloc(size_t size);
  * are returned to the kernel. v0's slab and buddy pools already
  * release empty pages eagerly on free, so the synchronous purge
  * call is currently a no-op — the public surface lands to lock
- * the contract for the future bg purge thread cycle. Returns 0
- * on success.
+ * the contract for the future bg purge thread cycle.
  */
-V8M_EXPORT int v8m_purge(void);
+V8M_EXPORT void v8m_purge(void);
 
 /*
  * Per-thread variant. Once the thread cache lands this releases
  * any cached objects bound to the calling thread back to the
  * pools. No-op in v0.
  */
-V8M_EXPORT int v8m_purge_thread(void);
+V8M_EXPORT void v8m_purge_thread(void);
 
 /* --- v8m_-namespaced glibc-compat extensions -------------------- */
 /*
@@ -709,8 +708,12 @@ V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler);
  *
  * Pass 0 to disable the limit (the default). The limit applies to
  * the page heap only — bootstrap allocations are not counted.
+ *
+ * Returns 0 on success, or -1 with errno = EAGAIN when the
+ * dispatcher is not yet READY (e.g. called from a constructor
+ * that runs before v8malloc's own constructor).
  */
-V8M_EXPORT void v8m_set_soft_limit(size_t bytes);
+V8M_EXPORT int v8m_set_soft_limit(size_t bytes);
 
 /*
  * Read the current soft limit. Returns 0 when no limit is set.

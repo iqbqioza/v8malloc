@@ -1351,7 +1351,7 @@ V8M_EXPORT void v8m_get_frag_metrics(struct v8m_frag_metrics *out)
 		: (slab.slots_used * 100U) / slab.slots_total;
 }
 
-V8M_EXPORT int v8m_purge(void)
+V8M_EXPORT void v8m_purge(void)
 {
 	/* Drain the calling thread's TLC bins back to the slab pool
 	 * so single-thread workloads (the thread never exits, the
@@ -1376,10 +1376,9 @@ V8M_EXPORT int v8m_purge(void)
 		(void)v8m_dispatch_purge_drained(&g_dispatch);
 	}
 	v8m_bg_purge_run_once();
-	return 0;
 }
 
-V8M_EXPORT int v8m_purge_thread(void)
+V8M_EXPORT void v8m_purge_thread(void)
 {
 	/* Drain the calling thread's TLC bins back to the slab pool.
 	 * Distinct from v8m_purge in that it does NOT touch the
@@ -1396,7 +1395,6 @@ V8M_EXPORT int v8m_purge_thread(void)
 		}
 		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 	}
-	return 0;
 }
 
 /* --- v8m_-namespaced glibc-compat wrappers ------------------------ */
@@ -1444,9 +1442,19 @@ V8M_EXPORT v8m_oom_handler_t v8m_set_oom_handler(v8m_oom_handler_t handler)
 					memory_order_acq_rel);
 }
 
-V8M_EXPORT void v8m_set_soft_limit(size_t bytes)
+V8M_EXPORT int v8m_set_soft_limit(size_t bytes)
 {
+	/* api.md §4.5: int return so callers can detect a pre-init
+	 * call. The dispatcher must be READY for the soft-limit gate
+	 * in the alloc path to actually consult the stored value;
+	 * setting it before the constructor publishes READY would
+	 * silently lose the cap once the constructor runs. */
+	if (!dispatch_ready()) {
+		errno = EAGAIN;
+		return -1;
+	}
 	atomic_store_explicit(&g_soft_limit, bytes, memory_order_relaxed);
+	return 0;
 }
 
 V8M_EXPORT size_t v8m_get_soft_limit(void)
