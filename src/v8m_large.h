@@ -146,4 +146,15 @@ void v8m_large_get_stats(struct v8m_large_stats *out);
  */
 size_t v8m_large_cache_drain(void);
 
+/*
+ * pthread_atfork plumbing for the Large/Huge recycle-cache mutex.
+ * The malloc/free path can hold this lock while a sibling thread
+ * forks; without these handlers the child inherits a locked-by-
+ * dead-thread mutex and the first Large/Huge alloc or free in
+ * the child deadlocks. Wired into the api.c atfork chain.
+ */
+void v8m_large_prefork(void);
+void v8m_large_postfork_parent(void);
+void v8m_large_postfork_child(void);
+
 #endif /* V8M_LARGE_H */

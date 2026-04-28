@@ -32,11 +32,21 @@ static int fail(const char *msg)
 enum {
 	SIZE_LARGE_SMALL =
 	    256 * 1024, /* class 38 - 256 KiB (just above Small max) */
-	SIZE_LARGE_MID = 1 * 1024 * 1024, /* class 39 - 1 MiB */
 	SIZE_LARGE_MAX = 2 * 1024 * 1024, /* class 40 - 2 MiB */
 	SIZE_HUGE = 4 * 1024 * 1024, /* > 2 MiB - Huge path */
 	MANY_REGIONS = 8
 };
+
+/*
+ * "Mid" Large size used by check_stats_reflect_free. Must stay
+ * strictly below V8M_HUGE_PAGE_SIZE so the page-heap does NOT
+ * attempt to satisfy the request from the global anchor reservation
+ * (the anchor path skips the discrete mmap and so wouldn't advance
+ * mmap_calls, breaking the assertion below). On x86_64/aarch64/etc.
+ * V8M_HUGE_PAGE_SIZE is 2 MiB, so 1 MiB. On s390x the kernel huge
+ * page is 1 MiB, so 512 KiB.
+ */
+#define SIZE_LARGE_MID (V8M_HUGE_PAGE_SIZE / 2)
 
 static int check_basic_large(void)
 {
