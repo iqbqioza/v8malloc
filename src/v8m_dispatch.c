@@ -205,21 +205,58 @@ static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
 					struct v8m_thread_cache *cache,
 					uint32_t cls)
 {
-	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
-	if (__builtin_expect(l2_cache != NULL, 1)) {
-		void *chain_head = NULL;
-		void *chain_tail = NULL;
-		uint32_t batch_size =
-		    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
-		size_t drained = v8m_thread_cache_drain_chain(
-		    cache, cls, batch_size, &chain_head, &chain_tail);
-		if (drained > 0U) {
-			(void)v8m_core_cache_push_batch(l2_cache, cls,
-							chain_head, chain_tail);
-			return;
-		}
+	void *chain_head = NULL;
+	void *chain_tail = NULL;
+	uint32_t batch_size =
+	    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
+	size_t drained = v8m_thread_cache_drain_chain(cache, cls, batch_size,
+						      &chain_head, &chain_tail);
+	if (drained == 0U) {
+		(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
+		return;
 	}
-	(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
+	/* Route the overflow batch to the L2 of the CPU that
+	 * originally acquired the slab page backing the chain head,
+	 * not the freeing thread's current CPU. mb_03's bottleneck
+	 * is producer/consumer cross-thread free: with current-CPU
+	 * routing the freed objects sit on the consumer's L2 and
+	 * the producer must steal_batch across CPUs to find them.
+	 * With owner-CPU routing the freed objects land on the
+	 * producer's own L2 and a normal pop_batch picks them up,
+	 * skipping the cross-CPU hop. The chain may contain objects
+	 * from pages with different owners; routing by the head's
+	 * owner is a heuristic that matches the common case where
+	 * a TLC bin is dominated by objects from one or two pages
+	 * (allocator bursts tend to come from a single refill). */
+	struct v8m_core_cache *l2_cache = NULL;
+	const struct v8m_page_meta *head_meta = v8m_ptr_to_meta(chain_head);
+	if (v8m_page_meta_valid(head_meta) &&
+	    head_meta->owner_cpu != UINT32_MAX) {
+		l2_cache = v8m_core_cache_for_cpu(head_meta->owner_cpu);
+	}
+	if (l2_cache == NULL) {
+		l2_cache = v8m_core_cache_for_current_cpu();
+	}
+	if (__builtin_expect(l2_cache != NULL, 1)) {
+		(void)v8m_core_cache_push_batch(l2_cache, cls, chain_head,
+						chain_tail);
+		return;
+	}
+	/* No L2 available at all (extreme cold-start case) — feed
+	 * the chain back to the slab pool one slot at a time via the
+	 * existing flush_half helper. The chain is already a forward
+	 * list, so just walk and free each node. */
+	while (chain_head != NULL) {
+		void *next = NULL;
+		(void)memcpy((void *)&next, chain_head, sizeof(next));
+		struct v8m_page_meta *m = v8m_ptr_to_meta(chain_head);
+		if (v8m_page_meta_valid(m)) {
+			(void)v8m_slab_pool_free(&dispatch->slab, m,
+						 chain_head);
+		}
+		chain_head = next;
+	}
+	(void)chain_tail;
 }
 
 __attribute__((cold)) int v8m_dispatch_init(struct v8m_dispatch *dispatch)

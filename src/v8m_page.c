@@ -43,6 +43,12 @@ static_assert(offsetof(struct v8m_tiny_page_meta, free_list_head) ==
 static_assert(offsetof(struct v8m_tiny_page_meta, next) ==
 		  offsetof(struct v8m_page_meta, next),
 	      "Tiny meta: next offset diverges from common layout");
+static_assert(offsetof(struct v8m_tiny_page_meta, arena_id) ==
+		  offsetof(struct v8m_page_meta, arena_id),
+	      "Tiny meta: arena_id offset diverges from common layout");
+static_assert(offsetof(struct v8m_tiny_page_meta, owner_cpu) ==
+		  offsetof(struct v8m_page_meta, owner_cpu),
+	      "Tiny meta: owner_cpu offset diverges from common layout");
 
 /*
  * Both metadata structures must fit within the per-page metadata

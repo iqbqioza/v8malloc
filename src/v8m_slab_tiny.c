@@ -15,6 +15,7 @@
 #include "v8m_arch.h"
 #include "v8m_debug.h"
 #include "v8m_internal.h"
+#include "v8m_numa.h" /* v8m_numa_current_cpu for the page-owner stamp */
 #include "v8m_page.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_tiny.h"
@@ -81,6 +82,8 @@ void v8m_slab_tiny_init(void *page_base, uint32_t size_class,
 	meta->owner_thread = owner_thread;
 	meta->free_list_head = NULL;
 	meta->next = NULL;
+	meta->arena_id = 0U;
+	meta->owner_cpu = v8m_numa_current_cpu();
 	meta->search_hint = 0;
 
 	for (uint32_t word = 0; word < BITMAP_WORDS; word++) {

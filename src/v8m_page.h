@@ -50,6 +50,18 @@ struct v8m_page_meta {
 	 * pool. Padding from the alignment of `next` covers the
 	 * remaining 7 bytes. */
 	uint8_t arena_id;
+	/*
+	 * CPU id of the thread that acquired this slab page from the
+	 * pool, captured at fresh-page init. Read by the dispatch
+	 * overflow path so a TLC overflow batch can be routed to the
+	 * page-owner CPU's L2 instead of the freeing thread's L2 —
+	 * a producer/consumer workload (mb_03) then finds its freed
+	 * objects on its own CPU's L2 via a normal pop_batch instead
+	 * of paying for a cross-CPU steal_batch hop. Stored as a
+	 * full uint32_t so the load is a single mov; the high bit
+	 * doubles as a "valid" sentinel (UINT32_MAX = unstamped).
+	 */
+	uint32_t owner_cpu;
 };
 
 /*
@@ -69,6 +81,7 @@ struct v8m_tiny_page_meta {
 	void *free_list_head; /* unused for Tiny; kept for layout parity */
 	struct v8m_page_meta *next;
 	uint8_t arena_id; /* same offset as v8m_page_meta.arena_id */
+	uint32_t owner_cpu; /* same offset as v8m_page_meta.owner_cpu */
 	/* Tiny-only fields. */
 	uint64_t search_hint;
 	uint64_t bitmap[128];
