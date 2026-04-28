@@ -194,7 +194,7 @@ static void apply_cpulist(const char *list, uint32_t node_id)
 	}
 }
 
-void v8m_numa_init(void)
+__attribute__((cold)) void v8m_numa_init(void)
 {
 	bool expected = false;
 	if (!atomic_compare_exchange_strong_explicit(&g_initialized, &expected,
@@ -322,7 +322,8 @@ uint32_t v8m_numa_current_node(void)
 	 * gets a fresh sched_getcpu and subsequent fast-path calls
 	 * use the cached value. */
 	uint32_t count = t_call_count++;
-	if ((count & (V8M_NUMA_REFRESH_INTERVAL - 1U)) == 0U) {
+	if (__builtin_expect((count & (V8M_NUMA_REFRESH_INTERVAL - 1U)) == 0U,
+			     0)) {
 		int cpu = sched_getcpu();
 		t_cached_node =
 		    (cpu < 0) ? 0U : v8m_numa_node_for_cpu((uint32_t)cpu);

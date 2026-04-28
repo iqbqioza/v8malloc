@@ -11,12 +11,13 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "v8m_arch.h"
 #include "v8m_internal.h" /* V8M_PAGE_SIZE — surfaces through the header */
 
 /* Mask of all bits the bitmap considers valid for this descriptor.
  * Used by the full-detect predicate and to reject out-of-range
  * slot indices on the free path. */
-static uint32_t valid_mask(const struct v8m_huge_slab *slab)
+V8M_PURE static uint32_t valid_mask(const struct v8m_huge_slab *slab)
 {
 	uint8_t count = slab->slabs_per_huge;
 	if (count == 0U) {
@@ -50,11 +51,11 @@ void v8m_huge_slab_init(struct v8m_huge_slab *slab, void *base,
 
 void *v8m_huge_slab_alloc(struct v8m_huge_slab *slab)
 {
-	if (slab == NULL || slab->base == NULL) {
+	if (__builtin_expect(slab == NULL || slab->base == NULL, 0)) {
 		return NULL;
 	}
 	uint32_t full = valid_mask(slab);
-	if ((slab->bitmap & full) == full) {
+	if (__builtin_expect((slab->bitmap & full) == full, 0)) {
 		return NULL; /* every slot in use */
 	}
 	/* First free slot — `~bitmap & full` clears already-used bits
@@ -69,24 +70,25 @@ void *v8m_huge_slab_alloc(struct v8m_huge_slab *slab)
 
 bool v8m_huge_slab_free(struct v8m_huge_slab *slab, const void *slot)
 {
-	if (slab == NULL || slab->base == NULL || slot == NULL) {
+	if (__builtin_expect(slab == NULL || slab->base == NULL || slot == NULL,
+			     0)) {
 		return false;
 	}
 	uintptr_t base = (uintptr_t)slab->base;
 	uintptr_t addr = (uintptr_t)slot;
-	if (addr < base) {
+	if (__builtin_expect(addr < base, 0)) {
 		return false;
 	}
 	uintptr_t offset = addr - base;
-	if ((offset & (V8M_PAGE_SIZE - 1U)) != 0U) {
+	if (__builtin_expect((offset & (V8M_PAGE_SIZE - 1U)) != 0U, 0)) {
 		return false; /* not slot-aligned */
 	}
 	size_t idx = offset / V8M_PAGE_SIZE;
-	if (idx >= (size_t)slab->slabs_per_huge) {
+	if (__builtin_expect(idx >= (size_t)slab->slabs_per_huge, 0)) {
 		return false; /* past the live slot range */
 	}
 	uint32_t mask = 1U << idx;
-	if ((slab->bitmap & mask) == 0U) {
+	if (__builtin_expect((slab->bitmap & mask) == 0U, 0)) {
 		return false; /* double-free */
 	}
 	slab->bitmap &= ~mask;

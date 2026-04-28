@@ -32,11 +32,15 @@
 
 /*
  * Maximum number of concurrently-live buddy arenas the pool will
- * keep. 64 arenas × 256 KiB = 16 MiB of Medium-class capacity —
- * comfortable for a v0; the future per-NUMA-node pool will lift the
- * cap by sharding.
+ * keep. 256 arenas × 256 KiB = 64 MiB of Medium-class capacity.
+ *
+ * The previous 64-arena cap (16 MiB) was tight enough that
+ * thread-churn workloads with many concurrent 256 KiB requests
+ * (one full arena per request) could exhaust the window and
+ * surface as malloc(NULL); see test_thread_churn. The future
+ * per-NUMA-node pool will replace this cap by sharding.
  */
-#define V8M_BUDDY_POOL_MAX_ARENAS 64
+#define V8M_BUDDY_POOL_MAX_ARENAS 256
 
 struct v8m_buddy_pool_arena {
 	struct v8m_buddy buddy;

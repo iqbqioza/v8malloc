@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <string.h> /* memcpy for the L2 chain traversal */
 
+#include "v8m_api_internal.h" /* v8m_api_soft_limit_active for medium-TLC gating */
+#include "v8m_arch.h"
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
 #include "v8m_config.h"
@@ -66,8 +68,8 @@ static struct v8m_refill_controller g_l2_refill;
  * lifetime arena otherwise. Centralizes the index arithmetic so
  * the alloc / free paths don't repeat the `arena - 1` indirection.
  */
-static struct v8m_slab_pool *slab_pool_for_arena(struct v8m_dispatch *dispatch,
-						 uint8_t arena_id)
+V8M_ALWAYS_INLINE static struct v8m_slab_pool *
+slab_pool_for_arena(struct v8m_dispatch *dispatch, uint8_t arena_id)
 {
 	if (arena_id == V8M_ARENA_DEFAULT || arena_id >= V8M_ARENA_COUNT) {
 		return &dispatch->slab;
@@ -133,11 +135,11 @@ __attribute__((hot)) static void *
 try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 {
 	struct v8m_thread_cache *cache = v8m_thread_cache_get_or_create();
-	if (cache == NULL) {
+	if (__builtin_expect(cache == NULL, 0)) {
 		return NULL;
 	}
 	void *cached = v8m_thread_cache_alloc(cache, cls);
-	if (cached != NULL) {
+	if (__builtin_expect(cached != NULL, 1)) {
 		return cached;
 	}
 	if (v8m_thread_cache_drain_remote(cache) > 0U) {
@@ -158,7 +160,7 @@ try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 	uint32_t cur_cpu = v8m_numa_current_cpu();
 	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
 	size_t got = 0;
-	if (l2_cache != NULL) {
+	if (__builtin_expect(l2_cache != NULL, 1)) {
 		got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
 					       &batch_head, &batch_tail);
 	}
@@ -203,24 +205,61 @@ static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
 					struct v8m_thread_cache *cache,
 					uint32_t cls)
 {
-	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
-	if (l2_cache != NULL) {
-		void *chain_head = NULL;
-		void *chain_tail = NULL;
-		uint32_t batch_size =
-		    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
-		size_t drained = v8m_thread_cache_drain_chain(
-		    cache, cls, batch_size, &chain_head, &chain_tail);
-		if (drained > 0U) {
-			(void)v8m_core_cache_push_batch(l2_cache, cls,
-							chain_head, chain_tail);
-			return;
-		}
+	void *chain_head = NULL;
+	void *chain_tail = NULL;
+	uint32_t batch_size =
+	    v8m_refill_controller_compute_batch(&g_l2_refill, cls, 1U);
+	size_t drained = v8m_thread_cache_drain_chain(cache, cls, batch_size,
+						      &chain_head, &chain_tail);
+	if (drained == 0U) {
+		(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
+		return;
 	}
-	(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
+	/* Route the overflow batch to the L2 of the CPU that
+	 * originally acquired the slab page backing the chain head,
+	 * not the freeing thread's current CPU. mb_03's bottleneck
+	 * is producer/consumer cross-thread free: with current-CPU
+	 * routing the freed objects sit on the consumer's L2 and
+	 * the producer must steal_batch across CPUs to find them.
+	 * With owner-CPU routing the freed objects land on the
+	 * producer's own L2 and a normal pop_batch picks them up,
+	 * skipping the cross-CPU hop. The chain may contain objects
+	 * from pages with different owners; routing by the head's
+	 * owner is a heuristic that matches the common case where
+	 * a TLC bin is dominated by objects from one or two pages
+	 * (allocator bursts tend to come from a single refill). */
+	struct v8m_core_cache *l2_cache = NULL;
+	const struct v8m_page_meta *head_meta = v8m_ptr_to_meta(chain_head);
+	if (v8m_page_meta_valid(head_meta) &&
+	    head_meta->owner_cpu != UINT32_MAX) {
+		l2_cache = v8m_core_cache_for_cpu(head_meta->owner_cpu);
+	}
+	if (l2_cache == NULL) {
+		l2_cache = v8m_core_cache_for_current_cpu();
+	}
+	if (__builtin_expect(l2_cache != NULL, 1)) {
+		(void)v8m_core_cache_push_batch(l2_cache, cls, chain_head,
+						chain_tail);
+		return;
+	}
+	/* No L2 available at all (extreme cold-start case) — feed
+	 * the chain back to the slab pool one slot at a time via the
+	 * existing flush_half helper. The chain is already a forward
+	 * list, so just walk and free each node. */
+	while (chain_head != NULL) {
+		void *next = NULL;
+		(void)memcpy((void *)&next, chain_head, sizeof(next));
+		struct v8m_page_meta *m = v8m_ptr_to_meta(chain_head);
+		if (v8m_page_meta_valid(m)) {
+			(void)v8m_slab_pool_free(&dispatch->slab, m,
+						 chain_head);
+		}
+		chain_head = next;
+	}
+	(void)chain_tail;
 }
 
-int v8m_dispatch_init(struct v8m_dispatch *dispatch)
+__attribute__((cold)) int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 {
 	int ret = v8m_slab_pool_init(&dispatch->slab);
 	if (ret != 0) {
@@ -299,15 +338,19 @@ void v8m_dispatch_record_alloc(void)
 				  memory_order_relaxed);
 }
 
-void v8m_dispatch_record_free(void)
+void v8m_dispatch_record_free_cache(struct v8m_thread_cache *cache)
 {
-	struct v8m_thread_cache *cache = v8m_t_cache;
 	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
 		cache->local_free_count++;
 		return;
 	}
 	atomic_fetch_add_explicit(&g_dispatch_free_count, 1U,
 				  memory_order_relaxed);
+}
+
+void v8m_dispatch_record_free(void)
+{
+	v8m_dispatch_record_free_cache(v8m_t_cache);
 }
 
 void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees)
@@ -322,7 +365,7 @@ void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees)
 	}
 }
 
-void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
 {
 	v8m_buddy_pool_destroy(&dispatch->buddy);
 	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
@@ -336,14 +379,13 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 {
 	/* malloc(0) — POSIX permits NULL or a unique pointer; return a
 	 * unique pointer so that downstream code that frees the result
-	 * doesn't need a special-case branch. */
-	if (size == 0) {
-		size = 1;
-	}
+	 * doesn't need a special-case branch. Branchless coerce so the
+	 * happy path emits no compare/jump. */
+	size += (size_t)(size == 0U);
 
 	uint32_t cls = v8m_size_class(size);
 	v8m_thread_cache_record_alloc(cls, size);
-	if (cls < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cls < V8M_MEDIUM_FIRST_CLASS, 1)) {
 		/* TLC fast path: per-thread bin pop. Only enabled on
 		 * dispatchers that opted in (`use_tlc` true) — the
 		 * test fixtures that create their own dispatchers
@@ -368,11 +410,11 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 		 * across arenas would mix slab pages from different
 		 * pools and break the arena invariant on free. The
 		 * default arena keeps the fast TLC path. */
-		if (arena_id == V8M_ARENA_DEFAULT) {
-			if (dispatch->use_tlc) {
+		if (__builtin_expect(arena_id == V8M_ARENA_DEFAULT, 1)) {
+			if (__builtin_expect(dispatch->use_tlc, 1)) {
 				void *served =
 				    try_tlc_fast_paths(dispatch, cls);
-				if (served != NULL) {
+				if (__builtin_expect(served != NULL, 1)) {
 					return served;
 				}
 			}
@@ -382,6 +424,24 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 		    slab_pool_for_arena(dispatch, arena_id), cls, 0, arena_id);
 	}
 	if (size <= V8M_BUDDY_MAX_BLOCK) {
+		/* Medium-class TLC fast path: per-thread bin pop for
+		 * classes 32..37 (8 KiB..256 KiB). The bins are
+		 * compile-time capped (see V8M_MEDIUM_TLC_*) so they
+		 * cannot grow unboundedly; misses fall through to the
+		 * single-mutex buddy pool unchanged. Gated on
+		 * `use_tlc` for the same reason as the slab path:
+		 * test fixtures with private dispatchers stay off. */
+		if (__builtin_expect(dispatch->use_tlc, 1)) {
+			struct v8m_thread_cache *cache =
+			    v8m_thread_cache_get_or_create();
+			if (__builtin_expect(cache != NULL, 1)) {
+				void *cached =
+				    v8m_thread_cache_medium_alloc(cache, cls);
+				if (__builtin_expect(cached != NULL, 0)) {
+					return cached;
+				}
+			}
+		}
 		return v8m_buddy_pool_alloc(&dispatch->buddy, size);
 	}
 	return v8m_large_alloc(size, 0);
@@ -398,10 +458,8 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 				 size_t alignment)
 {
-	if (size == 0) {
-		size = 1;
-	}
-	if (alignment <= V8M_MALLOC_NATURAL_ALIGN) {
+	size += (size_t)(size == 0U);
+	if (__builtin_expect(alignment <= V8M_MALLOC_NATURAL_ALIGN, 1)) {
 		return v8m_dispatch_alloc(dispatch, size);
 	}
 	/* Record the user's raw `size` (not the alignment-bumped
@@ -469,7 +527,7 @@ void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 					    void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return;
 	}
 
@@ -477,14 +535,15 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 	 * map. Without this, the magic-check read below could fault
 	 * on a foreign pointer whose page-aligned base sits in an
 	 * unmapped page. */
-	if (!v8m_page_heap_owns(ptr)) {
+	if (__builtin_expect(!v8m_page_heap_owns(ptr), 0)) {
 		v8m_libc_free(ptr);
 		return;
 	}
 
 	struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
-	if (v8m_page_meta_valid(meta)) {
-		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(v8m_page_meta_valid(meta), 1)) {
+		if (__builtin_expect(meta->size_class < V8M_MEDIUM_FIRST_CLASS,
+				     1)) {
 			/* TLC fast path (gated on dispatch->use_tlc;
 			 * see v8m_dispatch_alloc for the rationale).
 			 * Overflow triggers a half-bin batch flush back
@@ -499,10 +558,10 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 				       meta->arena_id == V8M_ARENA_DEFAULT;
 			struct v8m_thread_cache *cache =
 			    use_tlc ? v8m_thread_cache_get_or_create() : NULL;
-			if (cache != NULL) {
+			if (__builtin_expect(cache != NULL, 1)) {
 				bool overflowed = v8m_thread_cache_free(
 				    cache, meta->size_class, ptr);
-				if (overflowed) {
+				if (__builtin_expect(overflowed, 0)) {
 					slab_overflow_to_l2_or_slab(
 					    dispatch, cache, meta->size_class);
 				}
@@ -521,18 +580,53 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 	/* No magic at the page base — must be a buddy allocation
 	 * (buddy arenas don't stamp v8m_page_meta). The page-heap
 	 * ownership check above already excluded foreign pointers,
-	 * so this is the only remaining backend. */
+	 * so this is the only remaining backend.
+	 *
+	 * Medium-class TLC: try to cache the freed block in the
+	 * calling thread's per-class bin first. The bin caps are
+	 * tiny (1..4 entries) so caching never bloats RSS beyond
+	 * ~672 KiB / thread; on overflow (or if TLC is unavailable)
+	 * the block goes back to the buddy pool unchanged.
+	 *
+	 * Soft-limit gating: cached blocks still count against
+	 * `live_bytes`, so a tight `v8m_set_soft_limit` would
+	 * otherwise keep tripping after an OOM-handler frees
+	 * pressure-relief blocks (the freed block sits in TLC and
+	 * the retry still sees the same live_bytes). Skipping the
+	 * TLC when a soft limit is armed keeps the soft-limit
+	 * contract intact at the cost of one TLC pop per medium
+	 * free under pressure (a path that is already cold). */
+	if (__builtin_expect(dispatch->use_tlc && !v8m_api_soft_limit_active(),
+			     1)) {
+		struct v8m_thread_cache *cache =
+		    v8m_thread_cache_get_or_create();
+		if (__builtin_expect(cache != NULL, 1)) {
+			size_t blk =
+			    v8m_buddy_pool_block_size(&dispatch->buddy, ptr);
+			if (blk != 0U) {
+				uint32_t cls = v8m_size_class(blk);
+				if (cls >= V8M_MEDIUM_TLC_FIRST_CLASS &&
+				    cls <= V8M_MEDIUM_TLC_LAST_CLASS) {
+					if (!v8m_thread_cache_medium_free(
+						cache, cls, ptr)) {
+						return;
+					}
+				}
+			}
+		}
+	}
 	(void)v8m_buddy_pool_free(&dispatch->buddy, ptr);
 }
 
 size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return 0;
 	}
 	const struct v8m_page_meta *meta = v8m_ptr_to_meta(ptr);
-	if (v8m_page_meta_valid(meta)) {
-		if (meta->size_class < V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(v8m_page_meta_valid(meta), 1)) {
+		if (__builtin_expect(meta->size_class < V8M_MEDIUM_FIRST_CLASS,
+				     1)) {
 			return meta->object_size;
 		}
 		return v8m_large_usable_size(ptr);
@@ -553,7 +647,7 @@ size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
  * default slab → lifetime arenas → buddy; release in the exact
  * reverse so any other fork handler ordering is consistent.
  */
-void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
 {
 	(void)pthread_mutex_lock(&dispatch->slab.lock);
 	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
@@ -563,7 +657,8 @@ void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
 	v8m_page_heap_prefork();
 }
 
-void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void
+v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
 {
 	v8m_page_heap_postfork_parent();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
@@ -574,7 +669,8 @@ void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
 	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }
 
-void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void
+v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
 {
 	v8m_page_heap_postfork_child();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);

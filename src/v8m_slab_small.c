@@ -14,8 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v8m_arch.h"
 #include "v8m_debug.h"
 #include "v8m_internal.h"
+#include "v8m_numa.h" /* v8m_numa_current_cpu for the page-owner stamp */
 #include "v8m_page.h"
 #include "v8m_size_class.h"
 #include "v8m_slab_small.h"
@@ -71,6 +73,8 @@ void v8m_slab_small_init(void *page_base, uint32_t size_class,
 	meta->capacity = capacity;
 	atomic_store_explicit(&meta->used_count, 0, memory_order_relaxed);
 	meta->owner_thread = owner_thread;
+	meta->arena_id = 0U;
+	meta->owner_cpu = v8m_numa_current_cpu();
 	meta->next = NULL;
 
 	/* Build the free list from the tail backwards so the head
@@ -99,7 +103,7 @@ void v8m_slab_small_init(void *page_base, uint32_t size_class,
 void *v8m_slab_small_alloc(struct v8m_page_meta *meta)
 {
 	void *head = meta->free_list_head;
-	if (head == NULL) {
+	if (__builtin_expect(head == NULL, 0)) {
 		return NULL;
 	}
 	void **link = (void **)head;

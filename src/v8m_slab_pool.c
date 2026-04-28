@@ -15,6 +15,7 @@
 #include <stdio.h> /* fprintf for v8m_slab_pool_validate */
 #include <string.h> /* memcpy for the batch-alloc chain link */
 
+#include "v8m_arch.h" /* V8M_ALWAYS_INLINE */
 #include "v8m_internal.h"
 #include "v8m_numa.h" /* v8m_numa_current_node */
 #include "v8m_numa_pool.h"
@@ -35,7 +36,7 @@
 static struct v8m_numa_pool g_slab_numa_pool;
 static atomic_bool g_slab_numa_pool_ready;
 
-int v8m_slab_pool_global_init(void)
+__attribute__((cold)) int v8m_slab_pool_global_init(void)
 {
 	if (atomic_load_explicit(&g_slab_numa_pool_ready,
 				 memory_order_acquire)) {
@@ -50,7 +51,7 @@ int v8m_slab_pool_global_init(void)
 	return 0;
 }
 
-void v8m_slab_pool_global_destroy(void)
+__attribute__((cold)) void v8m_slab_pool_global_destroy(void)
 {
 	if (!atomic_load_explicit(&g_slab_numa_pool_ready,
 				  memory_order_acquire)) {
@@ -167,7 +168,7 @@ static void release_slab_page(struct v8m_slab_pool *pool, void *page)
 #include "v8m_slab_small.h"
 #include "v8m_slab_tiny.h"
 
-static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
+V8M_ALWAYS_INLINE static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_alloc(meta);
@@ -175,7 +176,8 @@ static void *slab_alloc_dispatch(struct v8m_page_meta *meta)
 	return v8m_slab_small_alloc(meta);
 }
 
-static bool slab_free_dispatch(struct v8m_page_meta *meta, void *obj)
+V8M_ALWAYS_INLINE static bool slab_free_dispatch(struct v8m_page_meta *meta,
+						 void *obj)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_free(meta, obj);
@@ -183,7 +185,8 @@ static bool slab_free_dispatch(struct v8m_page_meta *meta, void *obj)
 	return v8m_slab_small_free(meta, obj);
 }
 
-static bool slab_is_full_dispatch(const struct v8m_page_meta *meta)
+V8M_ALWAYS_INLINE static bool
+slab_is_full_dispatch(const struct v8m_page_meta *meta)
 {
 	if (meta->size_class < V8M_SMALL_FIRST_CLASS) {
 		return v8m_slab_tiny_is_full(meta);
@@ -201,7 +204,7 @@ static void slab_init_dispatch(void *page, uint32_t size_class,
 	}
 }
 
-int v8m_slab_pool_init(struct v8m_slab_pool *pool)
+__attribute__((cold)) int v8m_slab_pool_init(struct v8m_slab_pool *pool)
 {
 	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
 		pool->classes[i].current = NULL;
@@ -252,7 +255,7 @@ void v8m_slab_pool_destroy(struct v8m_slab_pool *pool)
  */
 static void *try_current(struct v8m_slab_pool_class *cls)
 {
-	if (cls->current == NULL) {
+	if (__builtin_expect(cls->current == NULL, 0)) {
 		return NULL;
 	}
 	void *obj = slab_alloc_dispatch(cls->current);
@@ -359,10 +362,10 @@ void *v8m_slab_pool_alloc_arena(struct v8m_slab_pool *pool, uint32_t size_class,
 	struct v8m_slab_pool_class *cls = &pool->classes[size_class];
 
 	void *obj = try_current(cls);
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		obj = try_partials(cls);
 	}
-	if (obj == NULL) {
+	if (__builtin_expect(obj == NULL, 0)) {
 		obj = acquire_fresh_page(pool, cls, size_class, owner_thread,
 					 arena_id);
 	}
@@ -472,10 +475,10 @@ bool v8m_slab_pool_free(struct v8m_slab_pool *pool, struct v8m_page_meta *meta,
 
 	struct v8m_slab_pool_class *cls = &pool->classes[size_class];
 
-	if (became_empty) {
+	if (__builtin_expect(became_empty, 0)) {
 		unlink_from_class(cls, meta);
 		release_slab_page(pool, meta);
-	} else if (was_full && cls->current != meta) {
+	} else if (__builtin_expect(was_full && cls->current != meta, 0)) {
 		/* Full -> partial transition; the page wasn't in any
 		 * list, so add it to partials. The `cls->current != meta`
 		 * guard matters: a page can be `current` AND full (the

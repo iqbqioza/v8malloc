@@ -13,24 +13,26 @@
 
 void *v8m_bump_alloc(struct v8m_bump *bump, size_t request)
 {
-	if (bump == NULL || bump->buffer == NULL || bump->align == 0U) {
+	if (__builtin_expect(
+		bump == NULL || bump->buffer == NULL || bump->align == 0U, 0)) {
 		return NULL;
 	}
 	/* Reject any size that cannot fit in the buffer before the round-
 	 * up, so a near-SIZE_MAX request cannot wrap to a small `aligned`
 	 * and silently hand the caller a tiny slot for a huge promise. */
-	if (request > bump->size) {
+	if (__builtin_expect(request > bump->size, 0)) {
 		return NULL;
 	}
 	size_t aligned =
 	    (request + (bump->align - 1U)) & ~(size_t)(bump->align - 1U);
-	if (aligned == 0U) {
+	if (__builtin_expect(aligned == 0U, 0)) {
 		aligned = bump->align;
 	}
 
 	size_t off = atomic_fetch_add_explicit(&bump->offset, aligned,
 					       memory_order_relaxed);
-	if (off > bump->size || aligned > bump->size - off) {
+	if (__builtin_expect(off > bump->size || aligned > bump->size - off,
+			     0)) {
 		return NULL;
 	}
 	return &bump->buffer[off];
@@ -38,7 +40,7 @@ void *v8m_bump_alloc(struct v8m_bump *bump, size_t request)
 
 bool v8m_bump_owns(const struct v8m_bump *bump, const void *ptr)
 {
-	if (bump == NULL || bump->buffer == NULL) {
+	if (__builtin_expect(bump == NULL || bump->buffer == NULL, 0)) {
 		return false;
 	}
 	uintptr_t addr = (uintptr_t)ptr;

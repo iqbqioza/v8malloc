@@ -41,4 +41,11 @@ void v8m_api_collect_live_stats(struct v8m_live_stats *out);
  * heap or any other dispatcher-owned state. */
 bool v8m_api_dispatch_ready(void);
 
+/* True iff a non-zero soft limit is currently armed. The dispatch
+ * free path consults this to skip the medium-class TLC when the
+ * caller is enforcing a tight live-bytes ceiling — cached blocks
+ * still count against live_bytes, so retaining them under soft
+ * pressure would prevent an OOM-handler retry from succeeding. */
+bool v8m_api_soft_limit_active(void);
+
 #endif /* V8M_API_INTERNAL_H */

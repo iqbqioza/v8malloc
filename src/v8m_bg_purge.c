@@ -140,7 +140,7 @@ static void *bg_purge_thread_main(void *arg)
 	return NULL;
 }
 
-int v8m_bg_purge_init(void)
+__attribute__((cold)) int v8m_bg_purge_init(void)
 {
 	if (atomic_load_explicit(&g_running, memory_order_acquire)) {
 		return 0;
@@ -155,7 +155,7 @@ int v8m_bg_purge_init(void)
 	return 0;
 }
 
-void v8m_bg_purge_shutdown(void)
+__attribute__((cold)) void v8m_bg_purge_shutdown(void)
 {
 	if (!atomic_load_explicit(&g_running, memory_order_acquire)) {
 		return;
@@ -184,17 +184,17 @@ void v8m_bg_purge_set_tick_hook(v8m_bg_purge_tick_hook hook)
 			      memory_order_release);
 }
 
-void v8m_bg_purge_prefork(void)
+__attribute__((cold)) void v8m_bg_purge_prefork(void)
 {
 	(void)pthread_mutex_lock(&g_lock);
 }
 
-void v8m_bg_purge_postfork_parent(void)
+__attribute__((cold)) void v8m_bg_purge_postfork_parent(void)
 {
 	(void)pthread_mutex_unlock(&g_lock);
 }
 
-void v8m_bg_purge_postfork_child(void)
+__attribute__((cold)) void v8m_bg_purge_postfork_child(void)
 {
 	/* The bg-purge thread does NOT exist in the child — the
 	 * fork() inherits the parent's process image but only the

@@ -123,8 +123,12 @@ static int check_drain_invariants(const struct v8m_stats *baseline,
 	 * teardown sample. The slack is small enough to still catch
 	 * a real leak (which would push the count by orders of
 	 * magnitude), large enough to absorb the drained-cache
-	 * hysteresis CI sees on noisy GitHub runners. */
-	const uint64_t region_slack = 4U;
+	 * hysteresis CI sees on noisy GitHub runners. The 16-region
+	 * value tracks the V8M_BUDDY_POOL_MAX_ARENAS=256 budget:
+	 * when 2/39 ctest jobs run the soak alongside other tests,
+	 * the buddy pool may legitimately retain a handful of
+	 * drained arenas in the deferred-keep window. */
+	const uint64_t region_slack = 16U;
 	uint64_t bytes_delta = (after->live_bytes > baseline->live_bytes)
 				   ? after->live_bytes - baseline->live_bytes
 				   : 0U;

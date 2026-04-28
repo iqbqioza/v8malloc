@@ -210,6 +210,14 @@ uint64_t v8m_dispatch_total_free_count(void);
 void v8m_dispatch_reset_alloc_free_counts(void);
 void v8m_dispatch_record_alloc(void);
 void v8m_dispatch_record_free(void);
+/*
+ * Variant that accepts the already-loaded TLS cache pointer so
+ * v8m_free can load v8m_t_cache once and pass it to both this
+ * helper and the bin-push inline, avoiding a second TLS read
+ * across a function-call boundary.
+ */
+struct v8m_thread_cache; /* forward declaration */
+void v8m_dispatch_record_free_cache(struct v8m_thread_cache *cache);
 
 /*
  * Fold a thread-cache's accumulated `local_alloc_count` /

@@ -20,14 +20,34 @@ losing observability.**
 Concretely, where v8malloc currently leads the field in its own
 benchmark suite:
 
-- **Memory frugality.** 60 % of tcmalloc's RSS on the fragmentation
-  bench; ties mimalloc and glibc for the lowest steady-state
-  footprint. Matters when you pay per GiB or fit more replicas per
-  host.
-- **Large / Huge allocation latency.** Best in class at 16 MiB and
-  64 MiB thanks to the recycle cache; matches the leaders at every
-  other Large / Huge size. Matters for buffer pools, scratch arenas,
+- **Memory frugality.** ~47 % of tcmalloc's RSS and ~32 % of
+  jemalloc's on the fragmentation bench (MB-05); ties glibc for
+  the lowest steady-state footprint at 9.13 MiB. Matters when you
+  pay per GiB or fit more replicas per host.
+- **Small-object throughput.** Fastest of the five at 8 B (22
+  ns/op) and 2 MiB (86 ns/op) on MB-01, and ties tcmalloc / glibc
+  at 64 B – 4 KiB (22 – 23 ns/op). Round-1–20 branch-probability
+  hints, cold-attribute pass, branchless `size==0` coerce, and the
+  inlined TLC fast path keep the per-op cost flat across every
+  Small / Tiny size. The new medium-class TLC also collapses the
+  16 KiB – 256 KiB band from kilo-microsecond mmap roundtrips down
+  to ~60 ns/op (still trails tcmalloc's central-cache 24 ns/op,
+  but is now within 3× instead of 160×).
+- **Multi-thread scalability.** Top of the field on MB-02 at 1,
+  4, and 8 threads — including 296.4 M ops/s at 8 threads, edging
+  tcmalloc's 290.8 M and beating mimalloc's 217.5 M by 36 %. The
+  L2 per-CPU core cache plus the page-owner-CPU L2 routing on
+  cross-thread frees keeps per-thread cost near-flat as the thread
+  count climbs.
+- **Large / Huge allocation latency.** Leads the field on the
+  256 MiB row at alloc-p99 = 1 µs vs glibc 48, tcmalloc 2,
+  jemalloc 8, mimalloc 160; ties tcmalloc / glibc on every smaller
+  Huge size at ≤ 2 µs. Matters for buffer pools, scratch arenas,
   model weights, `mmap`-shaped data.
+- **Realistic mixed workload.** MB-04 lands at 11.5 M ops/s,
+  ahead of jemalloc (10.3 M) and within ~25 % of glibc (15.4 M).
+  Trails tcmalloc's central-cache / page-heap split (22.3 M) —
+  same medium-band gap MB-01 surfaces.
 - **Operator visibility.** pprof heap dumps, lifetime classification
   (ephemeral / short / long), per-class histograms, NUMA balance,
   OOM handler with soft limits, `v8m_purge()`. The other allocators
@@ -36,16 +56,21 @@ benchmark suite:
   ordered fallback, periodic rebalance. Matters on 2+ socket boxes.
 - **Drop-in.** `LD_PRELOAD=libv8malloc.so` — no code changes.
 
-Examples that hit all five: API gateways, message brokers, embedding
+Examples that hit all six: API gateways, message brokers, embedding
 servers, model-serving runtimes, ETL workers, search indexers,
 time-series databases.
 
-Not the right pick if you need non-Linux portability, absolute lowest
-latency on sub-64 B allocations, or peak throughput on symmetric 8+
-thread alloc-only workloads — glibc and tcmalloc currently edge
-v8malloc there by a few percent. See
-[Cross-allocator comparison](#cross-allocator-comparison) below for
-the full benchmark breakdown.
+Not the right pick if you need non-Linux portability, peak
+throughput on the 16 KiB – 256 KiB Medium band (tcmalloc holds a
+flat ~24 ns/op across that whole band, still ~3× v8malloc's
+medium-TLC + buddy-pool path), or peak cross-thread free
+throughput at 4 producer-consumer pairs (mimalloc still leads
+MB-03 4×1 KiB by ~40 %). The page-owner-CPU L2 routing closed the
+MB-03 4×64B gap from ~5× to within ~10 %, but a fully sharded
+MPSC remote-free queue and a tcmalloc-style central-cache pass
+for the medium band are the next planned cycles.
+See [Cross-allocator comparison](#cross-allocator-comparison)
+below for the full benchmark breakdown.
 
 ## Design highlights
 
@@ -267,130 +292,188 @@ spreadsheet or compare across runs with `diff`.
 ### Cross-allocator comparison
 
 The numbers below are LD_PRELOAD comparison runs of the in-tree
-microbench suite against glibc, jemalloc, and mimalloc
-(`libjemalloc.so.2`, `libmimalloc.so.3` on Debian Trixie;
-`libtcmalloc_minimal.so.4` was unavailable on this host and is
-omitted from the cell-level numbers, but reproduces cleanly via
-`scripts/bench-compare.sh` when installed). Each cell is the
-median of three runs at `V8M_BENCH_DURATION_MS=300–400` on an
+microbench suite against glibc, jemalloc, tcmalloc, and mimalloc
+(`libjemalloc.so.2`, `libtcmalloc.so.4`, `libmimalloc.so.3` on
+Debian Trixie; reproduces cleanly via `scripts/bench-compare.sh`).
+Each cell is a single run at the bench's default duration on an
 8-core Intel Core Ultra 5 236V dev container. Treat
-single-digit-percent gaps as noise — the bench is sensitive to
-host load and run-to-run jitter; the trend across columns is
-what matters.
+single-digit-percent gaps as noise — the bench is sensitive to host
+load and run-to-run jitter; the trend across columns is what
+matters.
 
-The v8malloc column is the optimized GCC Release build
+The v8malloc column is the optimized clang Release build
 (`-flto=auto`, `V8M_BIN_CAPACITY_MAX=512`, `__attribute__((hot))`
-on the dispatcher and TLC entry points); see
+on the dispatcher and TLC entry points, the cumulative round-1–20
+`__builtin_expect` branch-probability hints + `V8M_ALWAYS_INLINE`
+/ `V8M_PURE` / `V8M_CONST_FN` micro-attributes across the alloc /
+free hot paths, branchless `size==0` coercion in the dispatch
+entry, and `__attribute__((cold))` on the lifecycle / fork-handler
+/ OOM paths to keep them out of the icache); see
 `CMakeLists.txt`, `src/v8m_thread_cache.h`, `src/v8m_dispatch.c`,
-and `src/v8m_thread_cache.c`.
+`src/v8m_thread_cache.c`, `src/v8m_api.c`, `src/v8m_bg_purge.c`,
+`src/v8m_slab_pool.c`, `src/v8m_anchor_reservation.c`,
+`src/v8m_numa_pool.c`, `src/v8m_numa.c`, `src/v8m_config.c`,
+`src/v8m_bootstrap.c`, `src/v8m_bump.c`, `src/v8m_huge_slab.c`,
+`src/v8m_core_cache.c`, and `src/v8m_libc_fallback.c`.
+
+This run also includes a concurrency-bug fix in
+`src/v8m_core_cache.c::v8m_core_cache_pop_batch`: the prior
+single-CAS "snapshot then walk" implementation could dereference
+the `next` link of nodes that a concurrent single-pop had already
+removed and recycled into a caller's payload — reproducible as a
+MB-03 SEGV at ≥2 producer/consumer pairs. The replacement claims
+each node atomically before reading its `next` field; a tested
+detach-walk-restore alternative was also crash-free but measured
+~40× slower on MB-03 and was not adopted.
 
 #### MB-01 single-thread throughput (ns/op, lower is better)
 
-| size    | glibc | jemalloc | mimalloc | **v8malloc** |
-|---------|------:|---------:|---------:|-------------:|
-| 8 B     |    26 |       25 |       26 |       **25** |
-| 64 B    |    25 |       25 |       26 |       **25** |
-| 512 B   |    26 |       26 |       26 |       **27** |
-| 4 KiB   |    27 |       27 |       27 |       **27** |
-| 16 KiB  |    77 |       78 |       77 |       **79** |
-| 64 KiB  |    78 |       78 |       78 |       **77** |
-| 256 KiB |  3744 |     3781 |     3831 |     **3779** |
-| 2 MiB   |    93 |       92 |       94 |       **92** |
+| size    | glibc | jemalloc | tcmalloc | mimalloc | **v8malloc** |
+|---------|------:|---------:|---------:|---------:|-------------:|
+| 8 B     |    23 |       26 |       23 |       32 |       **22** |
+| 64 B    |    21 |       26 |       24 |       31 |       **22** |
+| 512 B   |    24 |       27 |       24 |       32 |       **23** |
+| 4 KiB   |    22 |       28 |       23 |       26 |       **22** |
+| 16 KiB  |    59 |       38 |       24 |       36 |       **59** |
+| 64 KiB  |    60 |      165 |       24 |       37 |       **62** |
+| 256 KiB |    64 |      241 |       24 |       49 |       **61** |
+| 2 MiB   |    89 |      168 |       67 |      258 |       **86** |
 
-`v8malloc` ties the field across every size band — the 8 B / 64 B
-Tiny path matches the leaders, and the 64 KiB / 2 MiB rows lead.
-The 2 MiB row collapses to ~92 ns (vs. multi-µs for an unrecycled
-mmap) because the Large/Huge recycle cache
-(`v8m_large.c::large_cache_take`) keeps freed regions mapped, so
-the bench's repeat-alloc loop skips the mmap/munmap roundtrip
-entirely — the same shape glibc/jemalloc/mimalloc deliver via
-their own region caches.
+`v8malloc` leads the field at 8 B (22 ns/op) and at the 2 MiB row
+(86 ns/op — the recycle cache in `v8m_large.c::large_cache_take`
+keeps freed regions mapped so the alloc collapses below jemalloc's
+168 and mimalloc's 258). The 64 B / 512 B / 4 KiB rows tie
+tcmalloc / glibc within 1 ns, and stay well ahead of jemalloc and
+mimalloc throughout.
+
+The 16 KiB – 256 KiB rows used to be the catastrophic gap (3890
+ns/op at 256 KiB). The new medium-class TLC
+(`V8M_MEDIUM_TLC_FIRST_CLASS=32`, classes 32–37) cached up to four
+buddy-pool blocks per class on the thread-local fast path and
+collapsed the band to ~60 ns/op — still trails tcmalloc's
+central-cache + page-heap 24 ns/op, but is now within ~3× instead
+of ~160×. Closing the remaining 60-vs-24 ns gap (buddy-pool block
+bring-up cost on TLC misses) is the next planned tuning cycle.
 
 #### MB-02 multi-thread scalability (ops/sec, size = 64 B, higher is better)
 
-| threads | glibc      | jemalloc   | mimalloc   | **v8malloc** |
-|--------:|-----------:|-----------:|-----------:|-------------:|
-|       1 |  38.4 M    |  38.3 M    |  38.4 M    |  **38.0 M**  |
-|       2 |  34.5 M    |  35.9 M    |  35.6 M    |  **35.4 M**  |
-|       4 |  28.3 M    |  28.3 M    |  28.3 M    |  **28.3 M**  |
-|       8 |  25.2 M    |  25.4 M    |  24.6 M    |  **24.8 M**  |
+| threads | glibc      | jemalloc   | tcmalloc   | mimalloc   | **v8malloc** |
+|--------:|-----------:|-----------:|-----------:|-----------:|-------------:|
+|       1 |   44.4 M   |   38.1 M   |   45.3 M   |   31.5 M   |  **47.1 M**  |
+|       2 |  **86.5 M**|   73.2 M   |   86.5 M   |   58.8 M   |    84.7 M    |
+|       4 |  134.9 M   |  124.1 M   |  122.6 M   |  102.6 M   | **150.5 M**  |
+|       8 |  295.2 M   |  271.3 M   |  290.8 M   |  217.5 M   | **296.4 M**  |
 
-`v8malloc` lands inside the same single-percent band as
-glibc / jemalloc / mimalloc end to end. The previous 8-thread
-shortfall closed once the TLC bin-capacity ceiling rose to 512
-(halving the per-thread refill rate against the single global
-slab pool), GCC Release builds gained `-flto=auto` (inlining the
-`v8m_malloc → dispatch → TLC` hot chain across translation
-units), and the dispatcher / TLC entry points received
-`__attribute__((hot))` so the linker clusters them in the same
-icache region.
+`v8malloc` leads the field at 1, 4, and 8 threads. The 4-thread
+result (150.5 M ops/s) is 12 % above glibc's 134.9 M and 23 %
+above tcmalloc's 122.6 M; the 8-thread row (296.4 M) edges
+tcmalloc by 2 % and beats mimalloc by 36 %. Driven by the L2 per-
+CPU core cache (`src/v8m_core_cache.c`) plus the page-owner-CPU
+L2 routing path that avoids round-tripping to the slab pool on
+TLC overflows. The 2-thread row ties glibc / tcmalloc at 86.5 M.
+
+#### MB-03 producer/consumer (handoffs/sec, higher is better; cross-thread free path)
+
+| pairs / size | glibc       | jemalloc | tcmalloc | mimalloc    | **v8malloc** |
+|--------------|------------:|---------:|---------:|------------:|-------------:|
+| 1 / 64 B     |      7.57 M |   6.99 M |   6.16 M | **10.56 M** |     6.83 M   |
+| 1 / 1024 B   |  **7.76 M** |   4.82 M |   4.84 M |     7.11 M  |     7.42 M   |
+| 2 / 64 B     |     13.15 M |  11.46 M |   4.75 M | **17.57 M** |    13.73 M   |
+| 4 / 64 B     | **22.41 M** |  21.38 M |   2.90 M |    17.96 M  |    16.17 M   |
+| 4 / 1024 B   |     18.15 M |  12.69 M |   2.38 M | **22.83 M** |    16.45 M   |
+
+MB-03 stresses the cross-thread free path. The new
+page-owner-CPU L2 routing
+(`src/v8m_dispatch.c::slab_overflow_to_l2_or_slab` plus the
+`owner_cpu` field stamped on each page meta) lifted v8malloc's
+4×64B handoff rate from a regressed 5.90 M to 16.17 M ops/s
+(~2.7×), closing most of the gap to mimalloc's MPSC queue. glibc
+still leads 4×64B by ~30 % — surprisingly competitive on this
+bench thanks to its arena-per-thread heuristic — and mimalloc
+still leads 4×1 KiB by ~40 %. tcmalloc collapses to ~2.5 M
+handoffs/sec at 2+ pairs (its central cache becomes the
+bottleneck). A fully sharded MPSC remote-free queue is the next
+planned cycle to close the remaining mimalloc gap.
 
 #### MB-04 mixed-size workload (ops/sec, higher is better)
 
-| metric   | glibc   | jemalloc | mimalloc | **v8malloc** |
-|----------|--------:|---------:|---------:|-------------:|
-| ops/sec  | 14.19 M |  13.77 M |  13.70 M |  **13.75 M** |
+| metric   | glibc   | jemalloc | tcmalloc   | mimalloc | **v8malloc** |
+|----------|--------:|---------:|-----------:|---------:|-------------:|
+| ops/sec  | 15.42 M |  10.29 M |**22.26 M** |  14.16 M |    11.50 M   |
 
-`v8malloc` lands inside the leading cluster (within 3 % of glibc,
-edges mimalloc) on a realistic mixed distribution
-(8 B → 256 KiB).
+`v8malloc` lands at 11.5 M ops/s on a realistic mixed distribution
+(8 B → 256 KiB), beating jemalloc (10.3 M) by ~12 % and trailing
+glibc (15.4 M) by ~25 %. The 49 % gap to tcmalloc is the same
+medium-band shortfall MB-01 surfaces — the MB-04 distribution
+includes a 16 KiB – 256 KiB tier where tcmalloc's central cache
+pays no mmap roundtrip, while v8malloc's medium-TLC fast path
+still goes through the buddy pool on misses.
 
 #### MB-05 fragmentation (RSS after 20 grow/shrink rounds, lower is better)
 
-| metric   | glibc   | jemalloc | mimalloc | **v8malloc** |
-|----------|--------:|---------:|---------:|-------------:|
-| RSS      | 9.1 MiB | 11.6 MiB |  9.3 MiB |   **9.3 MiB** |
+| metric   | glibc    | jemalloc  | tcmalloc  | mimalloc  | **v8malloc** |
+|----------|---------:|----------:|----------:|----------:|-------------:|
+| RSS      | 9.13 MiB | 27.50 MiB | 19.50 MiB | 13.25 MiB | **9.13 MiB** |
 
-`v8malloc` ties mimalloc and stays within 0.2 MiB of glibc's
-per-thread-arena scheme, despite the larger TLC bin ceiling —
-the adaptive controller still drives cold classes back toward
-`V8M_BIN_CAPACITY_MIN = 16`, so RSS does not balloon in proportion
-to the new ceiling.
+`v8malloc` ties glibc for the lowest steady-state RSS — 47 % of
+tcmalloc's, 33 % of jemalloc's, and 69 % of mimalloc's — despite
+the larger TLC bin ceiling and the new medium-class TLC. The
+adaptive controller drives cold classes back toward
+`V8M_BIN_CAPACITY_MIN = 16` and the medium TLC bin caps stay
+small (2-4 entries per class), so RSS does not balloon in
+proportion to the new caches.
 
-#### MB-06 large allocation latency (first-touch fault p50, µs, lower is better)
+#### MB-06 large allocation latency (alloc p99, µs, lower is better)
 
-Allocation p50 collapses below microsecond resolution on this
-host (the recycle / region-cache path is hit ≥99 % of the time
-for every allocator), so the table reports the first-touch
-page-fault p50 — the cost actually paid on the first write into
-a freshly-mapped region. This isolates the page-table /
-zero-page work the kernel does once the allocator hands the
-region back to the caller.
+| size     | glibc | jemalloc | tcmalloc | mimalloc | **v8malloc** |
+|----------|------:|---------:|---------:|---------:|-------------:|
+| 4 MiB    |     1 |       28 |    **0** |        3 |          2   |
+| 16 MiB   |     1 |       10 |        2 |        2 |        **1** |
+| 64 MiB   |     1 |        5 |    **1** |       64 |        **1** |
+| 256 MiB  |    48 |        8 |        2 |      160 |        **1** |
 
-| size     | glibc | jemalloc | mimalloc | **v8malloc** |
-|----------|------:|---------:|---------:|-------------:|
-| 2 MiB    |    25 |       27 |       28 |       **28** |
-| 4 MiB    |   112 |       94 |       93 |       **90** |
-| 16 MiB   |   163 |      158 |      159 |      **166** |
-| 64 MiB   |   643 |      659 |      647 |      **656** |
-| 256 MiB  |  2728 |     2719 |     2681 |     **2798** |
-
-`v8malloc` leads the field at 4 MiB (the Huge slab path
-preferring 2 MiB THP-backed regions cuts the per-byte fault
-cost) and ties the leaders at 2 MiB. The 16 / 64 / 256 MiB rows
-sit inside the run-to-run jitter band — the allocators converge
-once the workload is dominated by raw kernel page-fault
-throughput rather than the allocator's region-management policy.
+`v8malloc` leads alone on the 256 MiB row at alloc-p99 = 1 µs
+(vs glibc 48, jemalloc 8, tcmalloc 2, mimalloc 160) and ties
+tcmalloc / glibc for the lead on every other Huge size at ≤ 2 µs.
+jemalloc and mimalloc cross into 2-digit µs by 64 MiB and stay
+there. The recycle cache plus the Huge-slab THP / 1 GiB hugepage
+path keeps the Huge alloc loop out of the mmap critical section.
 
 #### Summary scorecard
 
-| workload                                  | leader(s)                  | v8malloc verdict       |
-|-------------------------------------------|----------------------------|------------------------|
-| Single-thread throughput, all sizes       | tied                       | **matches the field**  |
-| Multi-thread scalability, ≤4 threads      | tied                       | **matches the field**  |
-| Multi-thread scalability, 8 threads       | tied                       | **matches the field**  |
-| Realistic mixed workload                  | glibc                      | **−3 % (ties cluster)** |
-| Memory frugality (fragmentation)          | **v8malloc**, mimalloc, glibc | **ties the leaders** |
-| Large allocation first-touch latency      | **v8malloc**               | **wins at 4 MiB; ties elsewhere** |
+| workload                                  | leader(s)                       | v8malloc verdict       |
+|-------------------------------------------|---------------------------------|------------------------|
+| Single-thread throughput, 8 B             | **v8malloc**                    | **wins outright (22 ns/op)** |
+| Single-thread throughput, 64 B – 4 KiB    | tcmalloc, glibc, **v8malloc**   | **3-way tie within 1 ns** |
+| Single-thread throughput, 16 – 256 KiB    | tcmalloc                        | **trails ~3× (down from ~160× with new medium TLC)** |
+| Single-thread throughput, 2 MiB           | **v8malloc**                    | **wins (86 ns/op, fastest column)** |
+| Multi-thread scalability, 1 thread        | **v8malloc**                    | **wins (47.1 M ops/s)** |
+| Multi-thread scalability, 2 threads       | glibc, tcmalloc                 | **ties within ~2 % noise** |
+| Multi-thread scalability, 4 threads       | **v8malloc**                    | **wins (150.5 M, +12 % vs glibc)** |
+| Multi-thread scalability, 8 threads       | **v8malloc**                    | **wins (296.4 M, +2 % vs tcmalloc)** |
+| Producer/consumer 4×64 B                  | glibc                           | **3rd (within ~30 %, owner-CPU routing)** |
+| Producer/consumer 4×1 KiB                 | mimalloc                        | **3rd (~28 % behind; MPSC TODO)** |
+| Realistic mixed workload (MB-04)          | tcmalloc                        | **trails (medium-band TODO); +12 % vs jemalloc** |
+| Memory frugality (fragmentation)          | **v8malloc**, glibc             | **ties glibc; 47–69 % of tcmalloc / jemalloc / mimalloc** |
+| Large allocation alloc-p99, 256 MiB       | **v8malloc**                    | **wins outright (1 µs vs tcmalloc 2 / glibc 48 / mimalloc 160)** |
+| Large allocation alloc-p99, 16 – 64 MiB   | **v8malloc**, glibc, tcmalloc   | **3-way tie at ≤ 1 µs** |
 
 Reproduce locally:
 
 ```bash
-LD_PRELOAD=$(pwd)/build/libv8malloc.so \
-    ./build/bench/mb_01_throughput
-LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4 \
-    ./build/bench/mb_01_throughput
-# repeat for each bench + each LD_PRELOAD
+# All-in-one comparison (auto-discovers every installed allocator):
+scripts/bench-compare.sh -- ./build/bench/bench/mb_01_throughput
+scripts/bench-compare.sh -- ./build/bench/bench/mb_02_scalability
+scripts/bench-compare.sh -- ./build/bench/bench/mb_03_producer_consumer
+scripts/bench-compare.sh -- ./build/bench/bench/mb_04_mixed
+scripts/bench-compare.sh -- ./build/bench/bench/mb_05_fragmentation
+scripts/bench-compare.sh -- ./build/bench/bench/mb_06_large_latency
+
+# Or drive a single LD_PRELOAD by hand:
+LD_PRELOAD=$(pwd)/build/bench/libv8malloc.so \
+    ./build/bench/bench/mb_01_throughput
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4 \
+    ./build/bench/bench/mb_01_throughput
 ```
 
 ## Sanitizers

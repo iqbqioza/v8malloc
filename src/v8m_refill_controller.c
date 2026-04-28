@@ -43,11 +43,13 @@ void v8m_refill_controller_set_last_refill_tsc(
  */
 static uint64_t ticks_per_micro(void)
 {
-	uint32_t mhz = v8m_arch_tsc_frequency_mhz();
-	if (mhz == 0U) {
-		return 1000U; /* defensive — see header note */
+	static uint64_t cached;
+	if (__builtin_expect(cached != 0U, 1)) {
+		return cached;
 	}
-	return (uint64_t)mhz;
+	uint32_t mhz = v8m_arch_tsc_frequency_mhz();
+	cached = (mhz != 0U) ? (uint64_t)mhz : 1000U;
+	return cached;
 }
 
 /* NOLINTBEGIN(bugprone-easily-swappable-parameters) */

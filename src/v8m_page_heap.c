@@ -405,7 +405,7 @@ static __thread int v8m_owns_cache_result;
 
 int v8m_page_heap_owns_fast(const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return 0;
 	}
 	uintptr_t addr = (uintptr_t)ptr;
@@ -413,10 +413,12 @@ int v8m_page_heap_owns_fast(const void *ptr)
 	/* Per-thread fast-fast-path cache: same page as last query AND
 	 * no writer since. Common in oscillating alloc/free workloads
 	 * (the bin keeps cycling slots through the same slab page). */
-	if (page_base == v8m_owns_cache_page_base) {
+	if (__builtin_expect(page_base == v8m_owns_cache_page_base, 1)) {
 		uint64_t seq_now =
 		    atomic_load_explicit(&g_region_seq, memory_order_acquire);
-		if (seq_now == v8m_owns_cache_seq && (seq_now & 1U) == 0U) {
+		if (__builtin_expect(seq_now == v8m_owns_cache_seq &&
+					 (seq_now & 1U) == 0U,
+				     1)) {
 			return v8m_owns_cache_result;
 		}
 	}
@@ -425,7 +427,7 @@ int v8m_page_heap_owns_fast(const void *ptr)
 		 * its second bump (transition odd -> even). */
 		uint64_t seq1 =
 		    atomic_load_explicit(&g_region_seq, memory_order_acquire);
-		if ((seq1 & 1U) != 0U) {
+		if (__builtin_expect((seq1 & 1U) != 0U, 0)) {
 			continue; /* writer in progress */
 		}
 		/* The array reads below must happen between the two seq
@@ -467,7 +469,7 @@ int v8m_page_heap_owns_fast(const void *ptr)
 
 bool v8m_page_heap_owns(const void *ptr)
 {
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return false;
 	}
 	uintptr_t addr = (uintptr_t)ptr;

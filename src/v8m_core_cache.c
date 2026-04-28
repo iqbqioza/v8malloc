@@ -90,7 +90,9 @@ struct v8m_core_cache *v8m_core_cache_for_current_cpu(void)
 
 bool v8m_core_cache_push(struct v8m_core_cache *cache, uint32_t cls, void *node)
 {
-	if (cache == NULL || node == NULL || cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || node == NULL ||
+				 cls >= V8M_NUM_SIZE_CLASSES,
+			     0)) {
 		return false;
 	}
 	v8m_tagged_ptr old_head =
@@ -114,14 +116,14 @@ bool v8m_core_cache_push(struct v8m_core_cache *cache, uint32_t cls, void *node)
 
 void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_NUM_SIZE_CLASSES, 0)) {
 		return NULL;
 	}
 	v8m_tagged_ptr old_head =
 	    atomic_load_explicit(&cache->stacks[cls], memory_order_acquire);
 	for (;;) {
 		void *node = v8m_tagptr_ptr(old_head);
-		if (node == NULL) {
+		if (__builtin_expect(node == NULL, 0)) {
 			return NULL;
 		}
 		void *next = NULL;
@@ -139,8 +141,9 @@ void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls)
 bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
 			       void *head, void *tail)
 {
-	if (cache == NULL || head == NULL || tail == NULL ||
-	    cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || head == NULL || tail == NULL ||
+				 cls >= V8M_NUM_SIZE_CLASSES,
+			     0)) {
 		return false;
 	}
 	v8m_tagged_ptr old_head =
@@ -239,31 +242,53 @@ size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 		}
 		return 0;
 	}
-	void *first = v8m_core_cache_pop(cache, cls);
-	if (first == NULL) {
-		*out_head = NULL;
-		*out_tail = NULL;
-		return 0;
-	}
-	void *tail = first;
-	size_t count = 1;
+	/* Iterative single-CAS pop. The earlier "snapshot then walk"
+	 * approach was unsafe: between snapshotting the head and
+	 * reading `next` from interior nodes, a concurrent single-pop
+	 * could remove and recycle those nodes (their memory becomes a
+	 * caller's payload). Walking through payload-as-`next` then
+	 * dereferences garbage and SEGVs — reproduced as the
+	 * mb_03_producer_consumer crash.
+	 *
+	 * A "detach-then-walk-then-restore" alternative (CAS head→NULL,
+	 * walk owned chain, push surplus back) is also correct, but
+	 * measured ~40× worse on mb_03 because every pop_batch contends
+	 * for exclusive ownership of the entire stack and forces a full
+	 * surplus-chain walk to find its tail.
+	 *
+	 * The iterative pop claims one node at a time via the existing
+	 * single-pop CAS — each claim atomically validates the head
+	 * before we ever dereference the node. Popped nodes are
+	 * appended to the chain tail so the returned head/tail
+	 * describe a singly-linked list whose order matches the
+	 * sequence in which nodes were popped (matching the
+	 * push_batch contract: the chain head was the stack top, so
+	 * the first popped node is the chain head). */
+	void *chain_head = NULL;
+	void *chain_tail = NULL;
+	size_t count = 0;
 	while (count < max) {
 		void *node = v8m_core_cache_pop(cache, cls);
 		if (node == NULL) {
 			break;
 		}
-		/* Chain `node` after `tail` so the caller receives a
-		 * forward-linked list head→...→tail with NULL after
-		 * tail. Each pop already cleared `node`'s next slot
-		 * (no — pop reads next but does not clear it; we must
-		 * write the chain link explicitly). */
-		(void)memcpy(tail, (const void *)&node, sizeof(node));
-		tail = node;
+		if (chain_head == NULL) {
+			chain_head = node;
+			chain_tail = node;
+		} else {
+			/* append: tail->next = node, then tail = node */
+			(void)memcpy(chain_tail, (const void *)&node,
+				     sizeof(node));
+			chain_tail = node;
+		}
 		count++;
 	}
-	void *terminator = NULL;
-	(void)memcpy(tail, (const void *)&terminator, sizeof(terminator));
-	*out_head = first;
-	*out_tail = tail;
+	if (count > 0U) {
+		void *terminator = NULL;
+		(void)memcpy(chain_tail, (const void *)&terminator,
+			     sizeof(terminator));
+	}
+	*out_head = chain_head;
+	*out_tail = chain_tail;
 	return count;
 }

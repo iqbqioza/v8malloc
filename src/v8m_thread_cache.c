@@ -24,6 +24,7 @@
 #include <unistd.h> /* syscall */
 
 #include "v8m_arch.h" /* V8M_CACHE_LINE_SIZE for aligned_alloc */
+#include "v8m_buddy_pool.h" /* v8m_buddy_pool_free for medium-bin drain */
 #include "v8m_config.h" /* v8m_config_get for the migration opt-in */
 /* v8m_arch_rdtsc + tsc_frequency_mhz live in v8m_arch.h via the
  * same include above — no extra include needed. */
@@ -170,8 +171,10 @@ static _Atomic uint64_t g_lifetime_long_threshold_ticks;
 
 static void ensure_lifetime_thresholds(void)
 {
-	if (atomic_load_explicit(&g_lifetime_long_threshold_ticks,
-				 memory_order_relaxed) != 0U) {
+	if (__builtin_expect(
+		atomic_load_explicit(&g_lifetime_long_threshold_ticks,
+				     memory_order_relaxed) != 0U,
+		1)) {
 		return;
 	}
 	uint64_t mhz = (uint64_t)v8m_arch_tsc_frequency_mhz();
@@ -457,7 +460,7 @@ struct v8m_thread_cache *v8m_thread_cache_get_or_create(void)
  */
 static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
 {
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 }
@@ -465,11 +468,12 @@ static inline void tlc_tick_gc(struct v8m_thread_cache *cache)
 __attribute__((hot)) void *
 v8m_thread_cache_alloc(struct v8m_thread_cache *cache, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS,
+			     0)) {
 		return NULL;
 	}
 	void *head = cache->bin_heads[cls];
-	if (head == NULL) {
+	if (__builtin_expect(head == NULL, 0)) {
 		return NULL;
 	}
 	/* The cached object's first 8 bytes hold the next pointer.
@@ -502,6 +506,86 @@ __attribute__((hot)) bool v8m_thread_cache_free(struct v8m_thread_cache *cache,
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
 }
 
+/* Per-class compile-time caps for medium-class TLC. See the
+ * matching note in v8m_thread_cache.h for the RSS-budget
+ * justification. */
+static const uint8_t k_medium_bin_caps[V8M_MEDIUM_TLC_NUM_CLASSES] = {
+    4U, /* cls 32 (8 KiB) */
+    4U, /* cls 33 (16 KiB) */
+    2U, /* cls 34 (32 KiB) */
+    2U, /* cls 35 (64 KiB) */
+    1U, /* cls 36 (128 KiB) */
+    1U, /* cls 37 (256 KiB) */
+};
+
+__attribute__((hot)) void *
+v8m_thread_cache_medium_alloc(struct v8m_thread_cache *cache, uint32_t cls)
+{
+	if (__builtin_expect(cache == NULL, 0)) {
+		return NULL;
+	}
+	if (__builtin_expect(cls < V8M_MEDIUM_TLC_FIRST_CLASS ||
+				 cls > V8M_MEDIUM_TLC_LAST_CLASS,
+			     0)) {
+		return NULL;
+	}
+	uint32_t idx = cls - V8M_MEDIUM_TLC_FIRST_CLASS;
+	void *head = cache->medium_bin_heads[idx];
+	if (head == NULL) {
+		return NULL;
+	}
+	void *next = NULL;
+	(void)memcpy((void *)&next, head, sizeof(next));
+	cache->medium_bin_heads[idx] = next;
+	cache->medium_bin_count[idx]--;
+	return head;
+}
+
+__attribute__((hot)) bool
+v8m_thread_cache_medium_free(struct v8m_thread_cache *cache, uint32_t cls,
+			     void *obj)
+{
+	if (cache == NULL || obj == NULL) {
+		return true;
+	}
+	if (cls < V8M_MEDIUM_TLC_FIRST_CLASS ||
+	    cls > V8M_MEDIUM_TLC_LAST_CLASS) {
+		return true;
+	}
+	uint32_t idx = cls - V8M_MEDIUM_TLC_FIRST_CLASS;
+	if (cache->medium_bin_count[idx] >= k_medium_bin_caps[idx]) {
+		return true; /* caller must free `obj` directly to buddy pool */
+	}
+	void *prev_head = cache->medium_bin_heads[idx];
+	(void)memcpy(obj, (const void *)&prev_head, sizeof(prev_head));
+	cache->medium_bin_heads[idx] = obj;
+	cache->medium_bin_count[idx]++;
+	return false;
+}
+
+size_t v8m_thread_cache_drain_medium(struct v8m_thread_cache *cache,
+				     void *dispatch_buddy)
+{
+	if (cache == NULL || dispatch_buddy == NULL) {
+		return 0;
+	}
+	struct v8m_buddy_pool *pool = (struct v8m_buddy_pool *)dispatch_buddy;
+	size_t total = 0;
+	for (uint32_t idx = 0; idx < V8M_MEDIUM_TLC_NUM_CLASSES; idx++) {
+		void *head = cache->medium_bin_heads[idx];
+		while (head != NULL) {
+			void *next = NULL;
+			(void)memcpy((void *)&next, head, sizeof(next));
+			(void)v8m_buddy_pool_free(pool, head);
+			head = next;
+			total++;
+		}
+		cache->medium_bin_heads[idx] = NULL;
+		cache->medium_bin_count[idx] = 0;
+	}
+	return total;
+}
+
 /*
  * Index a caller PC into the predict table. Drop the low 4 bits
  * (instruction-alignment noise on every supported arch) and
@@ -517,12 +601,12 @@ static inline size_t predict_index(const void *caller_pc)
 void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
 				       const void *caller_pc)
 {
-	if (cache == NULL) {
+	if (__builtin_expect(cache == NULL, 0)) {
 		return;
 	}
 	size_t idx = predict_index(caller_pc);
 	uint8_t predicted = cache->predict_table[idx];
-	if (predicted >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(predicted >= V8M_MEDIUM_FIRST_CLASS, 0)) {
 		/* No observation yet (V8M_PREDICT_NONE) or a class the
 		 * TLC does not cache (Medium / Large / Huge). Skip the
 		 * prefetch — there is no bin head to warm. */
@@ -539,7 +623,8 @@ void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
 void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
 				     const void *caller_pc, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS,
+			     0)) {
 		return;
 	}
 	size_t idx = predict_index(caller_pc);
@@ -754,8 +839,9 @@ void v8m_thread_cache_install_chain(struct v8m_thread_cache *cache,
 				    uint32_t cls, void *head, void *tail,
 				    size_t count)
 {
-	if (cache == NULL || head == NULL || tail == NULL ||
-	    cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U) {
+	if (__builtin_expect(cache == NULL || head == NULL || tail == NULL ||
+				 cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U,
+			     0)) {
 		return;
 	}
 	/* Splice the chain at the head of the bin: tail->next =
@@ -856,17 +942,16 @@ void v8m_thread_cache_postfork_child(void)
 void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
 {
 	struct v8m_thread_cache *cache = t_cache;
-	if (cache != NULL && cache->initialized != 0U) {
+	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
 		/* Sample-rate cadence: only every Nth observation lands.
-		 * Increment unconditionally so the cadence holds; the
-		 * AND mask collapses the predicate to a single branch on
-		 * the histogram's hot exit. */
-		cache->histogram_tick++;
-		if ((cache->histogram_tick &
-		     (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U) {
+		 * Combine increment + mask-test so the hot exit is a
+		 * single compare-and-branch. */
+		if (__builtin_expect((++cache->histogram_tick &
+				      (V8M_HISTOGRAM_SAMPLE_RATE - 1U)) != 0U,
+				     1)) {
 			return;
 		}
-		if (cls < V8M_NUM_SIZE_CLASSES) {
+		if (__builtin_expect(cls < V8M_NUM_SIZE_CLASSES, 1)) {
 			cache->request_count[cls]++;
 			cache->request_bytes[cls] += (uint64_t)request_size;
 		} else {

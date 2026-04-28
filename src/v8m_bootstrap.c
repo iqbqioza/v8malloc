@@ -39,7 +39,7 @@ static struct v8m_bump v8m_bootstrap_bump = {
     .offset = 0,
 };
 
-static void v8m_bootstrap_oom(void)
+__attribute__((cold, noreturn)) static void v8m_bootstrap_oom(void)
 {
 	static const char msg[] = "v8malloc: bootstrap OOM\n";
 	(void)write(STDERR_FILENO, msg, sizeof(msg) - 1U);
@@ -49,7 +49,7 @@ static void v8m_bootstrap_oom(void)
 void *v8m_bootstrap_alloc(size_t size)
 {
 	void *ptr = v8m_bump_alloc(&v8m_bootstrap_bump, size);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		v8m_bootstrap_oom();
 	}
 	return ptr;

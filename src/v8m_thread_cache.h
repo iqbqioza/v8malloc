@@ -56,6 +56,31 @@
 #define V8M_BIN_CAPACITY_MAX 512U
 
 /*
+ * Medium-class TLC (classes 32..37, 8 KiB .. 256 KiB; backed by
+ * the buddy pool). The alloc / free hot paths churn the same
+ * size repeatedly, so caching even a handful of entries collapses
+ * the buddy-pool round-trip to a per-thread bin pop. Caps are
+ * deliberately small to bound worst-case per-thread RSS:
+ *
+ *   cls 32 (8 KiB) cap 4 → 32 KiB
+ *   cls 33 (16 KiB) cap 4 → 64 KiB
+ *   cls 34 (32 KiB) cap 2 → 64 KiB
+ *   cls 35 (64 KiB) cap 2 → 128 KiB
+ *   cls 36 (128 KiB) cap 1 → 128 KiB
+ *   cls 37 (256 KiB) cap 1 → 256 KiB
+ *
+ * Worst-case per-thread medium-TLC overhead: 672 KiB. The bins
+ * are bounded above by these compile-time caps and never grow
+ * (no adaptive controller for medium classes — workloads with
+ * tight medium-band churn benefit, others pay no cost because
+ * the bins stay empty).
+ */
+#define V8M_MEDIUM_TLC_FIRST_CLASS V8M_MEDIUM_FIRST_CLASS
+#define V8M_MEDIUM_TLC_LAST_CLASS 37U /* 256 KiB; class 38+ goes to large */
+#define V8M_MEDIUM_TLC_NUM_CLASSES                                             \
+	(V8M_MEDIUM_TLC_LAST_CLASS - V8M_MEDIUM_TLC_FIRST_CLASS + 1U)
+
+/*
  * GC interval, in TLC operations (allocs + frees combined). The
  * controller recomputes per-class capacities every time the
  * counter crosses this threshold. Power of two so the trigger
@@ -332,6 +357,20 @@ struct v8m_thread_cache {
 	uint64_t lifetime_ephemeral_count;
 	uint64_t lifetime_short_count;
 	uint64_t lifetime_long_count;
+	/*
+	 * Medium-class bins (classes V8M_MEDIUM_TLC_FIRST_CLASS ..
+	 * V8M_MEDIUM_TLC_LAST_CLASS). Indexed by `cls -
+	 * V8M_MEDIUM_TLC_FIRST_CLASS`. Same intrusive-next-pointer convention
+	 * as the slab bins above: cached object's first 8 bytes hold the next
+	 * link. Safe because every cached medium block is at least 8 KiB and
+	 * the buddy pool stamps no metadata into the block body.
+	 *
+	 * Caps are compile-time per-class (see V8M_MEDIUM_TLC_*),
+	 * not adaptive — medium-class churn is bursty and the small
+	 * caps already bound RSS overhead at <1 MiB / thread.
+	 */
+	void *medium_bin_heads[V8M_MEDIUM_TLC_NUM_CLASSES];
+	uint8_t medium_bin_count[V8M_MEDIUM_TLC_NUM_CLASSES];
 };
 
 /*
@@ -454,7 +493,7 @@ v8m_thread_cache_alloc_inline(struct v8m_thread_cache *cache, uint32_t cls)
 	cache->bin_heads[cls] = next;
 	cache->bin_count[cls]--;
 	cache->alloc_count_per_class[cls]++;
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 	return head;
@@ -478,7 +517,7 @@ static inline bool v8m_thread_cache_free_inline(struct v8m_thread_cache *cache,
 	cache->bin_heads[cls] = obj;
 	cache->bin_count[cls]++;
 	cache->free_count_per_class[cls]++;
-	if (--cache->gc_countdown == 0U) {
+	if (__builtin_expect(--cache->gc_countdown == 0U, 0)) {
 		v8m_thread_cache_gc_tick(cache);
 	}
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
@@ -505,6 +544,34 @@ size_t v8m_thread_cache_flush_half(struct v8m_thread_cache *cache,
  */
 size_t v8m_thread_cache_drain_all(struct v8m_thread_cache *cache,
 				  struct v8m_slab_pool *pool);
+
+/*
+ * Medium-class TLC: pop one cached buddy block of size class
+ * `cls`. `cls` must be in [V8M_MEDIUM_TLC_FIRST_CLASS,
+ * V8M_MEDIUM_TLC_LAST_CLASS]; out-of-range classes return NULL.
+ * Returns NULL on bin-empty.
+ */
+void *v8m_thread_cache_medium_alloc(struct v8m_thread_cache *cache,
+				    uint32_t cls);
+
+/*
+ * Medium-class TLC: push one freed buddy block. Returns true when
+ * the bin would overflow this push (caller frees `obj` directly to
+ * the buddy pool instead of caching it). Returns false on the
+ * cached path.
+ */
+bool v8m_thread_cache_medium_free(struct v8m_thread_cache *cache, uint32_t cls,
+				  void *obj);
+
+/*
+ * Drain every medium bin to `dispatch_buddy` (forward-declared
+ * here as a void * to avoid pulling v8m_buddy_pool.h into the
+ * thread-cache header). Called from the cache-destroy / drain
+ * paths so a thread that exits with cached medium blocks does
+ * not leak them.
+ */
+size_t v8m_thread_cache_drain_medium(struct v8m_thread_cache *cache,
+				     void *dispatch_buddy);
 
 /*
  * Drop the calling thread's TLS slot so the next allocation creates

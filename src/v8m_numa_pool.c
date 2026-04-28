@@ -89,7 +89,7 @@ static bool list_unlink(struct v8m_huge_slab **head,
 	return false;
 }
 
-int v8m_numa_pool_init(struct v8m_numa_pool *pool)
+__attribute__((cold)) int v8m_numa_pool_init(struct v8m_numa_pool *pool)
 {
 	if (pool == NULL) {
 		return -EINVAL;
@@ -121,7 +121,7 @@ static void destroy_list(struct v8m_huge_slab *head)
 	}
 }
 
-void v8m_numa_pool_destroy(struct v8m_numa_pool *pool)
+__attribute__((cold)) void v8m_numa_pool_destroy(struct v8m_numa_pool *pool)
 {
 	if (pool == NULL) {
 		return;
@@ -148,9 +148,9 @@ void *v8m_numa_pool_carve_slab(struct v8m_numa_pool *pool, uint32_t numa_node)
 
 	(void)pthread_mutex_lock(&node->lock);
 	struct v8m_huge_slab *slab = node->partials;
-	if (slab == NULL) {
+	if (__builtin_expect(slab == NULL, 0)) {
 		slab = add_huge_page(node);
-		if (slab == NULL) {
+		if (__builtin_expect(slab == NULL, 0)) {
 			(void)pthread_mutex_unlock(&node->lock);
 			return NULL;
 		}
@@ -159,7 +159,7 @@ void *v8m_numa_pool_carve_slab(struct v8m_numa_pool *pool, uint32_t numa_node)
 	/* Picking from the head guarantees a non-empty descriptor (we
 	 * just verified the partials head exists or freshly added one).
 	 * The carve cannot fail unless the descriptor was inconsistent. */
-	if (carved == NULL) {
+	if (__builtin_expect(carved == NULL, 0)) {
 		(void)pthread_mutex_unlock(&node->lock);
 		return NULL;
 	}

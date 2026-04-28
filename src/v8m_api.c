@@ -120,7 +120,7 @@ static void v8m_collect_live_stats(struct v8m_live_stats *out)
 	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
 }
 
-static void abort_with(const char *msg)
+__attribute__((cold, noreturn)) static void abort_with(const char *msg)
 {
 	(void)write(STDERR_FILENO, msg, strlen(msg));
 	abort();
@@ -140,6 +140,11 @@ void v8m_api_collect_live_stats(struct v8m_live_stats *out)
 bool v8m_api_dispatch_ready(void)
 {
 	return dispatch_ready();
+}
+
+bool v8m_api_soft_limit_active(void)
+{
+	return atomic_load_explicit(&g_soft_limit, memory_order_relaxed) != 0U;
 }
 
 /* pthread_atfork wrappers — pthread_atfork takes parameter-less
@@ -169,7 +174,7 @@ static pthread_mutex_t g_double_free_ring_lock;
  *   3. bg-purge tick mutex
  *   4. double-free-ring mutex (api.c-owned)
  * Release order in postfork is the exact reverse. */
-static void v8m_atfork_prepare(void)
+__attribute__((cold)) static void v8m_atfork_prepare(void)
 {
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
@@ -180,7 +185,7 @@ static void v8m_atfork_prepare(void)
 	(void)pthread_mutex_lock(&g_double_free_ring_lock);
 }
 
-static void v8m_atfork_parent(void)
+__attribute__((cold)) static void v8m_atfork_parent(void)
 {
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
@@ -191,7 +196,7 @@ static void v8m_atfork_parent(void)
 	}
 }
 
-static void v8m_atfork_child(void)
+__attribute__((cold)) static void v8m_atfork_child(void)
 {
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
@@ -226,6 +231,7 @@ static void v8m_api_drain_thread_cache(struct v8m_thread_cache *cache)
 		return;
 	}
 	(void)v8m_thread_cache_drain_all(cache, &g_dispatch.slab);
+	(void)v8m_thread_cache_drain_medium(cache, &g_dispatch.buddy);
 }
 
 __attribute__((constructor(101))) static void v8m_constructor(void)
@@ -472,7 +478,7 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 				       memory_order_acquire);
 }
 
-static bool dispatch_ready(void)
+static inline bool dispatch_ready(void)
 {
 	return atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	       V8M_INIT_READY;
@@ -491,13 +497,13 @@ static bool over_soft_limit(size_t size)
 {
 	size_t limit =
 	    atomic_load_explicit(&g_soft_limit, memory_order_relaxed);
-	if (limit == 0U) {
+	if (__builtin_expect(limit == 0U, 1)) {
 		return false;
 	}
 	struct v8m_page_heap_stats stats = {0};
 	v8m_page_heap_get_stats(&stats);
 	uint64_t live = stats.bytes_mapped - stats.bytes_unmapped;
-	if (live + size <= limit) {
+	if (__builtin_expect(live + size <= limit, 1)) {
 		return false;
 	}
 	/* Live bytes count drained-but-still-mapped buddy arenas; under
@@ -542,7 +548,7 @@ static bool oom_handler_says_retry(size_t size)
  * limit) is what motivated the helper. */
 static bool pre_alloc_soft_limit_gate(size_t size)
 {
-	if (!over_soft_limit(size)) {
+	if (__builtin_expect(!over_soft_limit(size), 1)) {
 		return true;
 	}
 	if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
@@ -592,13 +598,13 @@ static void post_alloc_record(void *ptr, const void *caller_pc, size_t size)
  * that would result from one entry point thunking through another. */
 static void *do_malloc_pc(size_t size, const void *caller_pc)
 {
-	if (!dispatch_ready()) {
+	if (__builtin_expect(!dispatch_ready(), 0)) {
 		/* Pre-init / post-shutdown — serve from bootstrap.
 		 * size == 0 still produces a unique pointer per our
 		 * malloc(0) policy. */
 		return v8m_bootstrap_alloc(size > 0U ? size : 1U);
 	}
-	if (!pre_alloc_soft_limit_gate(size)) {
+	if (__builtin_expect(!pre_alloc_soft_limit_gate(size), 0)) {
 		return NULL;
 	}
 	/* Predictive prefetch (winning-algorithms.md §9): hash the
@@ -621,11 +627,11 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 	 * stack (e.g. internal v8malloc machinery). */
 	v8m_dispatch_set_caller_pc(caller_pc);
 	void *ptr = v8m_dispatch_alloc(&g_dispatch, size);
-	if (ptr == NULL && oom_handler_says_retry(size)) {
+	if (__builtin_expect(ptr == NULL && oom_handler_says_retry(size), 0)) {
 		ptr = v8m_dispatch_alloc(&g_dispatch, size);
 	}
 	v8m_dispatch_set_caller_pc(NULL);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		errno = ENOMEM;
 		return ptr;
 	}
@@ -641,7 +647,7 @@ static void *do_malloc_pc(size_t size, const void *caller_pc)
 static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 				 const void *caller_pc)
 {
-	if (!pre_alloc_soft_limit_gate(size)) {
+	if (__builtin_expect(!pre_alloc_soft_limit_gate(size), 0)) {
 		return NULL;
 	}
 	struct v8m_thread_cache *cache = v8m_thread_cache_peek();
@@ -650,11 +656,11 @@ static void *do_aligned_alloc_pc(size_t alignment, size_t size,
 	}
 	v8m_dispatch_set_caller_pc(caller_pc);
 	void *ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
-	if (ptr == NULL && oom_handler_says_retry(size)) {
+	if (__builtin_expect(ptr == NULL && oom_handler_says_retry(size), 0)) {
 		ptr = v8m_dispatch_alloc_aligned(&g_dispatch, size, alignment);
 	}
 	v8m_dispatch_set_caller_pc(NULL);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return NULL;
 	}
 	post_alloc_record(ptr, caller_pc, size);
@@ -771,8 +777,10 @@ __attribute__((hot)) V8M_EXPORT void v8m_free(void *ptr)
 	 * forwarding, DEBUG-mode double-free detector, lifetime
 	 * tracker, large/buddy free). */
 	if (__builtin_expect(ptr != NULL, 1)) {
-		v8m_dispatch_record_free();
+		/* Load v8m_t_cache once; pass it to record_free_cache to
+		 * avoid a second TLS read inside the out-of-line function. */
 		struct v8m_thread_cache *cache = v8m_t_cache;
+		v8m_dispatch_record_free_cache(cache);
 		int owned = v8m_page_heap_owns_fast(ptr);
 		if (__builtin_expect(cache != NULL && owned == 1 &&
 					 v8m_config_fast_path_ok(),
@@ -855,7 +863,7 @@ V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 	 * forces the overflow signal into a separate flag the optimizer
 	 * cannot eliminate. */
 	size_t total;
-	if (__builtin_mul_overflow(nmemb, size, &total)) {
+	if (__builtin_expect(__builtin_mul_overflow(nmemb, size, &total), 0)) {
 		errno = ENOMEM;
 		return NULL;
 	}
@@ -863,7 +871,7 @@ V8M_EXPORT void *v8m_calloc(size_t nmemb, size_t size)
 	 * table and lifetime tracker see the user's call site, not the
 	 * v8m_calloc body. */
 	void *ptr = do_malloc_pc(total, __builtin_return_address(0));
-	if (ptr != NULL && total > 0U) {
+	if (__builtin_expect(ptr != NULL && total > 0U, 1)) {
 		(void)memset(ptr, 0, total);
 	}
 	return ptr;
@@ -895,10 +903,10 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 	 * and the alloc-and-move path attribute the new allocation to
 	 * the user's actual call site. */
 	const void *caller_pc = __builtin_return_address(0);
-	if (ptr == NULL) {
+	if (__builtin_expect(ptr == NULL, 0)) {
 		return do_malloc_pc(size, caller_pc);
 	}
-	if (size == 0U) {
+	if (__builtin_expect(size == 0U, 0)) {
 		v8m_free(ptr);
 		return NULL;
 	}
@@ -912,7 +920,7 @@ V8M_EXPORT void *v8m_realloc(void *ptr, size_t size)
 	}
 
 	void *new_ptr = do_malloc_pc(size, caller_pc);
-	if (new_ptr == NULL) {
+	if (__builtin_expect(new_ptr == NULL, 0)) {
 		return NULL;
 	}
 
@@ -931,7 +939,7 @@ V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
 	/* Same builtin-overflow choice as v8m_calloc — the division
 	 * check folds away under LTO. */
 	size_t total;
-	if (__builtin_mul_overflow(nmemb, size, &total)) {
+	if (__builtin_expect(__builtin_mul_overflow(nmemb, size, &total), 0)) {
 		errno = ENOMEM;
 		return NULL;
 	}
@@ -942,7 +950,7 @@ V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
  * is_pow2 — true iff `value` is a non-zero power of two. Used to
  * validate the alignment argument of every aligned-alloc entry.
  */
-static bool is_pow2(size_t value)
+static inline bool is_pow2(size_t value)
 {
 	return value != 0U && (value & (value - 1U)) == 0U;
 }
@@ -1440,6 +1448,8 @@ V8M_EXPORT void v8m_purge(void)
 		if (cache != NULL) {
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
+			(void)v8m_thread_cache_drain_medium(cache,
+							    &g_dispatch.buddy);
 		}
 		/* Drain the calling thread's current-CPU L2 too —
 		 * slots cached there hold slab pages alive past the
@@ -1464,6 +1474,8 @@ V8M_EXPORT void v8m_purge_thread(void)
 		if (cache != NULL) {
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
+			(void)v8m_thread_cache_drain_medium(cache,
+							    &g_dispatch.buddy);
 		}
 		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 	}
