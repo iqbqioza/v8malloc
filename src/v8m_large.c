@@ -277,6 +277,27 @@ size_t v8m_large_cache_drain(void)
 	return snapshot_count;
 }
 
+/* atfork plumbing for the Large/Huge recycle-cache mutex. The
+ * cache lock is taken on every Large/Huge alloc and free; without
+ * these handlers a fork that races a Large alloc/free leaves the
+ * child holding a locked-by-dead-thread mutex and the first
+ * subsequent Large/Huge call in the child deadlocks (surfaced
+ * by ST-03 test_fork_stress under sanitizer-induced timing). */
+__attribute__((cold)) void v8m_large_prefork(void)
+{
+	(void)pthread_mutex_lock(&g_large_cache_lock);
+}
+
+__attribute__((cold)) void v8m_large_postfork_parent(void)
+{
+	(void)pthread_mutex_unlock(&g_large_cache_lock);
+}
+
+__attribute__((cold)) void v8m_large_postfork_child(void)
+{
+	(void)pthread_mutex_unlock(&g_large_cache_lock);
+}
+
 /* Push a region into the cache. Returns NULL on success (caller
  * must NOT munmap the region), or the original region pointer
  * (with `out_evicted_size` set to the matching mmap_size) when the

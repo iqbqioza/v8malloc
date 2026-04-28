@@ -170,15 +170,17 @@ static pthread_mutex_t g_double_free_ring_lock;
  *
  * Acquire order (top to bottom):
  *   1. dispatch (slab + lifetime arenas + buddy + page-heap + anchor)
- *   2. thread-cache registry
- *   3. bg-purge tick mutex
- *   4. double-free-ring mutex (api.c-owned)
+ *   2. large/huge recycle cache
+ *   3. thread-cache registry
+ *   4. bg-purge tick mutex
+ *   5. double-free-ring mutex (api.c-owned)
  * Release order in postfork is the exact reverse. */
 __attribute__((cold)) static void v8m_atfork_prepare(void)
 {
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
 		v8m_dispatch_prefork(&g_dispatch);
+		v8m_large_prefork();
 		v8m_thread_cache_prefork();
 		v8m_bg_purge_prefork();
 	}
@@ -192,6 +194,7 @@ __attribute__((cold)) static void v8m_atfork_parent(void)
 	    V8M_INIT_READY) {
 		v8m_bg_purge_postfork_parent();
 		v8m_thread_cache_postfork_parent();
+		v8m_large_postfork_parent();
 		v8m_dispatch_postfork_parent(&g_dispatch);
 	}
 }
@@ -203,6 +206,7 @@ __attribute__((cold)) static void v8m_atfork_child(void)
 	    V8M_INIT_READY) {
 		v8m_bg_purge_postfork_child();
 		v8m_thread_cache_postfork_child();
+		v8m_large_postfork_child();
 		v8m_dispatch_postfork_child(&g_dispatch);
 	}
 }
