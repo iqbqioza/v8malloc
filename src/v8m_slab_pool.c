@@ -36,7 +36,7 @@
 static struct v8m_numa_pool g_slab_numa_pool;
 static atomic_bool g_slab_numa_pool_ready;
 
-int v8m_slab_pool_global_init(void)
+__attribute__((cold)) int v8m_slab_pool_global_init(void)
 {
 	if (atomic_load_explicit(&g_slab_numa_pool_ready,
 				 memory_order_acquire)) {
@@ -51,7 +51,7 @@ int v8m_slab_pool_global_init(void)
 	return 0;
 }
 
-void v8m_slab_pool_global_destroy(void)
+__attribute__((cold)) void v8m_slab_pool_global_destroy(void)
 {
 	if (!atomic_load_explicit(&g_slab_numa_pool_ready,
 				  memory_order_acquire)) {
@@ -204,7 +204,7 @@ static void slab_init_dispatch(void *page, uint32_t size_class,
 	}
 }
 
-int v8m_slab_pool_init(struct v8m_slab_pool *pool)
+__attribute__((cold)) int v8m_slab_pool_init(struct v8m_slab_pool *pool)
 {
 	for (uint32_t i = 0; i < V8M_MEDIUM_FIRST_CLASS; i++) {
 		pool->classes[i].current = NULL;

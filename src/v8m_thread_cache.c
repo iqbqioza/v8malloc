@@ -520,12 +520,12 @@ static inline size_t predict_index(const void *caller_pc)
 void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
 				       const void *caller_pc)
 {
-	if (cache == NULL) {
+	if (__builtin_expect(cache == NULL, 0)) {
 		return;
 	}
 	size_t idx = predict_index(caller_pc);
 	uint8_t predicted = cache->predict_table[idx];
-	if (predicted >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(predicted >= V8M_MEDIUM_FIRST_CLASS, 0)) {
 		/* No observation yet (V8M_PREDICT_NONE) or a class the
 		 * TLC does not cache (Medium / Large / Huge). Skip the
 		 * prefetch — there is no bin head to warm. */
@@ -542,7 +542,8 @@ void v8m_thread_cache_predict_prefetch(struct v8m_thread_cache *cache,
 void v8m_thread_cache_predict_update(struct v8m_thread_cache *cache,
 				     const void *caller_pc, uint32_t cls)
 {
-	if (cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS) {
+	if (__builtin_expect(cache == NULL || cls >= V8M_MEDIUM_FIRST_CLASS,
+			     0)) {
 		return;
 	}
 	size_t idx = predict_index(caller_pc);
@@ -757,8 +758,9 @@ void v8m_thread_cache_install_chain(struct v8m_thread_cache *cache,
 				    uint32_t cls, void *head, void *tail,
 				    size_t count)
 {
-	if (cache == NULL || head == NULL || tail == NULL ||
-	    cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U) {
+	if (__builtin_expect(cache == NULL || head == NULL || tail == NULL ||
+				 cls >= V8M_MEDIUM_FIRST_CLASS || count == 0U,
+			     0)) {
 		return;
 	}
 	/* Splice the chain at the head of the bin: tail->next =
@@ -859,7 +861,7 @@ void v8m_thread_cache_postfork_child(void)
 void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
 {
 	struct v8m_thread_cache *cache = t_cache;
-	if (cache != NULL && cache->initialized != 0U) {
+	if (__builtin_expect(cache != NULL && cache->initialized != 0U, 1)) {
 		/* Sample-rate cadence: only every Nth observation lands.
 		 * Combine increment + mask-test so the hot exit is a
 		 * single compare-and-branch. */
@@ -868,7 +870,7 @@ void v8m_thread_cache_record_alloc(uint32_t cls, size_t request_size)
 				     1)) {
 			return;
 		}
-		if (cls < V8M_NUM_SIZE_CLASSES) {
+		if (__builtin_expect(cls < V8M_NUM_SIZE_CLASSES, 1)) {
 			cache->request_count[cls]++;
 			cache->request_bytes[cls] += (uint64_t)request_size;
 		} else {

@@ -34,7 +34,8 @@ static size_t os_page_size(void)
 	return (size_t)page;
 }
 
-int v8m_anchor_reservation_init(struct v8m_anchor_reservation *res, size_t cap)
+__attribute__((cold)) int
+v8m_anchor_reservation_init(struct v8m_anchor_reservation *res, size_t cap)
 {
 	if (res == NULL) {
 		return -EINVAL;
@@ -65,7 +66,8 @@ int v8m_anchor_reservation_init(struct v8m_anchor_reservation *res, size_t cap)
 	return 0;
 }
 
-void v8m_anchor_reservation_destroy(struct v8m_anchor_reservation *res)
+__attribute__((cold)) void
+v8m_anchor_reservation_destroy(struct v8m_anchor_reservation *res)
 {
 	if (res == NULL || res->base == NULL) {
 		return;

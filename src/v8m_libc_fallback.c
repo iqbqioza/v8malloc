@@ -67,7 +67,7 @@ void v8m_libc_free(void *ptr)
 {
 	libc_free_fn func =
 	    atomic_load_explicit(&g_libc_free, memory_order_acquire);
-	if (func != NULL) {
+	if (__builtin_expect(func != NULL, 1)) {
 		func(ptr);
 	}
 }
@@ -76,7 +76,7 @@ void *v8m_libc_malloc(size_t size)
 {
 	libc_malloc_fn func =
 	    atomic_load_explicit(&g_libc_malloc, memory_order_acquire);
-	if (func != NULL) {
+	if (__builtin_expect(func != NULL, 1)) {
 		return func(size);
 	}
 	return NULL;

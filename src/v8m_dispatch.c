@@ -159,7 +159,7 @@ try_tlc_fast_paths(struct v8m_dispatch *dispatch, uint32_t cls)
 	uint32_t cur_cpu = v8m_numa_current_cpu();
 	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
 	size_t got = 0;
-	if (l2_cache != NULL) {
+	if (__builtin_expect(l2_cache != NULL, 1)) {
 		got = v8m_core_cache_pop_batch(l2_cache, cls, batch_size,
 					       &batch_head, &batch_tail);
 	}
@@ -205,7 +205,7 @@ static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
 					uint32_t cls)
 {
 	struct v8m_core_cache *l2_cache = v8m_core_cache_for_current_cpu();
-	if (l2_cache != NULL) {
+	if (__builtin_expect(l2_cache != NULL, 1)) {
 		void *chain_head = NULL;
 		void *chain_tail = NULL;
 		uint32_t batch_size =
@@ -221,7 +221,7 @@ static void slab_overflow_to_l2_or_slab(struct v8m_dispatch *dispatch,
 	(void)v8m_thread_cache_flush_half(cache, &dispatch->slab, cls);
 }
 
-int v8m_dispatch_init(struct v8m_dispatch *dispatch)
+__attribute__((cold)) int v8m_dispatch_init(struct v8m_dispatch *dispatch)
 {
 	int ret = v8m_slab_pool_init(&dispatch->slab);
 	if (ret != 0) {
@@ -327,7 +327,7 @@ void v8m_dispatch_fold_alloc_free(uint64_t allocs, uint64_t frees)
 	}
 }
 
-void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void v8m_dispatch_destroy(struct v8m_dispatch *dispatch)
 {
 	v8m_buddy_pool_destroy(&dispatch->buddy);
 	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
@@ -341,10 +341,9 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 {
 	/* malloc(0) — POSIX permits NULL or a unique pointer; return a
 	 * unique pointer so that downstream code that frees the result
-	 * doesn't need a special-case branch. */
-	if (size == 0) {
-		size = 1;
-	}
+	 * doesn't need a special-case branch. Branchless coerce so the
+	 * happy path emits no compare/jump. */
+	size += (size_t)(size == 0U);
 
 	uint32_t cls = v8m_size_class(size);
 	v8m_thread_cache_record_alloc(cls, size);
@@ -403,10 +402,8 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 void *v8m_dispatch_alloc_aligned(struct v8m_dispatch *dispatch, size_t size,
 				 size_t alignment)
 {
-	if (size == 0) {
-		size = 1;
-	}
-	if (alignment <= V8M_MALLOC_NATURAL_ALIGN) {
+	size += (size_t)(size == 0U);
+	if (__builtin_expect(alignment <= V8M_MALLOC_NATURAL_ALIGN, 1)) {
 		return v8m_dispatch_alloc(dispatch, size);
 	}
 	/* Record the user's raw `size` (not the alignment-bumped
@@ -560,7 +557,7 @@ size_t v8m_dispatch_usable_size(struct v8m_dispatch *dispatch, const void *ptr)
  * default slab → lifetime arenas → buddy; release in the exact
  * reverse so any other fork handler ordering is consistent.
  */
-void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
 {
 	(void)pthread_mutex_lock(&dispatch->slab.lock);
 	for (uint32_t i = 0; i < V8M_ARENA_COUNT - 1U; i++) {
@@ -570,7 +567,8 @@ void v8m_dispatch_prefork(struct v8m_dispatch *dispatch)
 	v8m_page_heap_prefork();
 }
 
-void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void
+v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
 {
 	v8m_page_heap_postfork_parent();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);
@@ -581,7 +579,8 @@ void v8m_dispatch_postfork_parent(struct v8m_dispatch *dispatch)
 	(void)pthread_mutex_unlock(&dispatch->slab.lock);
 }
 
-void v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
+__attribute__((cold)) void
+v8m_dispatch_postfork_child(struct v8m_dispatch *dispatch)
 {
 	v8m_page_heap_postfork_child();
 	(void)pthread_mutex_unlock(&dispatch->buddy.lock);

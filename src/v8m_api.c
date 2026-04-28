@@ -120,7 +120,7 @@ static void v8m_collect_live_stats(struct v8m_live_stats *out)
 	out->live_bytes = stats.bytes_mapped - stats.bytes_unmapped;
 }
 
-static void abort_with(const char *msg)
+__attribute__((cold, noreturn)) static void abort_with(const char *msg)
 {
 	(void)write(STDERR_FILENO, msg, strlen(msg));
 	abort();
@@ -169,7 +169,7 @@ static pthread_mutex_t g_double_free_ring_lock;
  *   3. bg-purge tick mutex
  *   4. double-free-ring mutex (api.c-owned)
  * Release order in postfork is the exact reverse. */
-static void v8m_atfork_prepare(void)
+__attribute__((cold)) static void v8m_atfork_prepare(void)
 {
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	    V8M_INIT_READY) {
@@ -180,7 +180,7 @@ static void v8m_atfork_prepare(void)
 	(void)pthread_mutex_lock(&g_double_free_ring_lock);
 }
 
-static void v8m_atfork_parent(void)
+__attribute__((cold)) static void v8m_atfork_parent(void)
 {
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
@@ -191,7 +191,7 @@ static void v8m_atfork_parent(void)
 	}
 }
 
-static void v8m_atfork_child(void)
+__attribute__((cold)) static void v8m_atfork_child(void)
 {
 	(void)pthread_mutex_unlock(&g_double_free_ring_lock);
 	if (atomic_load_explicit(&g_init_state, memory_order_acquire) ==
@@ -472,7 +472,7 @@ __attribute__((destructor(101))) static void v8m_destructor(void)
 				       memory_order_acquire);
 }
 
-static bool dispatch_ready(void)
+static inline bool dispatch_ready(void)
 {
 	return atomic_load_explicit(&g_init_state, memory_order_acquire) ==
 	       V8M_INIT_READY;
@@ -491,13 +491,13 @@ static bool over_soft_limit(size_t size)
 {
 	size_t limit =
 	    atomic_load_explicit(&g_soft_limit, memory_order_relaxed);
-	if (limit == 0U) {
+	if (__builtin_expect(limit == 0U, 1)) {
 		return false;
 	}
 	struct v8m_page_heap_stats stats = {0};
 	v8m_page_heap_get_stats(&stats);
 	uint64_t live = stats.bytes_mapped - stats.bytes_unmapped;
-	if (live + size <= limit) {
+	if (__builtin_expect(live + size <= limit, 1)) {
 		return false;
 	}
 	/* Live bytes count drained-but-still-mapped buddy arenas; under
@@ -542,7 +542,7 @@ static bool oom_handler_says_retry(size_t size)
  * limit) is what motivated the helper. */
 static bool pre_alloc_soft_limit_gate(size_t size)
 {
-	if (!over_soft_limit(size)) {
+	if (__builtin_expect(!over_soft_limit(size), 1)) {
 		return true;
 	}
 	if (oom_handler_says_retry(size) && !over_soft_limit(size)) {
@@ -944,7 +944,7 @@ V8M_EXPORT void *v8m_reallocarray(void *ptr, size_t nmemb, size_t size)
  * is_pow2 — true iff `value` is a non-zero power of two. Used to
  * validate the alignment argument of every aligned-alloc entry.
  */
-static bool is_pow2(size_t value)
+static inline bool is_pow2(size_t value)
 {
 	return value != 0U && (value & (value - 1U)) == 0U;
 }

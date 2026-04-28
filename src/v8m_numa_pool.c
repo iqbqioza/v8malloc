@@ -89,7 +89,7 @@ static bool list_unlink(struct v8m_huge_slab **head,
 	return false;
 }
 
-int v8m_numa_pool_init(struct v8m_numa_pool *pool)
+__attribute__((cold)) int v8m_numa_pool_init(struct v8m_numa_pool *pool)
 {
 	if (pool == NULL) {
 		return -EINVAL;
@@ -121,7 +121,7 @@ static void destroy_list(struct v8m_huge_slab *head)
 	}
 }
 
-void v8m_numa_pool_destroy(struct v8m_numa_pool *pool)
+__attribute__((cold)) void v8m_numa_pool_destroy(struct v8m_numa_pool *pool)
 {
 	if (pool == NULL) {
 		return;

@@ -94,7 +94,7 @@ static bool parse_int64(const char *text, int64_t *out)
 	return true;
 }
 
-void v8m_config_init(void)
+__attribute__((cold)) void v8m_config_init(void)
 {
 	for (int i = 0; i < V8M_OPT_COUNT; i++) {
 		int64_t value = v8m_config_defaults[i];

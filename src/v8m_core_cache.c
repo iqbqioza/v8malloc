@@ -90,7 +90,9 @@ struct v8m_core_cache *v8m_core_cache_for_current_cpu(void)
 
 bool v8m_core_cache_push(struct v8m_core_cache *cache, uint32_t cls, void *node)
 {
-	if (cache == NULL || node == NULL || cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || node == NULL ||
+				 cls >= V8M_NUM_SIZE_CLASSES,
+			     0)) {
 		return false;
 	}
 	v8m_tagged_ptr old_head =
@@ -139,8 +141,9 @@ void *v8m_core_cache_pop(struct v8m_core_cache *cache, uint32_t cls)
 bool v8m_core_cache_push_batch(struct v8m_core_cache *cache, uint32_t cls,
 			       void *head, void *tail)
 {
-	if (cache == NULL || head == NULL || tail == NULL ||
-	    cls >= V8M_NUM_SIZE_CLASSES) {
+	if (__builtin_expect(cache == NULL || head == NULL || tail == NULL ||
+				 cls >= V8M_NUM_SIZE_CLASSES,
+			     0)) {
 		return false;
 	}
 	v8m_tagged_ptr old_head =
@@ -239,50 +242,49 @@ size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 		}
 		return 0;
 	}
-	/* Single-CAS batch pop: walk `max` links on a snapshot of the
-	 * stack, then atomically swing the head to the node after the
-	 * last one we want. On a CAS failure, retry from the new head
-	 * — the chain is rebuilt by whatever contender updated it. */
-	v8m_tagged_ptr old_head =
-	    atomic_load_explicit(&cache->stacks[cls], memory_order_acquire);
-	for (;;) {
-		void *first = v8m_tagptr_ptr(old_head);
-		if (first == NULL) {
-			*out_head = NULL;
-			*out_tail = NULL;
-			return 0;
+	/* Iterative single-CAS pop. The earlier "snapshot then walk"
+	 * approach was unsafe: between snapshotting the head and
+	 * reading `next` from interior nodes, a concurrent single-pop
+	 * could remove and recycle those nodes (their memory becomes a
+	 * caller's payload). Walking through payload-as-`next` then
+	 * dereferences garbage and SEGVs — reproduced as the
+	 * mb_03_producer_consumer crash.
+	 *
+	 * A "detach-then-walk-then-restore" alternative (CAS head→NULL,
+	 * walk owned chain, push surplus back) is also correct, but
+	 * measured ~40× worse on mb_03 because every pop_batch contends
+	 * for exclusive ownership of the entire stack and forces a full
+	 * surplus-chain walk to find its tail.
+	 *
+	 * The iterative pop claims one node at a time via the existing
+	 * single-pop CAS — each claim atomically validates the head
+	 * before we ever dereference the node. Popped nodes are
+	 * prepended to a chain so the returned head/tail describe a
+	 * valid singly-linked list. */
+	void *chain_head = NULL;
+	void *chain_tail = NULL;
+	size_t count = 0;
+	while (count < max) {
+		void *node = v8m_core_cache_pop(cache, cls);
+		if (node == NULL) {
+			break;
 		}
-		/* Walk up to `max` nodes, keeping a pointer to the
-		 * current tail and the node that follows it. */
-		void *tail = first;
-		void *after_tail = NULL;
-		size_t count = 1;
-		while (count < max) {
-			void *next = NULL;
-			(void)memcpy((void *)&next, tail, sizeof(next));
-			if (next == NULL) {
-				break;
-			}
-			tail = next;
-			count++;
+		if (chain_head == NULL) {
+			chain_head = node;
+			chain_tail = node;
+		} else {
+			(void)memcpy(node, (const void *)&chain_head,
+				     sizeof(chain_head));
+			chain_head = node;
 		}
-		/* Read the node that follows `tail` — that's where the
-		 * stack head will point after our pop. */
-		(void)memcpy((void *)&after_tail, tail, sizeof(after_tail));
-		uint16_t new_tag = (uint16_t)(v8m_tagptr_tag(old_head) + 1U);
-		v8m_tagged_ptr new_head = v8m_tagptr_make(after_tail, new_tag);
-		if (atomic_compare_exchange_weak_explicit(
-			&cache->stacks[cls], &old_head, new_head,
-			memory_order_acquire, memory_order_acquire)) {
-			/* Terminate the extracted chain. */
-			void *terminator = NULL;
-			(void)memcpy(tail, (const void *)&terminator,
-				     sizeof(terminator));
-			*out_head = first;
-			*out_tail = tail;
-			return count;
-		}
-		/* CAS failed — old_head was refreshed by the cmpxchg;
-		 * retry with the new snapshot. */
+		count++;
 	}
+	if (count > 0U) {
+		void *terminator = NULL;
+		(void)memcpy(chain_tail, (const void *)&terminator,
+			     sizeof(terminator));
+	}
+	*out_head = chain_head;
+	*out_tail = chain_tail;
+	return count;
 }

@@ -194,7 +194,7 @@ static void apply_cpulist(const char *list, uint32_t node_id)
 	}
 }
 
-void v8m_numa_init(void)
+__attribute__((cold)) void v8m_numa_init(void)
 {
 	bool expected = false;
 	if (!atomic_compare_exchange_strong_explicit(&g_initialized, &expected,
