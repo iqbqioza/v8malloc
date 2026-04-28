@@ -24,6 +24,7 @@
 #include <unistd.h> /* syscall */
 
 #include "v8m_arch.h" /* V8M_CACHE_LINE_SIZE for aligned_alloc */
+#include "v8m_buddy_pool.h" /* v8m_buddy_pool_free for medium-bin drain */
 #include "v8m_config.h" /* v8m_config_get for the migration opt-in */
 /* v8m_arch_rdtsc + tsc_frequency_mhz live in v8m_arch.h via the
  * same include above — no extra include needed. */
@@ -503,6 +504,86 @@ __attribute__((hot)) bool v8m_thread_cache_free(struct v8m_thread_cache *cache,
 	cache->free_count_per_class[cls]++;
 	tlc_tick_gc(cache);
 	return cache->bin_count[cls] >= cache->bin_capacity[cls];
+}
+
+/* Per-class compile-time caps for medium-class TLC. See the
+ * matching note in v8m_thread_cache.h for the RSS-budget
+ * justification. */
+static const uint8_t k_medium_bin_caps[V8M_MEDIUM_TLC_NUM_CLASSES] = {
+    4U, /* cls 32 (8 KiB) */
+    4U, /* cls 33 (16 KiB) */
+    2U, /* cls 34 (32 KiB) */
+    2U, /* cls 35 (64 KiB) */
+    1U, /* cls 36 (128 KiB) */
+    1U, /* cls 37 (256 KiB) */
+};
+
+__attribute__((hot)) void *
+v8m_thread_cache_medium_alloc(struct v8m_thread_cache *cache, uint32_t cls)
+{
+	if (__builtin_expect(cache == NULL, 0)) {
+		return NULL;
+	}
+	if (__builtin_expect(cls < V8M_MEDIUM_TLC_FIRST_CLASS ||
+				 cls > V8M_MEDIUM_TLC_LAST_CLASS,
+			     0)) {
+		return NULL;
+	}
+	uint32_t idx = cls - V8M_MEDIUM_TLC_FIRST_CLASS;
+	void *head = cache->medium_bin_heads[idx];
+	if (head == NULL) {
+		return NULL;
+	}
+	void *next = NULL;
+	(void)memcpy((void *)&next, head, sizeof(next));
+	cache->medium_bin_heads[idx] = next;
+	cache->medium_bin_count[idx]--;
+	return head;
+}
+
+__attribute__((hot)) bool
+v8m_thread_cache_medium_free(struct v8m_thread_cache *cache, uint32_t cls,
+			     void *obj)
+{
+	if (cache == NULL || obj == NULL) {
+		return true;
+	}
+	if (cls < V8M_MEDIUM_TLC_FIRST_CLASS ||
+	    cls > V8M_MEDIUM_TLC_LAST_CLASS) {
+		return true;
+	}
+	uint32_t idx = cls - V8M_MEDIUM_TLC_FIRST_CLASS;
+	if (cache->medium_bin_count[idx] >= k_medium_bin_caps[idx]) {
+		return true; /* caller must free `obj` directly to buddy pool */
+	}
+	void *prev_head = cache->medium_bin_heads[idx];
+	(void)memcpy(obj, (const void *)&prev_head, sizeof(prev_head));
+	cache->medium_bin_heads[idx] = obj;
+	cache->medium_bin_count[idx]++;
+	return false;
+}
+
+size_t v8m_thread_cache_drain_medium(struct v8m_thread_cache *cache,
+				     void *dispatch_buddy)
+{
+	if (cache == NULL || dispatch_buddy == NULL) {
+		return 0;
+	}
+	struct v8m_buddy_pool *pool = (struct v8m_buddy_pool *)dispatch_buddy;
+	size_t total = 0;
+	for (uint32_t idx = 0; idx < V8M_MEDIUM_TLC_NUM_CLASSES; idx++) {
+		void *head = cache->medium_bin_heads[idx];
+		while (head != NULL) {
+			void *next = NULL;
+			(void)memcpy((void *)&next, head, sizeof(next));
+			(void)v8m_buddy_pool_free(pool, head);
+			head = next;
+			total++;
+		}
+		cache->medium_bin_heads[idx] = NULL;
+		cache->medium_bin_count[idx] = 0;
+	}
+	return total;
 }
 
 /*

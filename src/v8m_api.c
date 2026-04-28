@@ -142,6 +142,11 @@ bool v8m_api_dispatch_ready(void)
 	return dispatch_ready();
 }
 
+bool v8m_api_soft_limit_active(void)
+{
+	return atomic_load_explicit(&g_soft_limit, memory_order_relaxed) != 0U;
+}
+
 /* pthread_atfork wrappers — pthread_atfork takes parameter-less
  * function pointers, so the handlers thunk through to the dispatch
  * helpers using the global g_dispatch instance. Each one early-outs
@@ -226,6 +231,7 @@ static void v8m_api_drain_thread_cache(struct v8m_thread_cache *cache)
 		return;
 	}
 	(void)v8m_thread_cache_drain_all(cache, &g_dispatch.slab);
+	(void)v8m_thread_cache_drain_medium(cache, &g_dispatch.buddy);
 }
 
 __attribute__((constructor(101))) static void v8m_constructor(void)
@@ -1442,6 +1448,8 @@ V8M_EXPORT void v8m_purge(void)
 		if (cache != NULL) {
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
+			(void)v8m_thread_cache_drain_medium(cache,
+							    &g_dispatch.buddy);
 		}
 		/* Drain the calling thread's current-CPU L2 too —
 		 * slots cached there hold slab pages alive past the
@@ -1466,6 +1474,8 @@ V8M_EXPORT void v8m_purge_thread(void)
 		if (cache != NULL) {
 			(void)v8m_thread_cache_drain_all(cache,
 							 &g_dispatch.slab);
+			(void)v8m_thread_cache_drain_medium(cache,
+							    &g_dispatch.buddy);
 		}
 		(void)v8m_dispatch_drain_local_l2(&g_dispatch);
 	}

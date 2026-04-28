@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h> /* memcpy for the L2 chain traversal */
 
+#include "v8m_api_internal.h" /* v8m_api_soft_limit_active for medium-TLC gating */
 #include "v8m_arch.h"
 #include "v8m_buddy.h"
 #include "v8m_buddy_pool.h"
@@ -386,6 +387,24 @@ __attribute__((hot)) void *v8m_dispatch_alloc(struct v8m_dispatch *dispatch,
 		    slab_pool_for_arena(dispatch, arena_id), cls, 0, arena_id);
 	}
 	if (size <= V8M_BUDDY_MAX_BLOCK) {
+		/* Medium-class TLC fast path: per-thread bin pop for
+		 * classes 32..37 (8 KiB..256 KiB). The bins are
+		 * compile-time capped (see V8M_MEDIUM_TLC_*) so they
+		 * cannot grow unboundedly; misses fall through to the
+		 * single-mutex buddy pool unchanged. Gated on
+		 * `use_tlc` for the same reason as the slab path:
+		 * test fixtures with private dispatchers stay off. */
+		if (__builtin_expect(dispatch->use_tlc, 1)) {
+			struct v8m_thread_cache *cache =
+			    v8m_thread_cache_get_or_create();
+			if (__builtin_expect(cache != NULL, 1)) {
+				void *cached =
+				    v8m_thread_cache_medium_alloc(cache, cls);
+				if (__builtin_expect(cached != NULL, 0)) {
+					return cached;
+				}
+			}
+		}
 		return v8m_buddy_pool_alloc(&dispatch->buddy, size);
 	}
 	return v8m_large_alloc(size, 0);
@@ -524,7 +543,41 @@ __attribute__((hot)) void v8m_dispatch_free(struct v8m_dispatch *dispatch,
 	/* No magic at the page base — must be a buddy allocation
 	 * (buddy arenas don't stamp v8m_page_meta). The page-heap
 	 * ownership check above already excluded foreign pointers,
-	 * so this is the only remaining backend. */
+	 * so this is the only remaining backend.
+	 *
+	 * Medium-class TLC: try to cache the freed block in the
+	 * calling thread's per-class bin first. The bin caps are
+	 * tiny (1..4 entries) so caching never bloats RSS beyond
+	 * ~672 KiB / thread; on overflow (or if TLC is unavailable)
+	 * the block goes back to the buddy pool unchanged.
+	 *
+	 * Soft-limit gating: cached blocks still count against
+	 * `live_bytes`, so a tight `v8m_set_soft_limit` would
+	 * otherwise keep tripping after an OOM-handler frees
+	 * pressure-relief blocks (the freed block sits in TLC and
+	 * the retry still sees the same live_bytes). Skipping the
+	 * TLC when a soft limit is armed keeps the soft-limit
+	 * contract intact at the cost of one TLC pop per medium
+	 * free under pressure (a path that is already cold). */
+	if (__builtin_expect(dispatch->use_tlc && !v8m_api_soft_limit_active(),
+			     1)) {
+		struct v8m_thread_cache *cache =
+		    v8m_thread_cache_get_or_create();
+		if (__builtin_expect(cache != NULL, 1)) {
+			size_t blk =
+			    v8m_buddy_pool_block_size(&dispatch->buddy, ptr);
+			if (blk != 0U) {
+				uint32_t cls = v8m_size_class(blk);
+				if (cls >= V8M_MEDIUM_TLC_FIRST_CLASS &&
+				    cls <= V8M_MEDIUM_TLC_LAST_CLASS) {
+					if (!v8m_thread_cache_medium_free(
+						cache, cls, ptr)) {
+						return;
+					}
+				}
+			}
+		}
+	}
 	(void)v8m_buddy_pool_free(&dispatch->buddy, ptr);
 }
 

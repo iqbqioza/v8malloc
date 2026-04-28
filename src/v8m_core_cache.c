@@ -259,8 +259,11 @@ size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 	 * The iterative pop claims one node at a time via the existing
 	 * single-pop CAS — each claim atomically validates the head
 	 * before we ever dereference the node. Popped nodes are
-	 * prepended to a chain so the returned head/tail describe a
-	 * valid singly-linked list. */
+	 * appended to the chain tail so the returned head/tail
+	 * describe a singly-linked list whose order matches the
+	 * sequence in which nodes were popped (matching the
+	 * push_batch contract: the chain head was the stack top, so
+	 * the first popped node is the chain head). */
 	void *chain_head = NULL;
 	void *chain_tail = NULL;
 	size_t count = 0;
@@ -273,9 +276,10 @@ size_t v8m_core_cache_pop_batch(struct v8m_core_cache *cache, uint32_t cls,
 			chain_head = node;
 			chain_tail = node;
 		} else {
-			(void)memcpy(node, (const void *)&chain_head,
-				     sizeof(chain_head));
-			chain_head = node;
+			/* append: tail->next = node, then tail = node */
+			(void)memcpy(chain_tail, (const void *)&node,
+				     sizeof(node));
+			chain_tail = node;
 		}
 		count++;
 	}
