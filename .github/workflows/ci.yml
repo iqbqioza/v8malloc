@@ -32,7 +32,7 @@ jobs:
         build_type: [Debug, Release]
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install toolchain
         # Clang Release uses thin LTO + llvm-ar / llvm-ranlib / lld
         # (see the toolchain wiring in the top-level CMakeLists).
@@ -68,7 +68,7 @@ jobs:
     name: LD_PRELOAD smoke (real binaries)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
@@ -99,7 +99,7 @@ jobs:
     name: clang + UBSan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
@@ -120,7 +120,7 @@ jobs:
     name: format-check + tidy + cppcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
